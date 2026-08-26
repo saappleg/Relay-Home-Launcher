@@ -1642,14 +1642,16 @@ private fun DetailsScreen(item: MediaItem, palette: RelayPalette, dateFormat: Re
                             Spacer(Modifier.height(9.dp))
                             LazyRow(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
                                 if (expandedEpisodeSelector == "season") {
-                                    items(pickerData?.seasons ?: listOf(selectedSeason)) { value ->
+                                    // TMDB gives the exact season list when it can resolve the show.
+                                    // Keep the picker useful for Nuvio titles that lack a confident match.
+                                    items(pickerData?.seasons?.takeIf { it.isNotEmpty() } ?: (1..20).toList()) { value ->
                                         ActionButton("Season $value", palette, primary = value == selectedSeason, upFocusRequester = seasonFocusRequester) {
                                             selectedSeason = value
                                             expandedEpisodeSelector = null
                                         }
                                     }
                                 } else {
-                                    items(pickerData?.episodes ?: listOf(TvEpisode(selectedEpisode, "Episode $selectedEpisode"))) { value ->
+                                    items(pickerData?.episodes?.takeIf { it.isNotEmpty() } ?: (1..50).map { TvEpisode(it, "Episode $it") }) { value ->
                                         ActionButton("E${value.number.toString().padStart(2, '0')}  ${value.title}", palette, primary = value.number == selectedEpisode, upFocusRequester = episodeFocusRequester) {
                                             selectedEpisode = value.number
                                             expandedEpisodeSelector = null
