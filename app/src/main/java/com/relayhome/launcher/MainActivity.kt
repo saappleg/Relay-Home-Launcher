@@ -903,14 +903,14 @@ private fun MediaCard(
     val bringIntoViewRequester = remember { BringIntoViewRequester() }
     var extractedAccent by remember(item.artworkUrl) { mutableStateOf<Color?>(null) }
     val scale by animateFloatAsState(if (focused) 1.055f else 1f, label = "card scale")
-    val shape = RoundedCornerShape(11.dp)
+    val shape = RoundedCornerShape(16.dp)
     val width = if (poster) 140.dp else 310.dp
     Box(
         modifier = Modifier.requiredWidth(width).aspectRatio(if (poster) .69f else 1.78f)
             .scale(scale).clip(shape)
             .background(Brush.verticalGradient(item.colors))
             .bringIntoViewRequester(bringIntoViewRequester)
-            .border(if (focused) 3.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .12f), shape)
+            .border(if (focused) 2.dp else 1.dp, if (focused) ivory.copy(alpha = .78f) else Color.White.copy(alpha = .12f), shape)
             .clickable(interactionSource = source, indication = null, onClick = onClick)
             .then(if (upFocusRequester != null) Modifier.focusProperties { up = upFocusRequester } else Modifier)
             .focusable(interactionSource = source)
