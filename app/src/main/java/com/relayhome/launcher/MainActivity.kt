@@ -691,7 +691,7 @@ private fun AppPeekPanel(
                             .size(126.dp, 82.dp)
                             .scale(if (focused) 1.08f else 1f)
                             .clip(RoundedCornerShape(9.dp))
-                            .border(if (focused) 2.dp else if (selected) 1.dp else 0.dp, if (focused) palette.accent else provider.accent.copy(alpha = .55f), RoundedCornerShape(9.dp))
+                            .border(if (focused) 2.dp else if (selected) 1.dp else 0.dp, ivory.copy(alpha = if (focused) .78f else .28f), RoundedCornerShape(14.dp))
                             .clickable(interactionSource = source, indication = null) { onItemSelected(item) }
                             .focusable(interactionSource = source)
                     ) {
@@ -908,13 +908,12 @@ private fun MediaCard(
     Box(
         modifier = Modifier.requiredWidth(width).aspectRatio(if (poster) .69f else 1.78f)
             .scale(scale).clip(shape)
-            .background(Brush.verticalGradient(item.colors))
+            .background(Color(0xFF141519))
             .bringIntoViewRequester(bringIntoViewRequester)
             .border(if (focused) 2.dp else 1.dp, if (focused) ivory.copy(alpha = .78f) else Color.White.copy(alpha = .12f), shape)
             .clickable(interactionSource = source, indication = null, onClick = onClick)
             .then(if (upFocusRequester != null) Modifier.focusProperties { up = upFocusRequester } else Modifier)
             .focusable(interactionSource = source)
-            .padding(13.dp)
     ) {
         AsyncImage(
             model = ImageRequest.Builder(LocalContext.current)
