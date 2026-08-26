@@ -37,23 +37,17 @@ internal object ProviderHandoff {
         }
     }
 
-    /** Opens Nuvio at the selected title, or its saved resume target when one exists. */
+    /** Opens Nuvio's title detail page so the viewer can choose a stream in Nuvio. */
     fun openNuvioEpisode(context: Context, item: MediaItem) {
         val contentId = item.providerContentId
         if (contentId.isNullOrBlank()) {
             openNuvio(context)
             return
         }
-        val uri = if (item.progress > 0f) {
-            Uri.parse("nuvio://continue-watching").buildUpon()
-                .appendQueryParameter("id", contentId)
-                .build()
-        } else {
-            Uri.parse("nuvio://meta").buildUpon()
-                .appendQueryParameter("type", item.contentType)
-                .appendQueryParameter("id", contentId)
-                .build()
-        }
+        val uri = Uri.parse("nuvio://meta").buildUpon()
+            .appendQueryParameter("type", item.contentType)
+            .appendQueryParameter("id", contentId)
+            .build()
         val intent = Intent(Intent.ACTION_VIEW, uri)
             .setPackage(nuvioPackage)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)

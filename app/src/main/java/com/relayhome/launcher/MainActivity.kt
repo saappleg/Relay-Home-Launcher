@@ -297,6 +297,7 @@ private fun RelayHomeApp() {
                     nuvioItemCount = nuvioMedia.size,
                     nuvioSyncError = nuvioSyncError,
                     onRefreshNuvio = { nuvioRefreshGeneration++ },
+                    onManageProvider = { provider -> activeProvider = provider; destination = Destination.PROVIDER },
                     dateFormat = dateFormat,
                     onDateFormatChanged = {
                         dateFormat = it
@@ -400,13 +401,14 @@ private fun HomeScreen(
     }
     // The primary rail is deliberately provider-neutral: real Nuvio progress,
     // active SmartTube playback, and each enabled provider's available feed.
-    val continueWatching = remember(providers, nuvioItems, smartTubeItem) {
-        (listOfNotNull(smartTubeItem) + nuvioItems + sampleContinueWatching(providers).filter { it.provider != Provider.NUVIO })
+    val nuvioOnly = providers == setOf(Provider.NUVIO)
+    val continueWatching = remember(providers, nuvioItems, smartTubeItem, nuvioOnly) {
+        (if (nuvioOnly) nuvioItems else listOfNotNull(smartTubeItem) + nuvioItems + sampleContinueWatching(providers).filter { it.provider != Provider.NUVIO })
             .filter { it.provider in providers }
             .distinctBy { "${it.provider}:${it.providerContentId ?: it.title}" }
     }
-    val recommendationItems = remember(providers, recommendations) {
-        recommendations.filter { it.provider in providers }.ifEmpty { sampleRecommended(providers) }
+    val recommendationItems = remember(providers, recommendations, nuvioOnly) {
+        recommendations.filter { it.provider in providers }.ifEmpty { if (nuvioOnly) emptyList() else sampleRecommended(providers) }
     }
     val homeScope = rememberCoroutineScope()
     // Do not restore a previous focus-scroll offset into the hero when returning to Home.
@@ -522,7 +524,7 @@ private fun TopBar(
         Spacer(Modifier.weight(1f))
         TopDestination("Home", selected = true, palette = palette, focusRequester = homeFocusRequester, downFocusRequester = heroFocusRequester, onFocused = { if (it) onPeekProvider(null) }) { onDestination(Destination.HOME) }
         providers.sortedBy { it.label }.forEach { provider ->
-            TopDestination(provider.label, selected = false, palette = palette, downFocusRequester = peekFocusRequester, onFocused = { if (it) onPeekProvider(provider) }) { onProvider(provider) }
+            TopDestination(provider.label, selected = false, palette = palette, downFocusRequester = peekFocusRequester, onFocused = { if (it) onPeekProvider(provider) }) { onPeekProvider(provider) }
         }
         TopDestination("Calendar", selected = false, palette = palette) { onDestination(Destination.CALENDAR) }
         TopDestination("Apps", selected = false, palette = palette) { onDestination(Destination.APPS) }
@@ -1300,6 +1302,7 @@ private fun SettingsScreen(
     nuvioItemCount: Int,
     nuvioSyncError: String?,
     onRefreshNuvio: () -> Unit,
+    onManageProvider: (Provider) -> Unit,
     dateFormat: RelayDateFormat,
     onDateFormatChanged: (RelayDateFormat) -> Unit
 ) {
@@ -1341,6 +1344,7 @@ private fun SettingsScreen(
                     Provider.values().forEach { provider ->
                         val connected = provider in providers
                         ActionButton("${provider.label}  ${if (connected) "Shown" else "Add to Home"}", palette, primary = connected) { onProviderToggle(provider) }
+                        ActionButton(if (provider == Provider.NUVIO && nuvioConnected) "Manage ${provider.label}" else "Connect ${provider.label}", palette.copy(accent = provider.accent), primary = false) { onManageProvider(provider) }
                     }
                 }
                 Spacer(Modifier.height(30.dp))
