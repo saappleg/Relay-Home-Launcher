@@ -1,0 +1,18 @@
+name: Bug report
+description: Report a reproducible Relay Home problem
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: D-pad steps to reproduce
+      description: Include Up, Down, Left, Right, Back, and Select actions.
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: Device and Android TV version
