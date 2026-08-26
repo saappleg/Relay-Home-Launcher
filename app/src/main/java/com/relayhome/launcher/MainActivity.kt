@@ -821,7 +821,9 @@ private fun ActionButton(
     LaunchedEffect(focused) { onFocused(focused) }
     Text(
         label,
-        color = if (primary) midnight else ivory,
+        // Use an explicit opaque ink color for light primary surfaces. On some TV renderers
+        // the themed backdrop color is composited away, leaving the action label invisible.
+        color = if (primary) Color(0xFF111318) else ivory,
         fontSize = 17.sp,
         fontWeight = FontWeight.SemiBold,
         modifier = (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
