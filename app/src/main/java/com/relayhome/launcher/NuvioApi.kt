@@ -22,11 +22,21 @@ internal object NuvioApi {
                 requestMethod = "POST"
                 doOutput = true
                 setRequestProperty("apikey", publishableKey)
+                setRequestProperty("Authorization", "Bearer $publishableKey")
+                setRequestProperty("Accept", "application/json")
                 setRequestProperty("Content-Type", "application/json")
+                connectTimeout = 12_000
+                readTimeout = 12_000
             }
             connection.outputStream.bufferedWriter().use { it.write(JSONObject().put("email", email).put("password", password).toString()) }
             val body = (if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream).bufferedReader().use { it.readText() }
-            check(connection.responseCode in 200..299) { JSONObject(body).optString("message", "Nuvio sign-in failed") }
+            check(connection.responseCode in 200..299) {
+                val error = JSONObject(body)
+                error.optString("error_description")
+                    .ifBlank { error.optString("message") }
+                    .ifBlank { error.optString("msg") }
+                    .ifBlank { "Nuvio sign-in failed (HTTP ${connection.responseCode})" }
+            }
             NuvioSession(JSONObject(body).getString("access_token"))
         }
     }
