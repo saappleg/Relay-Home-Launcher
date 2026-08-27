@@ -70,7 +70,9 @@ internal object TmdbApi {
     /** Personalized TV recommendations seeded by exact titles in the active provider library. */
     suspend fun recommendations(items: List<MediaItem>): List<MediaItem> = withContext(Dispatchers.IO) {
         if (apiKey.isBlank()) return@withContext emptyList()
-        items.take(6).flatMap { item -> runCatching { recommendationsFor(item) }.getOrDefault(emptyList()) }
+        // Three exact seeds already provide a full rail; avoid a burst of serial requests when
+        // Home opens on a TV with a slower connection.
+        items.take(3).flatMap { item -> runCatching { recommendationsFor(item) }.getOrDefault(emptyList()) }
             .distinctBy { it.title }
             .take(18)
     }
@@ -90,6 +92,7 @@ internal object TmdbApi {
                         progress = 0f,
                         colors = listOf(provider.accent.copy(alpha = .45f), Color(0xFF080A10)),
                         artworkUrl = result.optString("poster_path").takeIf { it.isNotBlank() }?.let { "https://image.tmdb.org/t/p/w780$it" }.orEmpty(),
+                        providerContentId = "tmdb:${result.optInt("id")}",
                         contentType = type,
                         showTitle = if (type == "tv") title else null,
                         description = result.optString("overview").ifBlank { null },
@@ -117,6 +120,7 @@ internal object TmdbApi {
                     progress = 0f,
                     colors = listOf(source.provider.accent.copy(alpha = .45f), Color(0xFF080A10)),
                     artworkUrl = show.optString("poster_path").takeIf { it.isNotBlank() }?.let { "https://image.tmdb.org/t/p/w780$it" }.orEmpty(),
+                    providerContentId = "tmdb:${show.optInt("id")}",
                     contentType = "tv",
                     showTitle = title,
                     description = show.optString("overview").ifBlank { null },
@@ -133,6 +137,14 @@ internal object TmdbApi {
         val series = (search.optJSONArray("results") ?: JSONArray()).optJSONObject(0) ?: return null
         if (normalize(series.optString("name")) != normalize(queryTitle)) return null
         val details = JSONObject(get("/tv/${series.getInt("id")}"))
+        // Episode stills are optional in TMDB. Always keep the rail visually complete by
+        // falling back to the show's own backdrop/poster before falling back to provider art.
+        val seriesArtwork = tmdbArtwork(details.optString("backdrop_path"), "w1280")
+            ?: tmdbArtwork(details.optString("poster_path"), "w780")
+            ?: tmdbArtwork(series.optString("backdrop_path"), "w1280")
+            ?: tmdbArtwork(series.optString("poster_path"), "w780")
+            ?: item.artworkUrl.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+            .orEmpty()
         val episode = details.optJSONObject("next_episode_to_air") ?: return null
         val airDate = episode.optString("air_date").takeIf { it.isNotBlank() } ?: return null
         val season = episode.optInt("season_number")
@@ -146,11 +158,16 @@ internal object TmdbApi {
                 episodeInfo = episodeInfo,
                 description = episode.optString("overview").ifBlank { item.description },
                 releaseInfo = airDate,
-                artworkUrl = episode.optString("still_path").takeIf { it.isNotBlank() }?.let { "https://image.tmdb.org/t/p/w1280$it" } ?: item.artworkUrl,
+                artworkUrl = tmdbArtwork(episode.optString("still_path"), "w1280") ?: seriesArtwork,
                 progress = 0f
             )
         )
     }
+
+    private fun tmdbArtwork(path: String?, size: String): String? = path
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() && !it.equals("null", ignoreCase = true) }
+        ?.let { "https://image.tmdb.org/t/p/$size$it" }
 
     private fun calendarEntry(item: MediaItem): TmdbCalendarEntry? {
         val queryTitle = item.showTitle ?: item.title

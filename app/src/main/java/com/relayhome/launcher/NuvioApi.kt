@@ -7,6 +7,7 @@ import org.json.JSONObject
 import org.json.JSONArray
 import java.net.HttpURLConnection
 import java.net.URL
+import java.time.Instant
 
 internal data class NuvioSession(val accessToken: String)
 internal data class NuvioProfile(val index: Int, val name: String, val color: String)
@@ -82,16 +83,24 @@ internal object NuvioApi {
                     if (season > 0 && episode > 0) add("S${season.toString().padStart(2, '0')} • E${episode.toString().padStart(2, '0')}")
                     if (episodeTitle.isNotBlank()) add(episodeTitle)
                 }.joinToString(" • ").ifBlank { null }
+                val title = item.firstString("name", "title", "display_name", "episode_title", "episode_name")
+                    ?: progressItem.firstString("name", "title", "display_name", "episode_title", "episode_name")
+                    ?: ""
+                val artworkUrl = item.firstString("background", "backdrop", "background_url", "poster", "poster_url", "image_url")
+                    ?: progressItem.firstString("background", "backdrop", "background_url", "poster", "poster_url", "image_url")
+                    ?: ""
+                // Nuvio can return a progress shell containing only season/episode numbers.
+                // It is not actionable without a title and image, so do not let it become a
+                // blank Peek card in Relay.
+                if ((showTitle ?: title).visibleRelayText().isBlank() || artworkUrl.visibleRelayText().isBlank()) {
+                    return@mapNotNull null
+                }
                 MediaItem(
-                    title = item.firstString("name", "title", "display_name", "episode_title", "episode_name")
-                        ?: progressItem.firstString("name", "title", "display_name", "episode_title", "episode_name")
-                        ?: "Untitled",
+                    title = title,
                     provider = Provider.NUVIO,
                     progress = if (duration > 0) (progressItem.optDouble("position") / duration).toFloat().coerceIn(0f, 1f) else 0f,
                     colors = listOf(Provider.NUVIO.accent.copy(alpha = .5f), Color(0xFF08060C)),
-                    artworkUrl = item.firstString("background", "backdrop", "background_url", "poster", "poster_url", "image_url")
-                        ?: progressItem.firstString("background", "backdrop", "background_url", "poster", "poster_url", "image_url")
-                        ?: "",
+                    artworkUrl = artworkUrl,
                     providerContentId = contentId,
                     contentType = item.firstString("content_type", "media_type", "type") ?: "movie",
                     episodeInfo = episodeInfo,
@@ -115,6 +124,35 @@ internal object NuvioApi {
                 val profile = profiles.getJSONObject(index)
                 NuvioProfile(profile.optInt("profile_index", 1), profile.optString("name", "Profile"), profile.optString("avatar_color_hex", "#AF7AFF"))
             }.sortedBy { it.index }
+        }
+    }
+
+    /** Adds a Relay detail item to the active Nuvio profile using Nuvio's own sync mutation. */
+    suspend fun addToLibrary(session: NuvioSession, profileId: Int, item: MediaItem): Result<Unit> = withContext(Dispatchers.IO) {
+        runCatching {
+            val contentId = item.providerContentId?.takeIf { it.isNotBlank() }
+                ?: throw IllegalArgumentException("This title needs a Nuvio or TMDB identifier before it can be added.")
+            val contentType = when (item.contentType.lowercase()) {
+                "tv", "show", "series" -> "series"
+                else -> "movie"
+            }
+            val libraryItem = JSONObject()
+                .put("content_id", contentId)
+                .put("content_type", contentType)
+                .put("name", item.showTitle ?: item.title)
+                .put("poster", item.artworkUrl.takeIf { it.isNotBlank() })
+                .put("poster_shape", "POSTER")
+                .put("background", item.artworkUrl.takeIf { it.isNotBlank() })
+                .put("description", item.description)
+                .put("release_info", item.releaseInfo)
+                .put("imdb_rating", item.rating)
+                .put("genres", JSONArray(item.genres?.split(",")?.map { it.trim() }?.filter { it.isNotBlank() } ?: emptyList<String>()))
+                .put("addon_base_url", JSONObject.NULL)
+                .put("added_at", Instant.now().toEpochMilli())
+            rpc(session, "sync_push_library_items", JSONObject()
+                .put("p_items", JSONArray().put(libraryItem))
+                .put("p_profile_id", profileId))
+            Unit
         }
     }
 

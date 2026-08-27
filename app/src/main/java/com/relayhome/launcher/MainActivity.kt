@@ -2,12 +2,17 @@ package com.relayhome.launcher
 
 import android.os.Bundle
 import android.app.role.RoleManager
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.ComponentName
 import android.content.Intent
-import android.graphics.Bitmap
+import android.net.Uri
 import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
@@ -15,20 +20,26 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.Image
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -41,6 +52,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.CircleShape
@@ -53,6 +65,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -68,6 +81,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontWeight
@@ -79,8 +94,10 @@ import androidx.core.graphics.drawable.toBitmap
 import androidx.palette.graphics.Palette
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.YearMonth
@@ -103,7 +120,20 @@ class MainActivity : ComponentActivity() {
     }
 
     fun requestNotificationListenerAccess() {
-        startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+        val fallback = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+        val detail = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS).putExtra(
+                Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME,
+                ComponentName(this, SmartTubeNowPlayingService::class.java).flattenToString()
+            )
+        } else {
+            fallback
+        }
+        startActivity(if (detail.resolveActivity(packageManager) != null) detail else fallback)
+    }
+
+    fun requestAutoStartAccessibility() {
+        startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
     }
 }
 
@@ -120,8 +150,12 @@ internal data class MediaItem(
     val progress: Float,
     val colors: List<Color>,
     val artworkUrl: String,
+    /** Exact provider playback position when available; used for native resume handoff. */
+    val resumePositionMs: Long = 0L,
     /** Provider-native identifier; demo artwork deliberately has none. */
     val providerContentId: String? = null,
+    /** Provider-native creator/channel identifier when an item belongs to a channel feed. */
+    val providerChannelId: String? = null,
     val contentType: String = "movie",
     /** Season/episode context when a provider has it. */
     val episodeInfo: String? = null,
@@ -129,8 +163,52 @@ internal data class MediaItem(
     val description: String? = null,
     val releaseInfo: String? = null,
     val rating: Double? = null,
-    val genres: String? = null
+    val genres: String? = null,
+    val durationMs: Long = 0L
 )
+
+private fun SmartTubeNowPlaying.toRelayMediaItem() = MediaItem(
+    title = title,
+    provider = Provider.SMARTTUBE,
+    progress = if (durationMs > 0) (positionMs.toFloat() / durationMs).coerceIn(0f, 1f) else 0f,
+    resumePositionMs = positionMs,
+    colors = listOf(Provider.SMARTTUBE.accent.copy(alpha = .5f), midnight),
+    artworkUrl = artworkUrl.orEmpty(),
+    providerContentId = videoId,
+    episodeInfo = listOfNotNull(channel, if (playing) "Playing now" else "Paused").joinToString(" • ").ifBlank { null },
+    description = description,
+    releaseInfo = metadata,
+    durationMs = durationMs
+)
+
+/** Removes invisible format/control characters that some provider payloads use for empty fields. */
+internal fun String?.visibleRelayText(): String =
+    this.orEmpty().replace(Regex("[\\p{C}\\s]+"), " ").trim()
+
+private fun formatMediaDuration(durationMs: Long): String {
+    val totalMinutes = (durationMs / 60_000L).coerceAtLeast(1L)
+    val hours = totalMinutes / 60L
+    val minutes = totalMinutes % 60L
+    return if (hours > 0) "${hours}h ${minutes}m" else "${minutes}m"
+}
+
+/** Nuvio needs both a display name and artwork before it can form a useful Peek card. */
+private fun MediaItem.isUsableForPeek(): Boolean {
+    val displayName = showTitle.visibleRelayText().ifBlank { title.visibleRelayText() }
+    return displayName.isNotBlank() &&
+        (provider != Provider.NUVIO || artworkUrl.visibleRelayText().isNotBlank())
+}
+
+/** Palette extraction is intentionally small and off-main: TV navigation must win over tinting. */
+private suspend fun relayArtworkAccent(drawable: android.graphics.drawable.Drawable): Color? =
+    withContext(Dispatchers.Default) {
+        runCatching {
+            val palette = Palette.from(drawable.toBitmap(320, 180)).maximumColorCount(12).generate()
+            palette.vibrantSwatch?.rgb
+                ?: palette.lightVibrantSwatch?.rgb
+                ?: palette.dominantSwatch?.rgb
+        }.getOrNull()?.let { Color(it or 0xFF000000.toInt()) }
+    }
 
 private data class Hero(
     val title: String,
@@ -152,19 +230,33 @@ private val violetPalette = RelayPalette(Color(0xFFC187FF), Color(0xFF39205B), C
 @Composable
 private fun RelayHomeApp() {
     val context = LocalContext.current
+    val stockLauncherOverride = remember { LauncherOverride.detect(context) }
     var dateFormat by remember { mutableStateOf(DateFormatSettings.load(context)) }
+    var profileImageUri by remember { mutableStateOf(ProfileImageSettings.load(context)) }
+    var continueWatchingLimits by remember { mutableStateOf(ContinueWatchingLimits.load(context)) }
     var nuvioSession by remember { mutableStateOf(NuvioSessionStore.load(context)) }
+    val defaultProviders = remember(nuvioSession) {
+        buildSet {
+            if (nuvioSession != null) add(Provider.NUVIO)
+            if (ProviderHandoff.isSmartTubeInstalled(context)) add(Provider.SMARTTUBE)
+        }
+    }
     var enabledProviders by remember {
         mutableStateOf(
             ProviderSettingsStore.load(
                 context,
-                fallback = if (nuvioSession != null) setOf(Provider.NUVIO) else emptySet()
+                fallback = defaultProviders
             )
         )
     }
     var destination by remember { mutableStateOf(Destination.HOME) }
     var activeProvider by remember { mutableStateOf(Provider.STREMIO) }
     var peekProvider by remember { mutableStateOf<Provider?>(null) }
+    // App Peek is a transient Home state. Never carry it through Details, Apps, Calendar,
+    // Settings, or a provider screen and then restore a stale provider overlay on return.
+    LaunchedEffect(destination) {
+        if (destination != Destination.HOME) peekProvider = null
+    }
     var nuvioProfiles by remember { mutableStateOf(emptyList<NuvioProfile>()) }
     var activeNuvioProfile by remember { mutableStateOf(NuvioSessionStore.loadProfile(context)) }
     var nuvioMedia by remember { mutableStateOf(emptyList<MediaItem>()) }
@@ -174,6 +266,12 @@ private fun RelayHomeApp() {
     var upcomingEpisodes by remember { mutableStateOf(emptyList<TmdbCalendarEntry>()) }
     var tmdbRecommendations by remember { mutableStateOf(emptyList<MediaItem>()) }
     val smartTubeNowPlaying = SmartTubePlaybackStore.nowPlaying
+    val smartTubeSubscriptions = SmartTubePlaybackStore.subscriptionVideos
+        .ifEmpty { SmartTubePlaybackStore.loadSubscriptionVideos(context) }
+    val smartTubeContinueWatching = SmartTubePlaybackStore.continueWatchingVideos
+        .ifEmpty { SmartTubePlaybackStore.loadContinueWatchingVideos(context) }
+    val hiddenSmartTubeChannels = SmartTubeChannelFilter.hiddenChannelIds
+    LaunchedEffect(Unit) { SmartTubeChannelFilter.load(context) }
     LaunchedEffect(nuvioSession) {
         nuvioSession?.let { session ->
             NuvioApi.pullProfiles(session).onSuccess { profiles ->
@@ -188,7 +286,13 @@ private fun RelayHomeApp() {
             nuvioSyncError = null
             NuvioApi.pullRelayMedia(session, activeNuvioProfile)
                 .onSuccess { nuvioMedia = it }
-                .onFailure { nuvioSyncError = "Couldn’t sync Nuvio yet. Check the connection and try again." }
+                .onFailure { error ->
+                    // Retain the last successful cards while making the real recovery action
+                    // obvious. A transient provider outage should never turn Home into samples.
+                    nuvioSyncError = error.message?.take(160)
+                        ?.takeIf { it.isNotBlank() }
+                        ?: "Couldn’t sync Nuvio yet. Check the connection and try again."
+                }
             nuvioSyncing = false
         }
     }
@@ -198,12 +302,12 @@ private fun RelayHomeApp() {
     LaunchedEffect(nuvioMedia) {
         tmdbRecommendations = TmdbApi.recommendations(nuvioMedia)
     }
-    var selectedMedia by remember { mutableStateOf(sampleContinueWatching(setOf(Provider.STREMIO, Provider.NUVIO)).first()) }
+    var selectedMedia by remember { mutableStateOf(MediaItem("", Provider.NUVIO, 0f, emptyList(), "")) }
     val detailScope = rememberCoroutineScope()
     fun openMediaDetails(item: MediaItem) {
         selectedMedia = item
         destination = Destination.DETAIL
-        if (Regex("S\\d+\\s*•\\s*E\\d+").containsMatchIn(item.episodeInfo.orEmpty())) {
+        if (Regex("(?i)S\\s*\\d+\\D{0,8}E\\s*\\d+").containsMatchIn(item.episodeInfo.orEmpty())) {
             detailScope.launch {
                 val enriched = TmdbApi.enrichEpisodeDetails(item)
                 if (destination == Destination.DETAIL && selectedMedia == item) selectedMedia = enriched
@@ -212,14 +316,19 @@ private fun RelayHomeApp() {
     }
     var activeHero by remember {
         mutableStateOf(Hero(
-            "ORBITAL NIGHT",
-            "A distant signal. A hidden truth. The orbit is never silent.",
+            "Relay Home",
+            "Loading your connected media…",
             orbitalPalette,
-            "https://images.unsplash.com/photo-1446776877081-d282a0f896e2?auto=format&fit=crop&w=1800&q=85"
+            ""
         ))
     }
-    val heroCandidates = remember(enabledProviders, nuvioMedia) {
-        (nuvioMedia + sampleContinueWatching(enabledProviders).filter { it.provider != Provider.NUVIO } + sampleRecommended(enabledProviders))
+    val smartTubeHeroItem = smartTubeNowPlaying?.toRelayMediaItem()
+    val heroCandidates = remember(enabledProviders, nuvioMedia, smartTubeHeroItem, smartTubeContinueWatching, smartTubeSubscriptions) {
+        (nuvioMedia + listOfNotNull(smartTubeHeroItem) + smartTubeContinueWatching.map { video ->
+            MediaItem(video.title, Provider.SMARTTUBE, video.progress, listOf(Provider.SMARTTUBE.accent.copy(alpha = .5f), midnight), video.artworkUrl.orEmpty(), providerContentId = video.videoId, resumePositionMs = video.resumePositionMs, providerChannelId = video.channelId, contentType = "video", episodeInfo = video.channel, description = video.description, releaseInfo = video.metadata, durationMs = video.durationMs)
+        } + smartTubeSubscriptions.map { video ->
+            MediaItem(video.title, Provider.SMARTTUBE, video.progress, listOf(Provider.SMARTTUBE.accent.copy(alpha = .5f), midnight), video.artworkUrl.orEmpty(), providerContentId = video.videoId, resumePositionMs = video.resumePositionMs, providerChannelId = video.channelId, contentType = "video", episodeInfo = video.channel, description = video.description, releaseInfo = video.metadata, durationMs = video.durationMs)
+        })
             .filter { it.provider in enabledProviders }
             .distinctBy { "${it.provider}:${it.providerContentId ?: it.title}" }
     }
@@ -266,18 +375,34 @@ private fun RelayHomeApp() {
                     onHeroChanged = { hero -> if (hero != activeHero) activeHero = hero },
                     onItemSelected = ::openMediaDetails,
                     nuvioItems = nuvioMedia,
+                    nuvioSyncing = nuvioSyncing,
+                    nuvioSyncError = nuvioSyncError,
                     upcomingEpisodes = upcomingEpisodes,
                     recommendations = tmdbRecommendations,
                     dateFormat = dateFormat,
                     smartTubeNowPlaying = smartTubeNowPlaying,
+                    smartTubeSubscriptions = smartTubeSubscriptions,
+                    smartTubeContinueWatching = smartTubeContinueWatching,
+                    hiddenSmartTubeChannels = hiddenSmartTubeChannels,
+                    continueWatchingLimits = continueWatchingLimits,
                     nuvioProfiles = nuvioProfiles,
                     activeNuvioProfile = activeNuvioProfile,
+                    profileImageUri = profileImageUri,
+                    onRefreshNuvio = { nuvioRefreshGeneration++ },
                     onNuvioProfileSelected = {
                         activeNuvioProfile = it
                         NuvioSessionStore.saveProfile(context, it)
                     }
                 )
-                Destination.DETAIL -> DetailsScreen(selectedMedia, paletteFor(selectedMedia), dateFormat) { destination = Destination.HOME }
+                Destination.DETAIL -> DetailsScreen(
+                    item = selectedMedia,
+                    palette = paletteFor(selectedMedia),
+                    dateFormat = dateFormat,
+                    nuvioSession = nuvioSession,
+                    nuvioProfileId = activeNuvioProfile,
+                    onLibraryChanged = { nuvioRefreshGeneration++ },
+                    onBackHome = { destination = Destination.HOME }
+                )
                 Destination.APPS -> AppsScreen(
                     palette = palette,
                     onBackHome = { destination = Destination.HOME }
@@ -291,7 +416,17 @@ private fun RelayHomeApp() {
                         ProviderSettingsStore.save(context, enabledProviders)
                     },
                     onRequestHome = { (context as? MainActivity)?.requestHomeRole() },
+                    onRequestAutoStart = { (context as? MainActivity)?.requestAutoStartAccessibility() },
                     onRequestSmartTubeAccess = { (context as? MainActivity)?.requestNotificationListenerAccess() },
+                    continueWatchingLimits = continueWatchingLimits,
+                    onContinueWatchingLimitChanged = { provider, limit ->
+                        continueWatchingLimits = continueWatchingLimits + (provider to limit)
+                        ContinueWatchingLimits.save(context, provider, limit)
+                    },
+                    smartTubeSubscriptions = smartTubeSubscriptions,
+                    smartTubeInstalled = ProviderHandoff.isSmartTubeInstalled(context),
+                    hiddenSmartTubeChannels = hiddenSmartTubeChannels,
+                    onSmartTubeChannelVisible = { channelId, visible -> SmartTubeChannelFilter.setVisible(context, channelId, visible) },
                     nuvioConnected = nuvioSession != null,
                     nuvioSyncing = nuvioSyncing,
                     nuvioItemCount = nuvioMedia.size,
@@ -302,7 +437,13 @@ private fun RelayHomeApp() {
                     onDateFormatChanged = {
                         dateFormat = it
                         DateFormatSettings.save(context, it)
-                    }
+                    },
+                    profileImageUri = profileImageUri,
+                    onProfileImageChanged = { uri ->
+                        profileImageUri = uri
+                        if (uri == null) ProfileImageSettings.clear(context) else ProfileImageSettings.save(context, uri)
+                    },
+                    stockLauncherOverride = stockLauncherOverride
                 )
                 Destination.SEARCH -> SearchScreen(
                     palette = palette,
@@ -376,12 +517,20 @@ private fun HomeScreen(
     onHeroChanged: (Hero) -> Unit,
     onItemSelected: (MediaItem) -> Unit,
     nuvioItems: List<MediaItem>,
+    nuvioSyncing: Boolean,
+    nuvioSyncError: String?,
     upcomingEpisodes: List<TmdbCalendarEntry>,
     recommendations: List<MediaItem>,
     dateFormat: RelayDateFormat,
     smartTubeNowPlaying: SmartTubeNowPlaying?,
+    smartTubeSubscriptions: List<SmartTubeSubscriptionVideo>,
+    smartTubeContinueWatching: List<SmartTubeSubscriptionVideo>,
+    hiddenSmartTubeChannels: Set<String>,
+    continueWatchingLimits: Map<Provider, Int>,
     nuvioProfiles: List<NuvioProfile>,
     activeNuvioProfile: Int,
+    profileImageUri: String?,
+    onRefreshNuvio: () -> Unit,
     onNuvioProfileSelected: (Int) -> Unit
 ) {
     val homeFocusRequester = remember { FocusRequester() }
@@ -389,26 +538,61 @@ private fun HomeScreen(
     val heroFocusRequester = remember { FocusRequester() }
     val homeListState = rememberLazyListState()
     var profilePickerVisible by remember { mutableStateOf(false) }
-    val smartTubeItem = smartTubeNowPlaying?.let { playback ->
-        MediaItem(
-            title = playback.title,
-            provider = Provider.SMARTTUBE,
-            progress = if (playback.durationMs > 0) (playback.positionMs.toFloat() / playback.durationMs).coerceIn(0f, 1f) else 0f,
-            colors = listOf(Provider.SMARTTUBE.accent.copy(alpha = .5f), midnight),
-            artworkUrl = playback.artworkUrl.orEmpty(),
-            episodeInfo = listOfNotNull(playback.channel, if (playback.playing) "Playing now" else "Paused").joinToString(" • ").ifBlank { null }
-        )
+    val smartTubeItem = smartTubeNowPlaying?.toRelayMediaItem()
+    fun smartTubeItems(videos: List<SmartTubeSubscriptionVideo>) = videos.map { video ->
+            MediaItem(
+                title = video.title,
+                provider = Provider.SMARTTUBE,
+                progress = video.progress,
+                colors = listOf(Provider.SMARTTUBE.accent.copy(alpha = .5f), midnight),
+                artworkUrl = video.artworkUrl.orEmpty(),
+                providerContentId = video.videoId,
+                providerChannelId = video.channelId,
+                resumePositionMs = video.resumePositionMs,
+                contentType = "video",
+                episodeInfo = video.channel,
+                description = video.description,
+                releaseInfo = video.metadata,
+                durationMs = video.durationMs
+            )
+    }
+    val smartTubeSubscriptionItems = remember(smartTubeSubscriptions) { smartTubeItems(smartTubeSubscriptions) }
+    val smartTubeContinueWatchingItems = remember(smartTubeContinueWatching) { smartTubeItems(smartTubeContinueWatching) }
+    val visibleSmartTubeSubscriptionItems = remember(smartTubeSubscriptionItems, hiddenSmartTubeChannels) {
+        smartTubeSubscriptionItems.filter { it.providerChannelId == null || it.providerChannelId !in hiddenSmartTubeChannels }
+    }
+    val peekItems = remember(peekProvider, nuvioItems, smartTubeItem, visibleSmartTubeSubscriptionItems, smartTubeContinueWatchingItems) {
+        when (peekProvider) {
+            Provider.NUVIO -> nuvioItems
+            Provider.SMARTTUBE -> (listOfNotNull(smartTubeItem) + smartTubeContinueWatchingItems + visibleSmartTubeSubscriptionItems)
+                .distinctBy { it.providerContentId ?: it.title }
+            // Relay does not yet have a Stremio library sync. Do not present demo cards as
+            // live provider data in App Peek.
+            Provider.STREMIO -> emptyList()
+            null -> emptyList()
+        }
+    }
+    fun activatePeek(provider: Provider?) {
+        if (provider != peekProvider) {
+            onPeekProvider(provider)
+            if (provider == Provider.NUVIO) onRefreshNuvio()
+        }
     }
     // The primary rail is deliberately provider-neutral: real Nuvio progress,
     // active SmartTube playback, and each enabled provider's available feed.
     val nuvioOnly = providers == setOf(Provider.NUVIO)
-    val continueWatching = remember(providers, nuvioItems, smartTubeItem, nuvioOnly) {
-        (if (nuvioOnly) nuvioItems else listOfNotNull(smartTubeItem) + nuvioItems + sampleContinueWatching(providers).filter { it.provider != Provider.NUVIO })
+    val continueWatching = remember(providers, nuvioItems, smartTubeItem, smartTubeContinueWatchingItems, nuvioOnly, continueWatchingLimits) {
+        (if (nuvioOnly) nuvioItems else listOfNotNull(smartTubeItem) + smartTubeContinueWatchingItems + nuvioItems)
             .filter { it.provider in providers }
             .distinctBy { "${it.provider}:${it.providerContentId ?: it.title}" }
+            .groupBy { it.provider }
+            .flatMap { (provider, items) -> items.take(continueWatchingLimits[provider] ?: ContinueWatchingLimits.defaultLimit) }
     }
     val recommendationItems = remember(providers, recommendations, nuvioOnly) {
-        recommendations.filter { it.provider in providers }.ifEmpty { if (nuvioOnly) emptyList() else sampleRecommended(providers) }
+        recommendations.filter { it.provider in providers }
+    }
+    val subscriptionItems = remember(providers, visibleSmartTubeSubscriptionItems) {
+        if (Provider.SMARTTUBE in providers) visibleSmartTubeSubscriptionItems else emptyList()
     }
     val homeScope = rememberCoroutineScope()
     // Do not restore a previous focus-scroll offset into the hero when returning to Home.
@@ -426,7 +610,7 @@ private fun HomeScreen(
                 if (peekProvider != null) {
                     AppPeekPanel(
                         provider = peekProvider,
-                        items = if (peekProvider == Provider.NUVIO && nuvioItems.isNotEmpty()) nuvioItems else sampleContinueWatching(setOf(peekProvider)),
+                        items = peekItems,
                         palette = palette,
                         focusRequester = peekFocusRequester,
                         onPreviewFocused = { homeScope.launch { homeListState.scrollToItem(0) } },
@@ -448,6 +632,16 @@ private fun HomeScreen(
                 item {
                     EmptyHomeState(palette, onSettings)
                 }
+            } else if (continueWatching.isEmpty() && recommendationItems.isEmpty() && subscriptionItems.isEmpty() && upcomingEpisodes.isEmpty()) {
+                item {
+                    ProviderDataEmptyState(
+                        palette = palette,
+                        syncing = nuvioSyncing,
+                        nuvioError = nuvioSyncError,
+                        onRefresh = onRefreshNuvio,
+                        onSettings = onSettings
+                    )
+                }
             } else {
                 item {
                     MediaRail("Continue Watching", continueWatching, palette, dateFormat, onHeroChanged, onItemSelected, upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester)
@@ -456,6 +650,12 @@ private fun HomeScreen(
                 item {
                     MediaRail("Recommended TV Shows", recommendationItems, palette, dateFormat, onHeroChanged, onItemSelected, posters = true, upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester)
                     Spacer(Modifier.height(18.dp))
+                }
+                if (subscriptionItems.isNotEmpty()) {
+                    item {
+                        MediaRail("New from subscriptions", subscriptionItems, palette, dateFormat, onHeroChanged, onItemSelected, upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester)
+                        Spacer(Modifier.height(18.dp))
+                    }
                 }
                 if (upcomingEpisodes.isNotEmpty()) {
                     item {
@@ -471,7 +671,22 @@ private fun HomeScreen(
                 .background(Brush.verticalGradient(listOf(midnight.copy(alpha = .78f), midnight.copy(alpha = .30f), Color.Transparent)))
                 .padding(top = 24.dp, bottom = 30.dp)
         ) {
-            TopBar(providers, palette, homeFocusRequester, heroFocusRequester, peekFocusRequester, onDestination, onProvider, onSettings, onPeekProvider, nuvioProfiles, activeNuvioProfile) {
+            TopBar(
+                providers = providers,
+                palette = palette,
+                peekProvider = peekProvider,
+                homeFocusRequester = homeFocusRequester,
+                heroFocusRequester = heroFocusRequester,
+                peekFocusRequester = peekFocusRequester,
+                onDestination = onDestination,
+                onProvider = onProvider,
+                onSettings = onSettings,
+                onPeekProvider = ::activatePeek,
+                onTopFocused = { homeScope.launch { homeListState.scrollToItem(0) } },
+                nuvioProfiles = nuvioProfiles,
+                activeNuvioProfile = activeNuvioProfile,
+                profileImageUri = profileImageUri
+            ) {
                 profilePickerVisible = true
             }
         }
@@ -491,6 +706,31 @@ private fun HomeScreen(
 }
 
 @Composable
+private fun ProviderDataEmptyState(
+    palette: RelayPalette,
+    syncing: Boolean,
+    nuvioError: String?,
+    onRefresh: () -> Unit,
+    onSettings: () -> Unit
+) {
+    Column(Modifier.padding(horizontal = 76.dp, vertical = 18.dp)) {
+        Text(if (nuvioError != null) "Nuvio needs attention" else "Waiting for your media", color = ivory, fontSize = 24.sp, fontWeight = FontWeight.Light)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            nuvioError ?: if (syncing) "Syncing your connected providers…" else "No live Continue Watching, recommendations, or subscription videos are available yet.",
+            color = muted,
+            fontSize = 16.sp,
+            lineHeight = 22.sp
+        )
+        Spacer(Modifier.height(16.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            ActionButton(if (syncing) "Refreshing Nuvio…" else "Refresh Nuvio", palette.copy(accent = Provider.NUVIO.accent), primary = true, onClick = onRefresh)
+            ActionButton("Provider settings", palette, primary = false, onClick = onSettings)
+        }
+    }
+}
+
+@Composable
 private fun EmptyHomeState(palette: RelayPalette, onSettings: () -> Unit) {
     Column(Modifier.padding(horizontal = 76.dp, vertical = 18.dp)) {
         Text("Add your media", color = ivory, fontSize = 24.sp, fontWeight = FontWeight.Light)
@@ -505,6 +745,7 @@ private fun EmptyHomeState(palette: RelayPalette, onSettings: () -> Unit) {
 private fun TopBar(
     providers: Set<Provider>,
     palette: RelayPalette,
+    peekProvider: Provider?,
     homeFocusRequester: FocusRequester,
     heroFocusRequester: FocusRequester,
     peekFocusRequester: FocusRequester,
@@ -512,45 +753,82 @@ private fun TopBar(
     onProvider: (Provider) -> Unit,
     onSettings: () -> Unit,
     onPeekProvider: (Provider?) -> Unit,
+    onTopFocused: () -> Unit,
     nuvioProfiles: List<NuvioProfile>,
     activeNuvioProfile: Int,
+    profileImageUri: String?,
     onProfileClick: () -> Unit
 ) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 48.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text("RELAY HOME", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Light, letterSpacing = 3.sp)
-        Spacer(Modifier.weight(1f))
-        TopDestination("Home", selected = true, palette = palette, focusRequester = homeFocusRequester, downFocusRequester = heroFocusRequester, onFocused = { if (it) onPeekProvider(null) }) { onDestination(Destination.HOME) }
-        providers.sortedBy { it.label }.forEach { provider ->
-            TopDestination(provider.label, selected = false, palette = palette, downFocusRequester = peekFocusRequester, onFocused = { if (it) onPeekProvider(provider) }) { onPeekProvider(provider) }
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        // Android TV reports markedly different dp widths at 1080p versus 4K. Keep the
+        // full navigation visible on the narrower layout instead of allowing its final
+        // controls to run beyond the right safe area.
+        val compact = maxWidth < 1150.dp
+        val outerPadding = if (compact) 24.dp else 48.dp
+        val logo = if (compact) "RELAY" else "RELAY HOME"
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = outerPadding),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(logo, color = ivory, fontSize = if (compact) 16.sp else 18.sp, fontWeight = FontWeight.Light, letterSpacing = if (compact) 2.sp else 3.sp)
+            Spacer(Modifier.width(if (compact) 12.dp else 26.dp))
+            if (!compact) Spacer(Modifier.weight(1f))
+            TopDestination("Home", selected = peekProvider == null, palette = palette, compact = compact, focusRequester = homeFocusRequester, downFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester, onFocused = {
+                if (it) {
+                    onPeekProvider(null)
+                    onTopFocused()
+                }
+            }) {
+                onPeekProvider(null)
+                onDestination(Destination.HOME)
+            }
+            providers.sortedBy { it.label }.forEach { provider ->
+                TopDestination(provider.label, selected = peekProvider == provider, palette = palette, compact = compact, downFocusRequester = peekFocusRequester, onFocused = {
+                    if (it) {
+                        onTopFocused()
+                        onPeekProvider(provider)
+                    }
+                }) { onProvider(provider) }
+            }
+            TopDestination("Calendar", selected = false, palette = palette, compact = compact) { onDestination(Destination.CALENDAR) }
+            TopDestination("Apps", selected = false, palette = palette, compact = compact) { onDestination(Destination.APPS) }
+            // On a 1080p logical surface, keep the media destinations together but anchor
+            // profile/settings to the right safe edge rather than leaving them mid-screen.
+            if (compact) Spacer(Modifier.weight(1f))
+            Spacer(Modifier.width(if (compact) 8.dp else 16.dp))
+            if (nuvioProfiles.isNotEmpty()) {
+                ProfileAvatarButton(nuvioProfiles.firstOrNull { it.index == activeNuvioProfile }, profileImageUri, palette, onProfileClick, compact)
+                Spacer(Modifier.width(if (compact) 7.dp else 12.dp))
+            }
+            EmbossedSearchButton(palette, compact) { onDestination(Destination.SEARCH) }
+            Spacer(Modifier.width(if (compact) 7.dp else 12.dp))
+            EmbossedSettingsButton(palette, onSettings, compact)
         }
-        TopDestination("Calendar", selected = false, palette = palette) { onDestination(Destination.CALENDAR) }
-        TopDestination("Apps", selected = false, palette = palette) { onDestination(Destination.APPS) }
-        TopDestination("Search", selected = false, palette = palette) { onDestination(Destination.SEARCH) }
-        Spacer(Modifier.width(16.dp))
-        if (nuvioProfiles.isNotEmpty()) {
-            ProfileAvatarButton(nuvioProfiles.firstOrNull { it.index == activeNuvioProfile }, palette, onProfileClick)
-            Spacer(Modifier.width(12.dp))
-        }
-        EmbossedSettingsButton(palette, onSettings)
     }
 }
 
 @Composable
-private fun ProfileAvatarButton(profile: NuvioProfile?, palette: RelayPalette, onClick: () -> Unit) {
+private fun ProfileAvatarButton(profile: NuvioProfile?, imageUri: String?, palette: RelayPalette, onClick: () -> Unit, compact: Boolean = false) {
     val source = remember { MutableInteractionSource() }
     val focused by source.collectIsFocusedAsState()
     Box(
-        modifier = Modifier.size(45.dp).clip(CircleShape)
+        modifier = Modifier.size(if (compact) 38.dp else 45.dp).clip(CircleShape)
             .background(Provider.NUVIO.accent.copy(alpha = .78f))
             .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .3f), CircleShape)
             .clickable(interactionSource = source, indication = null, onClick = onClick)
             .focusable(interactionSource = source),
         contentAlignment = Alignment.Center
     ) {
-        Text(profile?.name?.firstOrNull()?.uppercase() ?: "P", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        if (imageUri != null) {
+            AsyncImage(
+                model = imageUri,
+                contentDescription = "Profile picture",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Text(profile?.name?.firstOrNull()?.uppercase() ?: "P", color = ivory, fontSize = if (compact) 16.sp else 18.sp, fontWeight = FontWeight.Bold)
+        }
     }
 }
 
@@ -571,7 +849,24 @@ private fun ProfileSwitcher(
             Text("Switching profiles refreshes Relay with that Nuvio profile’s Continue Watching.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
             Spacer(Modifier.height(24.dp))
             profiles.forEach { profile ->
-                ActionButton(profile.name, palette.copy(accent = Provider.NUVIO.accent), primary = profile.index == activeProfile) { onSelect(profile.index) }
+                val source = remember { MutableInteractionSource() }
+                val focused by source.collectIsFocusedAsState()
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp))
+                        .background(if (focused || profile.index == activeProfile) Provider.NUVIO.accent.copy(alpha = .22f) else Color(0xFF1A1C23))
+                        .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .10f), RoundedCornerShape(20.dp))
+                        .clickable(interactionSource = source, indication = null) { onSelect(profile.index) }
+                        .focusable(interactionSource = source).padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(Modifier.size(42.dp).clip(CircleShape).background(Provider.NUVIO.accent.copy(alpha = .82f)), contentAlignment = Alignment.Center) {
+                        Text(profile.name.firstOrNull()?.uppercase() ?: "P", color = ivory, fontWeight = FontWeight.Bold)
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    Text(profile.name, color = ivory, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                    Spacer(Modifier.weight(1f))
+                    if (profile.index == activeProfile) Text("Watching", color = Provider.NUVIO.accent, fontSize = 13.sp)
+                }
                 Spacer(Modifier.height(10.dp))
             }
             Spacer(Modifier.height(8.dp))
@@ -585,6 +880,7 @@ private fun TopDestination(
     label: String,
     selected: Boolean,
     palette: RelayPalette,
+    compact: Boolean = false,
     focusRequester: FocusRequester? = null,
     downFocusRequester: FocusRequester? = null,
     onFocused: (Boolean) -> Unit = {},
@@ -597,18 +893,20 @@ private fun TopDestination(
         text = label,
         color = if (active) ivory else muted,
         fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
-        fontSize = 17.sp,
+        fontSize = if (compact) 14.sp else 17.sp,
         modifier = (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-            .padding(horizontal = 7.dp)
+            .padding(horizontal = if (compact) 2.dp else 7.dp)
             .then(if (downFocusRequester != null) Modifier.focusProperties { down = downFocusRequester } else Modifier)
             .clip(RoundedCornerShape(22.dp))
             .background(if (active) palette.accent.copy(alpha = if (selected) .24f else .16f) else Color.Transparent)
             .border(if (active) 1.dp else 0.dp, if (active) palette.accent.copy(alpha = .75f) else Color.Transparent, RoundedCornerShape(22.dp))
+            // Observe before clickable: clickable owns the TV focus target. Keeping the
+            // observer behind it (or adding a second focusable node) makes rapid provider
+            // moves highlight the label without activating the corresponding App Peek.
+            .onFocusChanged { onFocused(it.hasFocus) }
             .clickable(interactionSource = source, indication = null, onClick = onClick)
-            .focusable(interactionSource = source)
-            .padding(horizontal = 17.dp, vertical = 9.dp)
+            .padding(horizontal = if (compact) 10.dp else 17.dp, vertical = if (compact) 7.dp else 9.dp)
     )
-    LaunchedEffect(focused) { onFocused(focused) }
 }
 
 @Composable
@@ -621,8 +919,14 @@ private fun AppPeekPanel(
     onItemSelected: (MediaItem) -> Unit,
     onArtworkColor: (Color?) -> Unit
 ) {
-    var selectedIndex by remember(provider, items) { mutableStateOf(0) }
-    val lead = items.getOrNull(selectedIndex) ?: items.firstOrNull()
+    val context = LocalContext.current
+    val paletteScope = rememberCoroutineScope()
+    val usableItems = remember(provider, items) {
+        items.filter { item -> item.isUsableForPeek() }
+            .distinctBy { item -> item.providerContentId ?: "${item.title}:${item.episodeInfo.orEmpty()}" }
+    }
+    var selectedIndex by remember(provider, usableItems) { mutableStateOf(0) }
+    val lead = usableItems.getOrNull(selectedIndex) ?: usableItems.firstOrNull()
     Box(Modifier.fillMaxWidth().height(520.dp).background(midnight)) {
         lead?.let { item ->
             AsyncImage(
@@ -631,10 +935,13 @@ private fun AppPeekPanel(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize().alpha(.82f),
                 onSuccess = { success ->
-                    Palette.from(success.result.drawable.toBitmap().copy(Bitmap.Config.ARGB_8888, false)).generate { extracted ->
-                        extracted?.vibrantSwatch?.rgb?.let { rgb -> onArtworkColor(Color(rgb or 0xFF000000.toInt())) }
-                            ?: extracted?.lightVibrantSwatch?.rgb?.let { rgb -> onArtworkColor(Color(rgb or 0xFF000000.toInt())) }
-                            ?: extracted?.dominantSwatch?.rgb?.let { rgb -> onArtworkColor(Color(rgb or 0xFF000000.toInt())) }
+                    // SmartTube artwork can be replaced while its media session updates. Keep
+                    // its Peek stable by using the provider accent rather than synchronously
+                    // extracting a palette from a changing decoder bitmap.
+                    if (provider != Provider.SMARTTUBE) {
+                        paletteScope.launch {
+                            relayArtworkAccent(success.result.drawable)?.let(onArtworkColor)
+                        }
                     }
                 }
             )
@@ -678,7 +985,8 @@ private fun AppPeekPanel(
             )
             Spacer(Modifier.height(22.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                items.take(4).forEachIndexed { index, item ->
+                usableItems.take(4).forEachIndexed { index, item ->
+                    key(item.providerContentId ?: "${item.provider}:${item.title}:${item.episodeInfo.orEmpty()}") {
                     val source = remember { MutableInteractionSource() }
                     val focused by source.collectIsFocusedAsState()
                     val selected = index == selectedIndex
@@ -694,14 +1002,39 @@ private fun AppPeekPanel(
                             .scale(if (focused) 1.08f else 1f)
                             .clip(RoundedCornerShape(9.dp))
                             .border(if (focused) 2.dp else if (selected) 1.dp else 0.dp, ivory.copy(alpha = if (focused) .78f else .28f), RoundedCornerShape(14.dp))
-                            .clickable(interactionSource = source, indication = null) { onItemSelected(item) }
+                            .clickable(interactionSource = source, indication = null) {
+                                if (item.provider == Provider.SMARTTUBE && item.providerContentId != null) {
+                                    ProviderHandoff.play(context, item)
+                                } else {
+                                    onItemSelected(item)
+                                }
+                            }
                             .focusable(interactionSource = source)
                     ) {
                         AsyncImage(model = item.artworkUrl, contentDescription = item.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, midnight.copy(alpha = .84f)))))
-                        Text(item.episodeInfo ?: item.title, color = ivory, fontSize = 10.sp, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.align(Alignment.BottomStart).padding(6.dp))
+                        Text(
+                            if (provider == Provider.SMARTTUBE) item.title else item.episodeInfo ?: item.title,
+                            color = ivory,
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.align(Alignment.BottomStart).padding(6.dp)
+                        )
+                    }
                     }
                 }
+            }
+            if (usableItems.isEmpty()) {
+                ActionButton(
+                    "No recent ${provider.label} media",
+                    palette.copy(accent = provider.accent),
+                    primary = false,
+                    focusRequester = focusRequester,
+                    onFocused = { if (it) onPreviewFocused() },
+                    onClick = {}
+                )
             }
             lead?.let { item ->
                 Spacer(Modifier.height(12.dp))
@@ -711,7 +1044,11 @@ private fun AppPeekPanel(
             }
             Spacer(Modifier.height(16.dp))
             ActionButton(
-                if (lead?.episodeInfo != null) "Episode details" else "Title details",
+                when {
+                    provider == Provider.SMARTTUBE -> "Video details"
+                    lead?.episodeInfo != null -> "Episode details"
+                    else -> "Title details"
+                },
                 palette.copy(accent = provider.accent),
                 primary = false,
                 onFocused = { if (it) onPreviewFocused() }
@@ -721,12 +1058,12 @@ private fun AppPeekPanel(
 }
 
 @Composable
-private fun EmbossedSettingsButton(palette: RelayPalette, onClick: () -> Unit) {
+private fun EmbossedSettingsButton(palette: RelayPalette, onClick: () -> Unit, compact: Boolean = false) {
     val source = remember { MutableInteractionSource() }
     val focused by source.collectIsFocusedAsState()
     Box(
         modifier = Modifier
-            .size(42.dp)
+            .size(if (compact) 38.dp else 42.dp)
             .scale(if (focused) 1.1f else 1f)
             .clip(CircleShape)
             .background(Brush.radialGradient(listOf(Color(0xFF31353D), Color(0xFF111318))))
@@ -735,8 +1072,21 @@ private fun EmbossedSettingsButton(palette: RelayPalette, onClick: () -> Unit) {
             .focusable(interactionSource = source),
         contentAlignment = Alignment.Center
     ) {
-        Text("⚙", color = if (focused) palette.accent else ivory, fontSize = 23.sp)
+        Text("⚙", color = if (focused) palette.accent else ivory, fontSize = if (compact) 20.sp else 23.sp)
     }
+}
+
+@Composable
+private fun EmbossedSearchButton(palette: RelayPalette, compact: Boolean = false, onClick: () -> Unit) {
+    val source = remember { MutableInteractionSource() }
+    val focused by source.collectIsFocusedAsState()
+    Row(
+        Modifier.clip(RoundedCornerShape(22.dp)).background(Brush.linearGradient(listOf(Color(0xFF30343C), Color(0xFF111318))))
+            .border(1.dp, if (focused) palette.accent else Color(0xFF3A3D45), RoundedCornerShape(22.dp))
+            .clickable(interactionSource = source, indication = null, onClick = onClick).focusable(interactionSource = source)
+            .padding(horizontal = if (compact) 11.dp else 14.dp, vertical = if (compact) 8.dp else 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) { Text("⌕", color = ivory, fontSize = 19.sp); Spacer(Modifier.width(6.dp)); Text("Search", color = ivory, fontSize = if (compact) 14.sp else 16.sp) }
 }
 
 @Composable
@@ -750,6 +1100,7 @@ private fun HeroPanel(
     onArtworkColor: (Color?) -> Unit
 ) {
     val context = LocalContext.current
+    val paletteScope = rememberCoroutineScope()
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -762,9 +1113,8 @@ private fun HeroPanel(
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize().alpha(.86f),
             onSuccess = { success ->
-                Palette.from(success.result.drawable.toBitmap().copy(Bitmap.Config.ARGB_8888, false)).generate { result ->
-                    result?.vibrantSwatch?.rgb?.let { rgb -> onArtworkColor(Color(rgb or 0xFF000000.toInt())) }
-                        ?: result?.dominantSwatch?.rgb?.let { rgb -> onArtworkColor(Color(rgb or 0xFF000000.toInt())) }
+                paletteScope.launch {
+                    relayArtworkAccent(success.result.drawable)?.let(onArtworkColor)
                 }
             }
         )
@@ -856,34 +1206,58 @@ private fun MediaRail(
     upFocusRequester: FocusRequester
 ) {
     if (items.isEmpty()) return
+    val context = LocalContext.current
+    val railScope = rememberCoroutineScope()
+    // Changing a hero means drawing a large new backdrop. Wait for a focus movement to settle
+    // before doing that work, so holding the D-pad stays responsive instead of redrawing a 4K
+    // hero for every card the remote passes over.
+    var pendingHeroUpdate by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
     Text(title, color = ivory, fontSize = 19.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 76.dp, bottom = 10.dp))
     val listState = rememberLazyListState()
-    LazyRow(
-        state = listState,
-        contentPadding = PaddingValues(horizontal = 76.dp),
-        horizontalArrangement = Arrangement.spacedBy(13.dp)
-    ) {
-        items(items.size) { index ->
-            MediaCard(
-                item = items[index],
-                palette = palette,
-                poster = posters,
-                dateFormat = dateFormat,
-                showEpisodeInfo = title == "Continue Watching" || title == "Coming Up",
-                showPremiereDate = showPremiereDate,
-                upFocusRequester = upFocusRequester,
-                onClick = { onItemSelected(items[index]) }
-            ) { extractedAccent ->
-                val item = items[index]
-                onHeroChanged(Hero(
-                    item.title,
-                    "Continue the story, wherever you left off.",
-                    paletteFor(item, extractedAccent),
-                    item.artworkUrl,
-                    item
-                ))
+    Box(Modifier.fillMaxWidth()) {
+        LazyRow(
+            state = listState,
+            contentPadding = PaddingValues(horizontal = 76.dp),
+            horizontalArrangement = Arrangement.spacedBy(13.dp)
+        ) {
+            items(items.size) { index ->
+                MediaCard(
+                    item = items[index],
+                    palette = palette,
+                    poster = posters,
+                    dateFormat = dateFormat,
+                    showEpisodeInfo = title == "Continue Watching" || title == "Coming Up",
+                    showPremiereDate = showPremiereDate,
+                    upFocusRequester = upFocusRequester,
+                    onClick = {
+                        val item = items[index]
+                        if (item.provider == Provider.SMARTTUBE && item.providerContentId != null) {
+                            ProviderHandoff.play(context, item)
+                        } else {
+                            onItemSelected(item)
+                        }
+                    }
+                ) { extractedAccent ->
+                    val item = items[index]
+                    pendingHeroUpdate?.cancel()
+                    pendingHeroUpdate = railScope.launch {
+                        delay(120)
+                        onHeroChanged(Hero(
+                            item.title,
+                            "Continue the story, wherever you left off.",
+                            paletteFor(item, extractedAccent),
+                            item.artworkUrl,
+                            item
+                        ))
+                    }
+                }
             }
         }
+        Box(
+            Modifier.align(Alignment.CenterEnd).width(58.dp)
+                .height(if (posters) 203.dp else 175.dp)
+                .background(Brush.horizontalGradient(listOf(Color.Transparent, midnight)))
+        )
     }
 }
 
@@ -903,7 +1277,6 @@ private fun MediaCard(
     val source = remember { MutableInteractionSource() }
     val focused by source.collectIsFocusedAsState()
     val bringIntoViewRequester = remember { BringIntoViewRequester() }
-    var extractedAccent by remember(item.artworkUrl) { mutableStateOf<Color?>(null) }
     val scale by animateFloatAsState(if (focused) 1.055f else 1f, label = "card scale")
     val shape = RoundedCornerShape(16.dp)
     val width = if (poster) 140.dp else 310.dp
@@ -918,20 +1291,12 @@ private fun MediaCard(
             .focusable(interactionSource = source)
     ) {
         AsyncImage(
-            model = ImageRequest.Builder(LocalContext.current)
-                .data(item.artworkUrl)
-                .crossfade(true)
-                .build(),
+            // A fresh ImageRequest on every focus recomposition can make Coil re-evaluate an
+            // unchanged poster. Stable URL models keep navigation on the memory-cache path.
+            model = item.artworkUrl,
             contentDescription = item.title,
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize(),
-            onSuccess = { success ->
-                Palette.from(success.result.drawable.toBitmap().copy(Bitmap.Config.ARGB_8888, false)).generate { paletteResult ->
-                    paletteResult?.dominantSwatch?.rgb?.let { rgb ->
-                        extractedAccent = Color(rgb or 0xFF000000.toInt())
-                    }
-                }
-            }
         )
         Box(
             modifier = Modifier.fillMaxSize().background(
@@ -940,14 +1305,17 @@ private fun MediaCard(
         )
         if (!poster) {
             Text(item.provider.label.uppercase(), color = ivory, fontSize = 10.sp, fontWeight = FontWeight.Bold,
-                modifier = Modifier.align(Alignment.TopEnd).clip(RoundedCornerShape(8.dp)).background(item.provider.accent).padding(horizontal = 7.dp, vertical = 4.dp))
+                modifier = Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 8.dp)
+                    .clip(RoundedCornerShape(8.dp)).background(item.provider.accent)
+                    .padding(horizontal = 7.dp, vertical = 4.dp))
             Box(modifier = Modifier.align(Alignment.BottomCenter).fillMaxWidth().height(4.dp).clip(CircleShape).background(Color.Black.copy(alpha = .55f))) {
                 Box(modifier = Modifier.fillMaxWidth(item.progress).height(4.dp).background(item.provider.accent))
             }
         }
         if (showEpisodeInfo && !poster) {
             Column(
-                modifier = Modifier.align(Alignment.BottomStart).padding(bottom = 10.dp)
+                modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth()
+                    .padding(start = 12.dp, end = 12.dp, bottom = 12.dp)
             ) {
                 Text(
                     item.showTitle ?: item.title,
@@ -974,13 +1342,15 @@ private fun MediaCard(
         } else {
             Text(item.title, color = ivory, fontSize = if (poster) 14.sp else 16.sp, fontWeight = FontWeight.SemiBold,
                 maxLines = 2, overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.align(Alignment.BottomStart).alpha(if (poster) 1f else .96f))
+                modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth()
+                    .padding(start = 12.dp, end = 12.dp, bottom = if (poster) 10.dp else 12.dp)
+                    .alpha(if (poster) 1f else .96f))
         }
     }
-    LaunchedEffect(focused, extractedAccent) {
+    LaunchedEffect(focused) {
         if (focused) {
             bringIntoViewRequester.bringIntoView()
-            onFocused(extractedAccent)
+            onFocused(null)
         }
     }
 }
@@ -988,41 +1358,96 @@ private fun MediaCard(
 @Composable
 private fun AppsScreen(palette: RelayPalette, onBackHome: () -> Unit) {
     val context = LocalContext.current
-    val apps = remember { InstalledApps.discover(context).filterNot { ProviderHandoff.isProviderPackage(it.packageName) } }
+    // This is intentionally the full installed-app launcher. Provider destinations in the
+    // top bar are media-first shortcuts, while Apps remains the reliable way to launch every
+    // installed TV application (including a provider when the user wants its native UI).
+    val apps = remember { InstalledApps.discover(context).sortedBy { it.label.lowercase() } }
     val firstAppFocusRequester = remember { FocusRequester() }
+    val appsGridState = rememberLazyGridState()
     LaunchedEffect(apps) {
+        appsGridState.scrollToItem(0)
         if (apps.isNotEmpty()) firstAppFocusRequester.requestFocus()
     }
-    Column(Modifier.fillMaxSize().padding(64.dp)) {
+    Column(Modifier.fillMaxSize().padding(horizontal = 56.dp, vertical = 48.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Apps", color = ivory, fontSize = 34.sp, fontWeight = FontWeight.Light)
             Spacer(Modifier.weight(1f))
             ActionButton("Back to Home", palette, primary = false, onClick = onBackHome)
         }
-        Spacer(Modifier.height(34.dp))
-        Text("All apps", color = ivory, fontSize = 20.sp)
-        Spacer(Modifier.height(14.dp))
-        Text("Launch every installed TV app from Relay. Connected media providers stay in the adaptive Home navigation, keeping this grid uncluttered.", color = muted, fontSize = 16.sp)
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(28.dp))
+        Text("All apps", color = ivory, fontSize = 23.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(8.dp))
+        Text("Every launchable app installed on this TV, using each app’s Android TV banner when available.", color = muted, fontSize = 15.sp)
+        Spacer(Modifier.height(22.dp))
         if (apps.isEmpty()) {
             Text("No launchable apps were found yet.", color = muted, fontSize = 17.sp)
         } else {
             LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 150.dp),
-                contentPadding = PaddingValues(end = 12.dp, bottom = 24.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
+                columns = GridCells.Fixed(6),
+                state = appsGridState,
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(14.dp),
+                verticalArrangement = Arrangement.spacedBy(18.dp),
                 modifier = Modifier.weight(1f)
             ) {
                 items(apps.size) { index ->
                     val app = apps[index]
-                    AppTile(
-                        label = app.label,
+                    InstalledAppTile(
+                        app = app,
                         palette = palette,
                         focusRequester = if (index == 0) firstAppFocusRequester else null
                     ) { InstalledApps.launch(context, app) }
                 }
             }
+        }
+    }
+}
+
+/** Google TV-style artwork-only app tile using the application's own 16:9 TV banner. */
+@Composable
+private fun InstalledAppTile(
+    app: InstalledApp,
+    palette: RelayPalette,
+    focusRequester: FocusRequester? = null,
+    onClick: () -> Unit
+) {
+    val source = remember { MutableInteractionSource() }
+    val focused by source.collectIsFocusedAsState()
+    val scale by animateFloatAsState(if (focused) 1.07f else 1f, label = "app tile focus")
+    val shape = RoundedCornerShape(16.dp)
+    val artwork = remember(app.packageName) {
+        if (app.hasLeanbackBanner) app.artwork.toBitmap(480, 270).asImageBitmap()
+        else app.artwork.toBitmap(192, 192).asImageBitmap()
+    }
+    Box(
+        modifier = (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .fillMaxWidth()
+            .aspectRatio(16f / 9f)
+            .scale(scale)
+            .clip(shape)
+            .background(if (focused) palette.accent.copy(alpha = .24f) else Color(0xFF20232A))
+            .clickable(interactionSource = source, indication = null, onClick = onClick)
+            .focusable(interactionSource = source)
+    ) {
+        if (app.hasLeanbackBanner) {
+            Image(
+                painter = BitmapPainter(artwork),
+                contentDescription = app.label,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Image(
+                painter = BitmapPainter(artwork),
+                contentDescription = app.label,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize(.58f).align(Alignment.Center)
+            )
+        }
+        if (focused) {
+            Box(
+                Modifier.fillMaxSize().background(Color.White.copy(alpha = .08f))
+            )
         }
     }
 }
@@ -1286,7 +1711,30 @@ private fun AppTile(
 }
 
 private enum class SettingsPage(val label: String) {
-    DISPLAY("Display"), PROVIDERS("Providers"), INTEGRATIONS("Integrations"), LAUNCHER("Launcher")
+    STATUS("Relay status"), DISPLAY("Display"), PROVIDERS("Providers"), PROFILE("Profile"), INTEGRATIONS("Integrations"), LAUNCHER("Launcher"), SYSTEM("System")
+}
+
+private data class SystemSettingsEntry(val label: String, val action: String, val symbol: String)
+
+private val systemSettingsEntries = listOf(
+    SystemSettingsEntry("Network & internet", Settings.ACTION_WIFI_SETTINGS, "Wi"),
+    SystemSettingsEntry("Display", Settings.ACTION_DISPLAY_SETTINGS, "Di"),
+    SystemSettingsEntry("Sound", Settings.ACTION_SOUND_SETTINGS, "So"),
+    SystemSettingsEntry("Apps", Settings.ACTION_APPLICATION_SETTINGS, "Ap"),
+    SystemSettingsEntry("Accessibility", Settings.ACTION_ACCESSIBILITY_SETTINGS, "Ac"),
+    SystemSettingsEntry("Date & time", Settings.ACTION_DATE_SETTINGS, "Dt"),
+    SystemSettingsEntry("Storage", Settings.ACTION_INTERNAL_STORAGE_SETTINGS, "St"),
+    SystemSettingsEntry("Device information", Settings.ACTION_DEVICE_INFO_SETTINGS, "i"),
+    SystemSettingsEntry("Developer options", Settings.ACTION_APPLICATION_DEVELOPMENT_SETTINGS, "</>"),
+    SystemSettingsEntry("All Android TV settings", Settings.ACTION_SETTINGS, "⋮")
+)
+
+private fun openSystemSettings(context: android.content.Context, action: String) {
+    val requested = Intent(action)
+    val fallback = Intent(Settings.ACTION_SETTINGS)
+    runCatching {
+        context.startActivity(if (requested.resolveActivity(context.packageManager) != null) requested else fallback)
+    }
 }
 
 @Composable
@@ -1296,7 +1744,14 @@ private fun SettingsScreen(
     onBackHome: () -> Unit,
     onProviderToggle: (Provider) -> Unit,
     onRequestHome: () -> Unit,
+    onRequestAutoStart: () -> Unit,
     onRequestSmartTubeAccess: () -> Unit,
+    continueWatchingLimits: Map<Provider, Int>,
+    onContinueWatchingLimitChanged: (Provider, Int) -> Unit,
+    smartTubeSubscriptions: List<SmartTubeSubscriptionVideo>,
+    smartTubeInstalled: Boolean,
+    hiddenSmartTubeChannels: Set<String>,
+    onSmartTubeChannelVisible: (String, Boolean) -> Unit,
     nuvioConnected: Boolean,
     nuvioSyncing: Boolean,
     nuvioItemCount: Int,
@@ -1304,79 +1759,475 @@ private fun SettingsScreen(
     onRefreshNuvio: () -> Unit,
     onManageProvider: (Provider) -> Unit,
     dateFormat: RelayDateFormat,
-    onDateFormatChanged: (RelayDateFormat) -> Unit
+    onDateFormatChanged: (RelayDateFormat) -> Unit,
+    profileImageUri: String?,
+    onProfileImageChanged: (String?) -> Unit,
+    stockLauncherOverride: StockLauncherOverride?
 ) {
+    val context = LocalContext.current
     var page by remember { mutableStateOf(SettingsPage.DISPLAY) }
+    var showAdvancedHomeSetup by remember { mutableStateOf(false) }
+    var showSmartTubeAdbSetup by remember { mutableStateOf(false) }
+    var shizukuMessage by remember { mutableStateOf<String?>(null) }
+    var shizukuWorking by remember { mutableStateOf(false) }
+    var webProfileUrl by remember(profileImageUri) { mutableStateOf(profileImageUri?.takeIf { it.startsWith("http://") || it.startsWith("https://") }.orEmpty()) }
+    var profileUrlError by remember { mutableStateOf<String?>(null) }
+    // The previous one-item LazyColumn made focus treat an entire Settings page as a single
+    // oversized target, causing it to jump when crossing between the left and right columns.
+    // A regular scroll container lets focus reveal only the actual control being selected.
+    val settingsContentState = rememberScrollState()
+    val settingsNavigationState = rememberScrollState()
+    val shizukuReadinessRevision = RelayShizuku.readinessRevisionForUi
+    val shizukuReady = remember(shizukuReadinessRevision) { RelayShizuku.isReady() }
+    val profileImagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            onProfileImageChanged(it.toString())
+        }
+    }
+    // A selected Settings category can reuse this screen while its old list offset is still
+    // remembered. Reset it before handing focus to the newly-selected content so its heading
+    // is never left above the rounded panel.
+    LaunchedEffect(page) {
+        settingsContentState.scrollTo(0)
+    }
     BackHandler(onBack = onBackHome)
-    Column(Modifier.fillMaxSize().padding(64.dp)) {
+    Column(Modifier.fillMaxSize().padding(horizontal = 58.dp, vertical = 42.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Settings", color = ivory, fontSize = 34.sp, fontWeight = FontWeight.Light)
             Spacer(Modifier.weight(1f))
             ActionButton("Back to Home", palette, primary = false, onClick = onBackHome)
         }
-        Spacer(Modifier.height(26.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-            SettingsPage.entries.forEach { destination ->
-                ActionButton(destination.label, palette, primary = page == destination) { page = destination }
+        Spacer(Modifier.height(24.dp))
+        Row(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
+            Column(
+                Modifier.width(230.dp).fillMaxHeight().clip(RoundedCornerShape(18.dp))
+                    .background(Color(0xFF101218)).verticalScroll(settingsNavigationState).padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                SettingsPage.entries.forEach { destination ->
+                    SettingsNavigationItem(destination.label, page == destination, palette) { page = destination }
+                }
+            }
+            Column(
+                Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(18.dp))
+                    .background(Color(0xFF101218)).border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(18.dp))
+                    .verticalScroll(settingsContentState).padding(30.dp)
+            ) {
+                when (page) {
+                        SettingsPage.STATUS -> {
+                            SettingsSectionTitle("Relay status", "A quick health check for the services powering your Home screen.")
+                            Spacer(Modifier.height(24.dp))
+                            StatusCard(
+                                title = "Nuvio",
+                                detail = when {
+                                    !nuvioConnected -> "Not connected"
+                                    nuvioSyncing -> "Syncing active profile…"
+                                    nuvioSyncError != null -> nuvioSyncError
+                                    else -> "Connected · $nuvioItemCount Continue Watching item${if (nuvioItemCount == 1) "" else "s"} available"
+                                },
+                                healthy = nuvioConnected && nuvioSyncError == null,
+                                palette = palette.copy(accent = Provider.NUVIO.accent)
+                            ) {
+                                if (nuvioConnected) onRefreshNuvio() else onManageProvider(Provider.NUVIO)
+                            }
+                            Spacer(Modifier.height(12.dp))
+                            StatusCard(
+                                title = "SmartTube",
+                                detail = when {
+                                    !smartTubeInstalled -> "App not installed"
+                                    smartTubeSubscriptions.isNotEmpty() -> "Connected · ${smartTubeSubscriptions.size} subscription video${if (smartTubeSubscriptions.size == 1) "" else "s"} received"
+                                    else -> "Installed · waiting for RelayTube/SmartTube shared data"
+                                },
+                                healthy = smartTubeInstalled && smartTubeSubscriptions.isNotEmpty(),
+                                palette = palette.copy(accent = Provider.SMARTTUBE.accent)
+                            ) { onManageProvider(Provider.SMARTTUBE) }
+                            Spacer(Modifier.height(12.dp))
+                            StatusCard(
+                                title = "Home launcher",
+                                detail = if (shizukuReady) "Shizuku authorized · ready to apply an override" else "Android Home role active · Shizuku override not authorized",
+                                healthy = shizukuReady,
+                                palette = palette
+                            ) { page = SettingsPage.LAUNCHER }
+                        }
+                        SettingsPage.DISPLAY -> {
+                            SettingsSectionTitle("Display", "Choose how dates and media information appear throughout Relay.")
+                            Spacer(Modifier.height(26.dp))
+                            Text("Date format", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                            Spacer(Modifier.height(7.dp))
+                            Text("Used for Coming Up, media details, and Calendar.", color = muted, fontSize = 15.sp)
+                            Spacer(Modifier.height(16.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                                RelayDateFormat.entries.forEach { format ->
+                                    ActionButton(format.label, palette, primary = dateFormat == format) { onDateFormatChanged(format) }
+                                }
+                            }
+                        }
+                        SettingsPage.PROVIDERS -> {
+                            SettingsSectionTitle("Media providers", "Connect services here, then choose which ones appear in Relay's Home navigation.")
+                            Spacer(Modifier.height(22.dp))
+                            Provider.values().forEach { provider ->
+                                val connected = provider in providers
+                                Column(
+                                    Modifier.fillMaxWidth().clip(RoundedCornerShape(15.dp)).background(Color(0xFF171A20))
+                                        .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(15.dp)).padding(18.dp)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Box(Modifier.size(9.dp).clip(CircleShape).background(provider.accent))
+                                        Spacer(Modifier.width(10.dp))
+                                        Text(provider.label, color = ivory, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+                                        Spacer(Modifier.weight(1f))
+                                        Text(if (connected) "Shown on Home" else "Hidden from Home", color = muted, fontSize = 14.sp)
+                                    }
+                                    Spacer(Modifier.height(15.dp))
+                                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                        ActionButton(if (connected) "Hide from Home" else "Show on Home", palette.copy(accent = provider.accent), primary = connected) { onProviderToggle(provider) }
+                                        ActionButton(if (provider == Provider.NUVIO && nuvioConnected) "Manage connection" else "Connect", palette.copy(accent = provider.accent), primary = false) { onManageProvider(provider) }
+                                    }
+                                    Spacer(Modifier.height(18.dp))
+                                    Text("Continue Watching cards", color = ivory, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                                    Spacer(Modifier.height(5.dp))
+                                    Text("${continueWatchingLimits[provider] ?: ContinueWatchingLimits.defaultLimit} maximum from ${provider.label}", color = muted, fontSize = 14.sp)
+                                    Spacer(Modifier.height(10.dp))
+                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                        listOf(1, 2, 4, 6, 8, 12).forEach { limit ->
+                                            ActionButton(limit.toString(), palette.copy(accent = provider.accent), primary = (continueWatchingLimits[provider] ?: ContinueWatchingLimits.defaultLimit) == limit) {
+                                                onContinueWatchingLimitChanged(provider, limit)
+                                            }
+                                        }
+                                    }
+                                }
+                                Spacer(Modifier.height(12.dp))
+                            }
+                            Text("Nuvio library sync", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                            Spacer(Modifier.height(7.dp))
+                            val status = when {
+                                !nuvioConnected -> "Not connected"
+                                nuvioSyncing -> "Syncing your active profile…"
+                                nuvioSyncError != null -> nuvioSyncError
+                                else -> "$nuvioItemCount Continue Watching item${if (nuvioItemCount == 1) "" else "s"} synced"
+                            }
+                            Text(status, color = if (nuvioSyncError != null) Provider.SMARTTUBE.accent else muted, fontSize = 15.sp)
+                            if (nuvioConnected) {
+                                Spacer(Modifier.height(14.dp))
+                                ActionButton(if (nuvioSyncing) "Refreshing Nuvio…" else "Refresh Nuvio", palette.copy(accent = Provider.NUVIO.accent), primary = false, onClick = onRefreshNuvio)
+                            }
+                        }
+                        SettingsPage.PROFILE -> {
+                            SettingsSectionTitle("Profile", "Personalize the profile button shown beside Settings.")
+                            Spacer(Modifier.height(26.dp))
+                            Box(
+                                Modifier.size(116.dp).clip(CircleShape).background(Provider.NUVIO.accent.copy(alpha = .65f))
+                                    .border(2.dp, palette.accent, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                if (profileImageUri != null) {
+                                    AsyncImage(profileImageUri, "Custom profile picture", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+                                } else {
+                                    Text("P", color = ivory, fontSize = 42.sp, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                            Spacer(Modifier.height(20.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                ActionButton("Choose picture", palette, primary = true) { profileImagePicker.launch(arrayOf("image/*")) }
+                                if (profileImageUri != null) {
+                                    ActionButton("Remove picture", palette, primary = false) { onProfileImageChanged(null) }
+                                }
+                            }
+                            Spacer(Modifier.height(12.dp))
+                            Text("Or use a web image", color = ivory, fontSize = 17.sp, fontWeight = FontWeight.Medium)
+                            Spacer(Modifier.height(8.dp))
+                            OutlinedTextField(
+                                value = webProfileUrl,
+                                onValueChange = { webProfileUrl = it; profileUrlError = null },
+                                label = { Text("https://example.com/profile.jpg") },
+                                singleLine = true,
+                                isError = profileUrlError != null,
+                                modifier = Modifier.fillMaxWidth(),
+                                textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
+                            )
+                            profileUrlError?.let { Text(it, color = Provider.SMARTTUBE.accent, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp)) }
+                            Spacer(Modifier.height(10.dp))
+                            ActionButton("Use web image", palette, primary = false) {
+                                val uri = runCatching { Uri.parse(webProfileUrl.trim()) }.getOrNull()
+                                if (uri?.scheme in setOf("http", "https") && !uri?.host.isNullOrBlank()) {
+                                    onProfileImageChanged(uri.toString())
+                                    profileUrlError = null
+                                } else {
+                                    profileUrlError = "Enter a valid http or https image address."
+                                }
+                            }
+                            Spacer(Modifier.height(12.dp))
+                            Text("Relay keeps the selected local image or web address across restarts and app updates.", color = muted, fontSize = 14.sp)
+                        }
+                        SettingsPage.INTEGRATIONS -> {
+                            SettingsSectionTitle("Integrations", "Allow Relay to surface useful playback state from supported apps.")
+                            Spacer(Modifier.height(26.dp))
+                            Text("SmartTube Now Playing", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                            Spacer(Modifier.height(8.dp))
+                            Text("Relay reads SmartTube's active media session. Existing private watch history stays private.", color = muted, fontSize = 15.sp, lineHeight = 22.sp)
+                            Spacer(Modifier.height(18.dp))
+                            ActionButton("Enable SmartTube access", palette.copy(accent = Provider.SMARTTUBE.accent), primary = false, onClick = onRequestSmartTubeAccess)
+                            val smartTubeChannels = remember(smartTubeSubscriptions) {
+                                smartTubeSubscriptions
+                                    .mapNotNull { video -> video.channelId?.let { id -> id to (video.channel ?: "Unknown channel") } }
+                                    .distinctBy { it.first }
+                                    .sortedBy { it.second.lowercase() }
+                            }
+                            if (smartTubeChannels.isNotEmpty()) {
+                                Spacer(Modifier.height(28.dp))
+                                Text("New from subscriptions", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                                Spacer(Modifier.height(8.dp))
+                                Text("Choose which subscribed creators appear in Relay. This never changes your YouTube subscriptions.", color = muted, fontSize = 15.sp, lineHeight = 21.sp)
+                                Spacer(Modifier.height(14.dp))
+                                smartTubeChannels.forEach { (channelId, channelName) ->
+                                    val visible = channelId !in hiddenSmartTubeChannels
+                                    Row(
+                                        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFF171A20))
+                                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text(channelName, color = ivory, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                        Spacer(Modifier.width(12.dp))
+                                        ActionButton(if (visible) "Showing" else "Hidden", palette.copy(accent = Provider.SMARTTUBE.accent), primary = visible) {
+                                            onSmartTubeChannelVisible(channelId, !visible)
+                                        }
+                                    }
+                                    Spacer(Modifier.height(8.dp))
+                                }
+                            }
+                            Spacer(Modifier.height(18.dp))
+                            Text("Required SmartTube setting", color = ivory, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                            Spacer(Modifier.height(7.dp))
+                            Text("In SmartTube, leave “Disable playback notifications” turned OFF. That setting deactivates SmartTube’s Android media session, so no launcher can read the currently playing video. Find it under Settings → Player → Developer.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+                            Spacer(Modifier.height(18.dp))
+                            Text("Having trouble with the Android TV switch?", color = ivory, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                            Spacer(Modifier.height(7.dp))
+                            Text("Some Google TV builds trap remote focus on the system Notification Access page. The ADB option grants access only to Relay's SmartTube listener.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+                            Spacer(Modifier.height(12.dp))
+                            ActionButton(if (showSmartTubeAdbSetup) "Hide ADB fallback" else "Show ADB fallback", palette.copy(accent = Provider.SMARTTUBE.accent), primary = false) {
+                                showSmartTubeAdbSetup = !showSmartTubeAdbSetup
+                            }
+                            if (showSmartTubeAdbSetup) {
+                                Spacer(Modifier.height(14.dp))
+                                Column(
+                                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFF090B10))
+                                        .border(1.dp, Color.White.copy(alpha = .10f), RoundedCornerShape(12.dp)).padding(16.dp)
+                                ) {
+                                    Text("With USB or wireless ADB connected to your TV, run:", color = ivory, fontSize = 14.sp)
+                                    Spacer(Modifier.height(9.dp))
+                                    Text("adb shell cmd notification allow_listener com.relayhome.launcher/com.relayhome.launcher.SmartTubeNowPlayingService", color = palette.accent, fontSize = 13.sp, lineHeight = 19.sp)
+                                    Spacer(Modifier.height(10.dp))
+                                    Text("To revoke it later:", color = muted, fontSize = 13.sp)
+                                    Spacer(Modifier.height(6.dp))
+                                    Text("adb shell cmd notification disallow_listener com.relayhome.launcher/com.relayhome.launcher.SmartTubeNowPlayingService", color = palette.accent, fontSize = 13.sp, lineHeight = 19.sp)
+                                }
+                            }
+                        }
+                        SettingsPage.LAUNCHER -> {
+                            SettingsSectionTitle("Home launcher", "Choose the method that works best on your Android TV or Google TV device.")
+                            Spacer(Modifier.height(24.dp))
+                            Text("Standard Home app", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                            Spacer(Modifier.height(7.dp))
+                            Text("Works on TVs that honor Android's Home role. Some Google TV builds keep their stock launcher in control even after Relay is selected.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+                            Spacer(Modifier.height(12.dp))
+                            ActionButton("Open Android Home chooser", palette, primary = true, onClick = onRequestHome)
+                            Spacer(Modifier.height(24.dp))
+                            Text("Simple auto-start", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                            Spacer(Modifier.height(7.dp))
+                            Text("For TVs that switch back to Google TV. Enable “Relay Home auto-start” in Accessibility. This is easy, but Accessibility services can add a small system performance cost.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+                            Spacer(Modifier.height(12.dp))
+                            ActionButton("Open Accessibility setup", palette, primary = false, onClick = onRequestAutoStart)
+                            Spacer(Modifier.height(24.dp))
+                            Text("Shizuku connection", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                            Spacer(Modifier.height(7.dp))
+                            Text(
+                                if (shizukuReady) "Relay is authorized to use the running Shizuku service."
+                                else "Authorize Relay with Shizuku here before applying a launcher override.",
+                                color = muted,
+                                fontSize = 14.sp,
+                                lineHeight = 20.sp
+                            )
+                            Spacer(Modifier.height(12.dp))
+                            ActionButton(
+                                if (shizukuReady) "Shizuku connected" else "Authorize Relay with Shizuku",
+                                palette,
+                                primary = !shizukuReady
+                            ) {
+                                shizukuMessage = if (shizukuReady) {
+                                    "Shizuku is ready. Open Advanced ADB mode below to apply the override."
+                                } else {
+                                    RelayShizuku.requestAccess()
+                                }
+                            }
+                            shizukuMessage?.let { message ->
+                                Spacer(Modifier.height(8.dp))
+                                Text(message, color = if (message.startsWith("Could") || message.startsWith("Start")) Provider.SMARTTUBE.accent else palette.accent, fontSize = 13.sp, lineHeight = 18.sp)
+                            }
+                            Spacer(Modifier.height(24.dp))
+                            Text("Advanced ADB mode", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                            Spacer(Modifier.height(7.dp))
+                            Text("Reliable Google TV override. Relay detects the stock launcher Android is actually resolving, then gives you its precise reversible ADB command.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+                            Spacer(Modifier.height(12.dp))
+                            ActionButton(if (showAdvancedHomeSetup) "Hide ADB guide" else "Show ADB guide", palette, primary = false) {
+                                showAdvancedHomeSetup = !showAdvancedHomeSetup
+                            }
+                            if (showAdvancedHomeSetup) {
+                                Spacer(Modifier.height(14.dp))
+                                Column(
+                                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFF090B10))
+                                        .border(1.dp, Color.White.copy(alpha = .10f), RoundedCornerShape(12.dp)).padding(16.dp)
+                                ) {
+                                    val override = stockLauncherOverride
+                                    Text("1. Enable Developer options and USB debugging on the TV.", color = ivory, fontSize = 14.sp)
+                                    Spacer(Modifier.height(7.dp))
+                                    Text(if (override != null) "2. Relay detected ${override.label}. Connect with ADB, then run:" else "2. Connect with ADB, then run the command for your stock launcher:", color = ivory, fontSize = 14.sp)
+                                    Spacer(Modifier.height(8.dp))
+                                    Text(override?.disableCommand ?: "adb shell pm disable-user --user 0 <stock-launcher-package>", color = palette.accent, fontSize = 13.sp, lineHeight = 19.sp)
+                                    if (override != null) {
+                                        Spacer(Modifier.height(12.dp))
+                                        ActionButton(
+                                            when {
+                                                shizukuWorking -> "Applying Relay override…"
+                                                shizukuReady -> "Enable Relay Home override"
+                                                else -> "Authorize Shizuku override"
+                                            },
+                                            palette,
+                                            primary = true
+                                        ) {
+                                            if (!shizukuReady) {
+                                                shizukuMessage = RelayShizuku.requestAccess()
+                                            } else {
+                                                shizukuWorking = true
+                                                RelayShizuku.setStockLauncherEnabled(override, enabled = false) { result ->
+                                                    shizukuMessage = result.fold(onSuccess = { it }, onFailure = { it.message ?: "Could not apply the override." })
+                                                    shizukuWorking = false
+                                                }
+                                            }
+                                        }
+                                        Spacer(Modifier.height(8.dp))
+                                        Text("Uses only the Shizuku permission you approve. Relay never runs ADB commands on its own.", color = muted, fontSize = 13.sp, lineHeight = 18.sp)
+                                        shizukuMessage?.let { message ->
+                                            Spacer(Modifier.height(8.dp))
+                                            Text(message, color = if (message.startsWith("Could") || message.startsWith("Start")) Provider.SMARTTUBE.accent else palette.accent, fontSize = 13.sp, lineHeight = 18.sp)
+                                        }
+                                    }
+                                    if (override != null) {
+                                        Spacer(Modifier.height(10.dp))
+                                        ActionButton("Copy disable command", palette, primary = false) {
+                                            context.getSystemService(ClipboardManager::class.java)
+                                                ?.setPrimaryClip(ClipData.newPlainText("Relay launcher override", override.disableCommand))
+                                        }
+                                    }
+                                    Spacer(Modifier.height(8.dp))
+                                    Text("Restore Google TV later with:", color = muted, fontSize = 13.sp)
+                                    Spacer(Modifier.height(6.dp))
+                                    Text(override?.restoreCommand ?: "adb shell pm enable --user 0 <stock-launcher-package>", color = palette.accent, fontSize = 13.sp, lineHeight = 19.sp)
+                                    if (override != null && shizukuReady) {
+                                        Spacer(Modifier.height(10.dp))
+                                        ActionButton("Restore stock launcher with Shizuku", palette, primary = false) {
+                                            shizukuWorking = true
+                                            RelayShizuku.setStockLauncherEnabled(override, enabled = true) { result ->
+                                                shizukuMessage = result.fold(onSuccess = { it }, onFailure = { it.message ?: "Could not restore the stock launcher." })
+                                                shizukuWorking = false
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        SettingsPage.SYSTEM -> {
+                            SettingsSectionTitle("Android TV settings", "Open the device settings Android TV exposes to Relay. OEM-specific pages fall back to the main Settings screen.")
+                            Spacer(Modifier.height(24.dp))
+                            systemSettingsEntries.chunked(3).forEach { row ->
+                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                                    row.forEach { entry ->
+                                        Box(Modifier.weight(1f)) {
+                                            SystemSettingsTile(entry, palette) { openSystemSettings(context, entry.action) }
+                                        }
+                                    }
+                                    repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+                                }
+                                Spacer(Modifier.height(14.dp))
+                            }
+                        }
+                }
             }
         }
-        Spacer(Modifier.height(42.dp))
-        when (page) {
-            SettingsPage.DISPLAY -> {
-                Text("Display", color = ivory, fontSize = 22.sp)
-                Spacer(Modifier.height(12.dp))
-                Text("Date format", color = ivory, fontSize = 18.sp)
-                Spacer(Modifier.height(7.dp))
-                Text("Used for Coming Up, media details, and Calendar.", color = muted, fontSize = 16.sp)
-                Spacer(Modifier.height(16.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                    RelayDateFormat.entries.forEach { format ->
-                        ActionButton(format.label, palette, primary = dateFormat == format) { onDateFormatChanged(format) }
-                    }
-                }
-            }
-            SettingsPage.PROVIDERS -> {
-                Text("Connected providers", color = ivory, fontSize = 22.sp)
-                Spacer(Modifier.height(10.dp))
-                Text("Choose which media services appear in Relay's Home navigation.", color = muted, fontSize = 16.sp)
-                Spacer(Modifier.height(18.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(18.dp)) {
-                    Provider.values().forEach { provider ->
-                        val connected = provider in providers
-                        ActionButton("${provider.label}  ${if (connected) "Shown" else "Add to Home"}", palette, primary = connected) { onProviderToggle(provider) }
-                        ActionButton(if (provider == Provider.NUVIO && nuvioConnected) "Manage ${provider.label}" else "Connect ${provider.label}", palette.copy(accent = provider.accent), primary = false) { onManageProvider(provider) }
-                    }
-                }
-                Spacer(Modifier.height(30.dp))
-                Text("Nuvio library sync", color = ivory, fontSize = 18.sp)
-                Spacer(Modifier.height(7.dp))
-                val status = when {
-                    !nuvioConnected -> "Not connected"
-                    nuvioSyncing -> "Syncing your active profile…"
-                    nuvioSyncError != null -> nuvioSyncError
-                    else -> "$nuvioItemCount Continue Watching item${if (nuvioItemCount == 1) "" else "s"} synced"
-                }
-                Text(status, color = if (nuvioSyncError != null) Provider.SMARTTUBE.accent else muted, fontSize = 16.sp)
-                if (nuvioConnected) {
-                    Spacer(Modifier.height(14.dp))
-                    ActionButton(if (nuvioSyncing) "Refreshing Nuvio…" else "Refresh Nuvio", palette.copy(accent = Provider.NUVIO.accent), primary = false, onClick = onRefreshNuvio)
-                }
-            }
-            SettingsPage.INTEGRATIONS -> {
-                Text("SmartTube integration", color = ivory, fontSize = 22.sp)
-                Spacer(Modifier.height(10.dp))
-                Text("Allow Relay to read SmartTube's active media session for Now Playing and future Continue Watching. Existing private history remains private.", color = muted, fontSize = 16.sp, lineHeight = 23.sp)
-                Spacer(Modifier.height(18.dp))
-                ActionButton("Enable SmartTube Now Playing", palette.copy(accent = Provider.SMARTTUBE.accent), primary = false, onClick = onRequestSmartTubeAccess)
-            }
-            SettingsPage.LAUNCHER -> {
-                Text("Launcher", color = ivory, fontSize = 22.sp)
-                Spacer(Modifier.height(10.dp))
-                Text("Set Relay as your Home app to open it when you press the remote Home button.", color = muted, fontSize = 16.sp)
-                Spacer(Modifier.height(18.dp))
-                ActionButton("Use Relay as Home", palette, primary = true, onClick = onRequestHome)
-            }
+    }
+}
+
+@Composable
+private fun SystemSettingsTile(entry: SystemSettingsEntry, palette: RelayPalette, onClick: () -> Unit) {
+    val source = remember { MutableInteractionSource() }
+    val focused by source.collectIsFocusedAsState()
+    val scale by animateFloatAsState(if (focused) 1.035f else 1f, label = "system settings tile")
+    Column(
+        Modifier.fillMaxWidth().aspectRatio(1.38f).scale(scale).clip(RoundedCornerShape(16.dp))
+            .background(if (focused) palette.accent.copy(alpha = .20f) else Color(0xFF171A20))
+            .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .09f), RoundedCornerShape(16.dp))
+            .clickable(interactionSource = source, indication = null, onClick = onClick)
+            .focusable(interactionSource = source).padding(18.dp),
+        verticalArrangement = Arrangement.SpaceBetween
+    ) {
+        Box(
+            Modifier.size(44.dp).clip(RoundedCornerShape(13.dp)).background(palette.accent.copy(alpha = .24f)),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(entry.symbol, color = ivory, fontSize = if (entry.symbol.length > 2) 14.sp else 18.sp, fontWeight = FontWeight.Bold)
         }
+        Text(entry.label, color = ivory, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun SettingsNavigationItem(label: String, selected: Boolean, palette: RelayPalette, onClick: () -> Unit) {
+    val source = remember { MutableInteractionSource() }
+    val focused by source.collectIsFocusedAsState()
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+            .background(if (selected || focused) palette.accent.copy(alpha = .20f) else Color.Transparent)
+            .border(if (focused) 2.dp else 0.dp, if (focused) palette.accent else Color.Transparent, RoundedCornerShape(12.dp))
+            .clickable(interactionSource = source, indication = null, onClick = onClick)
+            .focusable(interactionSource = source).padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(Modifier.size(7.dp).clip(CircleShape).background(if (selected) palette.accent else Color.Transparent))
+        Spacer(Modifier.width(12.dp))
+        Text(label, color = if (selected || focused) ivory else muted, fontSize = 17.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
+    }
+}
+
+@Composable
+private fun SettingsSectionTitle(title: String, description: String) {
+    Text(title, color = ivory, fontSize = 25.sp, fontWeight = FontWeight.Light)
+    Spacer(Modifier.height(8.dp))
+    Text(description, color = muted, fontSize = 15.sp, lineHeight = 22.sp)
+}
+
+@Composable
+private fun StatusCard(
+    title: String,
+    detail: String,
+    healthy: Boolean,
+    palette: RelayPalette,
+    onClick: () -> Unit
+) {
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(15.dp)).background(Color(0xFF171A20))
+            .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(15.dp)).padding(18.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(10.dp).clip(CircleShape).background(if (healthy) Color(0xFF65D68A) else Color(0xFFE3AA62)))
+            Spacer(Modifier.width(10.dp))
+            Text(title, color = ivory, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+        }
+        Spacer(Modifier.height(8.dp))
+        Text(detail, color = muted, fontSize = 14.sp, lineHeight = 20.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+        Spacer(Modifier.height(14.dp))
+        ActionButton(if (title == "Nuvio" && healthy) "Refresh" else "Open", palette, primary = false, onClick = onClick)
     }
 }
 
@@ -1526,20 +2377,30 @@ private fun NuvioConnectScreen(palette: RelayPalette, connected: Boolean, onConn
 }
 
 @Composable
-private fun DetailsScreen(item: MediaItem, palette: RelayPalette, dateFormat: RelayDateFormat, onBackHome: () -> Unit) {
+private fun DetailsScreen(
+    item: MediaItem,
+    palette: RelayPalette,
+    dateFormat: RelayDateFormat,
+    nuvioSession: NuvioSession?,
+    nuvioProfileId: Int,
+    onLibraryChanged: () -> Unit,
+    onBackHome: () -> Unit
+) {
     val context = LocalContext.current
+    val libraryScope = rememberCoroutineScope()
     val backFocusRequester = remember { FocusRequester() }
     val resumeFocusRequester = remember { FocusRequester() }
     val seasonFocusRequester = remember { FocusRequester() }
-    val episodeFocusRequester = remember { FocusRequester() }
-    val episodeMatch = remember(item.episodeInfo) { Regex("S(\\d+)\\s*•\\s*E(\\d+)").find(item.episodeInfo.orEmpty()) }
+    val episodeMatch = remember(item.episodeInfo) { Regex("(?i)S\\s*(\\d+)\\D{0,8}E\\s*(\\d+)").find(item.episodeInfo.orEmpty()) }
     val seasonEpisode = episodeMatch?.value
     val originalSeason = episodeMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
     val originalEpisode = episodeMatch?.groupValues?.getOrNull(2)?.toIntOrNull()
-    var expandedEpisodeSelector by remember(item) { mutableStateOf<String?>(null) }
+    var pickerVisible by remember(item) { mutableStateOf(false) }
     var selectedSeason by remember(item) { mutableStateOf(episodeMatch?.groupValues?.getOrNull(1)?.toIntOrNull() ?: 1) }
     var selectedEpisode by remember(item) { mutableStateOf(episodeMatch?.groupValues?.getOrNull(2)?.toIntOrNull() ?: 1) }
     var pickerData by remember(item, selectedSeason) { mutableStateOf<TvSeason?>(null) }
+    var librarySaving by remember(item) { mutableStateOf(false) }
+    var libraryStatus by remember(item) { mutableStateOf<String?>(null) }
     LaunchedEffect(item, selectedSeason) {
         if (seasonEpisode != null) {
             pickerData = TmdbApi.seasonEpisodes(item, selectedSeason).getOrNull()
@@ -1550,7 +2411,8 @@ private fun DetailsScreen(item: MediaItem, palette: RelayPalette, dateFormat: Re
     val selectedPlaybackItem = if (seasonEpisode != null && (selectedSeason != originalSeason || selectedEpisode != originalEpisode)) {
         item.copy(episodeInfo = "S${selectedSeason.toString().padStart(2, '0')} • E${selectedEpisode.toString().padStart(2, '0')}", progress = 0f)
     } else item
-    BackHandler(onBack = onBackHome)
+    BackHandler(enabled = pickerVisible) { pickerVisible = false }
+    BackHandler(enabled = !pickerVisible, onBack = onBackHome)
     LaunchedEffect(Unit) { resumeFocusRequester.requestFocus() }
     Box(
         modifier = Modifier.fillMaxSize().background(midnight)
@@ -1580,92 +2442,63 @@ private fun DetailsScreen(item: MediaItem, palette: RelayPalette, dateFormat: Re
             Text("RELAY HOME", color = ivory.copy(alpha = .75f), fontSize = 15.sp, letterSpacing = 3.sp)
         }
         Box(
-            modifier = Modifier.fillMaxSize().padding(start = 78.dp, end = 78.dp, top = 145.dp, bottom = 105.dp),
+            modifier = Modifier.fillMaxSize().padding(start = 78.dp, end = 78.dp, top = 98.dp, bottom = 48.dp),
             contentAlignment = Alignment.CenterStart
         ) {
-            Column(modifier = Modifier.width(760.dp).padding(bottom = 80.dp)) {
+            Column(modifier = Modifier.width(800.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     DetailPill(item.provider.label.uppercase(), item.provider.accent)
                 }
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(9.dp))
                 Text(
                     item.title.uppercase(),
                     color = ivory,
-                    fontSize = 34.sp,
-                    lineHeight = 42.sp,
+                    fontSize = 30.sp,
+                    lineHeight = 35.sp,
                     fontWeight = FontWeight.Light,
                     letterSpacing = 2.sp,
-                    maxLines = 3,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(7.dp))
                 Text(
-                    listOfNotNull(item.episodeInfo, formatRelayDate(item.releaseInfo, dateFormat), item.rating?.let { "★ ${"%.1f".format(it)}" }, item.genres, "${(item.progress * 100).toInt()}% complete").joinToString("  •  "),
+                    listOfNotNull(
+                        item.episodeInfo,
+                        formatRelayDate(item.releaseInfo, dateFormat),
+                        item.durationMs.takeIf { it > 0 }?.let(::formatMediaDuration),
+                        item.rating?.let { "★ ${"%.1f".format(it)}" },
+                        item.genres,
+                        item.progress.takeIf { it > 0f }?.let { "${(it * 100).toInt()}% complete" }
+                    ).joinToString("  •  "),
                     color = ivory.copy(alpha = .82f),
                     fontSize = 14.sp,
                     lineHeight = 20.sp,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(Modifier.height(16.dp))
+                Spacer(Modifier.height(9.dp))
                 Text(
                     item.description ?: "Details are available in ${item.provider.label}.",
                     color = muted,
                     fontSize = 15.sp,
-                    lineHeight = 23.sp,
-                    maxLines = 5,
+                    lineHeight = 20.sp,
+                    maxLines = 3,
                     overflow = TextOverflow.Ellipsis
                 )
                 seasonEpisode?.let {
-                    Spacer(Modifier.height(18.dp))
+                    Spacer(Modifier.height(10.dp))
                     Text("Season & episode", color = ivory.copy(alpha = .9f), fontSize = 14.sp, fontWeight = FontWeight.Medium)
-                    Spacer(Modifier.height(8.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.fillMaxWidth()) {
-                        ActionButton(
-                            "Season ${selectedSeason.toString().padStart(2, '0')}  ▾", palette,
-                            primary = true, focusRequester = seasonFocusRequester,
-                            upFocusRequester = backFocusRequester, downFocusRequester = resumeFocusRequester
-                        ) {
-                            expandedEpisodeSelector = if (expandedEpisodeSelector == "season") null else "season"
-                        }
-                        ActionButton(
-                            "Episode ${selectedEpisode.toString().padStart(2, '0')}  ▾", palette,
-                            primary = true, focusRequester = episodeFocusRequester,
-                            upFocusRequester = backFocusRequester, downFocusRequester = resumeFocusRequester
-                        ) {
-                            expandedEpisodeSelector = if (expandedEpisodeSelector == "episode") null else "episode"
-                        }
-                    }
-                    if (expandedEpisodeSelector != null) {
-                        Spacer(Modifier.height(10.dp))
-                        Column(
-                            Modifier.width(650.dp).clip(RoundedCornerShape(14.dp)).background(Color(0xE815121C)).border(1.dp, palette.accent.copy(alpha = .6f), RoundedCornerShape(14.dp)).padding(13.dp)
-                        ) {
-                            Text(if (expandedEpisodeSelector == "season") "Choose season" else "Choose episode", color = muted, fontSize = 13.sp)
-                            Spacer(Modifier.height(9.dp))
-                            LazyRow(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-                                if (expandedEpisodeSelector == "season") {
-                                    // TMDB gives the exact season list when it can resolve the show.
-                                    // Keep the picker useful for Nuvio titles that lack a confident match.
-                                    items(pickerData?.seasons?.takeIf { it.isNotEmpty() } ?: (1..20).toList()) { value ->
-                                        ActionButton("Season $value", palette, primary = value == selectedSeason, upFocusRequester = seasonFocusRequester) {
-                                            selectedSeason = value
-                                            expandedEpisodeSelector = null
-                                        }
-                                    }
-                                } else {
-                                    items(pickerData?.episodes?.takeIf { it.isNotEmpty() } ?: (1..50).map { TvEpisode(it, "Episode $it") }) { value ->
-                                        ActionButton("E${value.number.toString().padStart(2, '0')}  ${value.title}", palette, primary = value.number == selectedEpisode, upFocusRequester = episodeFocusRequester) {
-                                            selectedEpisode = value.number
-                                            expandedEpisodeSelector = null
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    Spacer(Modifier.height(5.dp))
+                    ActionButton(
+                        "S${selectedSeason.toString().padStart(2, '0')}  •  E${selectedEpisode.toString().padStart(2, '0')}    Choose episode",
+                        palette,
+                        primary = false,
+                        focusRequester = seasonFocusRequester,
+                        upFocusRequester = backFocusRequester,
+                        downFocusRequester = resumeFocusRequester
+                    ) { pickerVisible = true }
                 }
-                Spacer(Modifier.height(24.dp))
+                Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     ActionButton(
                         "▶  ${if (selectedPlaybackItem.progress > 0f) "Resume" else "Play"}",
@@ -1674,11 +2507,32 @@ private fun DetailsScreen(item: MediaItem, palette: RelayPalette, dateFormat: Re
                         focusRequester = resumeFocusRequester,
                         upFocusRequester = if (seasonEpisode != null) seasonFocusRequester else backFocusRequester
                     ) { ProviderHandoff.play(context, selectedPlaybackItem) }
+                    if (nuvioSession != null && item.provider == Provider.NUVIO && item.providerContentId != null) {
+                        ActionButton(if (librarySaving) "Adding…" else "＋ Add to Nuvio Library", palette.copy(accent = Provider.NUVIO.accent), primary = false) {
+                            if (!librarySaving) {
+                                librarySaving = true
+                                libraryStatus = null
+                                libraryScope.launch {
+                                    NuvioApi.addToLibrary(nuvioSession, nuvioProfileId, item)
+                                        .onSuccess {
+                                            libraryStatus = "Added to your Nuvio Library."
+                                            onLibraryChanged()
+                                        }
+                                        .onFailure { error -> libraryStatus = error.message ?: "Couldn’t add this title to Nuvio." }
+                                    librarySaving = false
+                                }
+                            }
+                        }
+                    }
                 }
-                Spacer(Modifier.height(25.dp))
+                libraryStatus?.let {
+                    Spacer(Modifier.height(8.dp))
+                    Text(it, color = if (it.startsWith("Added")) Provider.NUVIO.accent else Provider.SMARTTUBE.accent, fontSize = 14.sp)
+                }
+                Spacer(Modifier.height(12.dp))
                 if (item.progress > 0f) {
                     Text("Continue watching", color = ivory.copy(alpha = .9f), fontSize = 15.sp)
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(5.dp))
                     Box(Modifier.width(400.dp).height(5.dp).clip(CircleShape).background(Color.White.copy(alpha = .22f))) {
                         Box(Modifier.fillMaxWidth(item.progress).height(5.dp).background(item.provider.accent))
                     }
@@ -1693,7 +2547,139 @@ private fun DetailsScreen(item: MediaItem, palette: RelayPalette, dateFormat: Re
             Spacer(Modifier.width(12.dp))
             Text("Playback opens in your connected provider", color = muted, fontSize = 14.sp)
         }
+        if (pickerVisible) {
+            SeasonEpisodePicker(
+                palette = palette,
+                seasons = pickerData?.seasons?.takeIf { it.isNotEmpty() } ?: (1..20).toList(),
+                episodes = pickerData?.episodes?.takeIf { it.isNotEmpty() } ?: (1..50).map { TvEpisode(it, "Episode $it") },
+                selectedSeason = selectedSeason,
+                selectedEpisode = selectedEpisode,
+                onSeasonSelected = { selectedSeason = it },
+                onEpisodeSelected = { selectedEpisode = it },
+                onApply = { pickerVisible = false },
+                onDismiss = { pickerVisible = false }
+            )
+        }
     }
+}
+
+@Composable
+private fun SeasonEpisodePicker(
+    palette: RelayPalette,
+    seasons: List<Int>,
+    episodes: List<TvEpisode>,
+    selectedSeason: Int,
+    selectedEpisode: Int,
+    onSeasonSelected: (Int) -> Unit,
+    onEpisodeSelected: (Int) -> Unit,
+    onApply: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val seasonFocusRequester = remember { FocusRequester() }
+    val episodeFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) { seasonFocusRequester.requestFocus() }
+    Box(
+        Modifier.fillMaxSize().background(midnight.copy(alpha = .94f)).padding(horizontal = 72.dp, vertical = 54.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            Modifier.fillMaxWidth().fillMaxHeight().clip(RoundedCornerShape(24.dp)).background(Color(0xFF111319))
+                .border(1.dp, Color.White.copy(alpha = .12f), RoundedCornerShape(24.dp)).padding(28.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column {
+                    Text("Choose season & episode", color = ivory, fontSize = 28.sp, fontWeight = FontWeight.Light)
+                    Spacer(Modifier.height(5.dp))
+                    Text("Use left and right to switch columns, then press Select.", color = muted, fontSize = 14.sp)
+                }
+                Spacer(Modifier.weight(1f))
+                ActionButton("Close", palette, primary = false, onClick = onDismiss)
+            }
+            Spacer(Modifier.height(22.dp))
+            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(20.dp)) {
+                Column(Modifier.width(250.dp).fillMaxHeight()) {
+                    Text("SEASONS", color = palette.accent, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
+                    Spacer(Modifier.height(10.dp))
+                    LazyColumn(
+                        Modifier.fillMaxSize().clip(RoundedCornerShape(14.dp)).background(Color(0xFF0B0D12)),
+                        contentPadding = PaddingValues(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        items(seasons) { season ->
+                            SeasonEpisodeChoice(
+                                label = "Season ${season.toString().padStart(2, '0')}",
+                                selected = season == selectedSeason,
+                                palette = palette,
+                                focusRequester = if (season == selectedSeason) seasonFocusRequester else null,
+                                rightFocusRequester = episodeFocusRequester
+                            ) { onSeasonSelected(season) }
+                        }
+                    }
+                }
+                Column(Modifier.weight(1f).fillMaxHeight()) {
+                    Text("EPISODES", color = palette.accent, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
+                    Spacer(Modifier.height(10.dp))
+                    LazyColumn(
+                        Modifier.fillMaxSize().clip(RoundedCornerShape(14.dp)).background(Color(0xFF0B0D12)),
+                        contentPadding = PaddingValues(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(5.dp)
+                    ) {
+                        items(episodes) { episode ->
+                            SeasonEpisodeChoice(
+                                label = "E${episode.number.toString().padStart(2, '0')}   ${episode.title}",
+                                selected = episode.number == selectedEpisode,
+                                palette = palette,
+                                focusRequester = if (episode.number == selectedEpisode) episodeFocusRequester else null,
+                                leftFocusRequester = seasonFocusRequester
+                            ) { onEpisodeSelected(episode.number) }
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(18.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Selected  S${selectedSeason.toString().padStart(2, '0')} • E${selectedEpisode.toString().padStart(2, '0')}",
+                    color = ivory,
+                    fontSize = 17.sp,
+                    fontWeight = FontWeight.Medium
+                )
+                Spacer(Modifier.weight(1f))
+                ActionButton("Use this episode", palette, primary = true, onClick = onApply)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SeasonEpisodeChoice(
+    label: String,
+    selected: Boolean,
+    palette: RelayPalette,
+    focusRequester: FocusRequester? = null,
+    leftFocusRequester: FocusRequester? = null,
+    rightFocusRequester: FocusRequester? = null,
+    onClick: () -> Unit
+) {
+    val source = remember { MutableInteractionSource() }
+    val focused by source.collectIsFocusedAsState()
+    Text(
+        label,
+        color = if (selected || focused) ivory else muted,
+        fontSize = 16.sp,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+        modifier = (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .then(if (leftFocusRequester != null || rightFocusRequester != null) Modifier.focusProperties {
+                if (leftFocusRequester != null) left = leftFocusRequester
+                if (rightFocusRequester != null) right = rightFocusRequester
+            } else Modifier)
+            .fillMaxWidth().clip(RoundedCornerShape(10.dp))
+            .background(if (selected || focused) palette.accent.copy(alpha = .22f) else Color.Transparent)
+            .border(if (focused) 2.dp else 0.dp, if (focused) palette.accent else Color.Transparent, RoundedCornerShape(10.dp))
+            .clickable(interactionSource = source, indication = null, onClick = onClick)
+            .focusable(interactionSource = source).padding(horizontal = 14.dp, vertical = 11.dp)
+    )
 }
 
 @Composable
@@ -1713,6 +2699,18 @@ private fun sampleContinueWatching(providers: Set<Provider>): List<MediaItem> = 
     MediaItem("The Long Way Home", Provider.STREMIO, .24f, listOf(Color(0xFF4C302A), Color(0xFF0C0808)), "https://images.unsplash.com/photo-1533929736458-ca588d08c8be?auto=format&fit=crop&w=960&q=85"),
     MediaItem("Bright Hollow", Provider.NUVIO, .72f, listOf(Color(0xFF0F414E), Color(0xFF050B0D)), "https://images.unsplash.com/photo-1499346030926-9a72daac6c63?auto=format&fit=crop&w=960&q=85")
 ).filter { it.provider in providers }
+
+/** Keeps SmartTube's App Peek navigable before it has reported a live media session. */
+private fun sampleSmartTubePeek(): List<MediaItem> = listOf(
+    MediaItem(
+        title = "Open SmartTube",
+        provider = Provider.SMARTTUBE,
+        progress = 0f,
+        colors = listOf(Provider.SMARTTUBE.accent.copy(alpha = .45f), midnight),
+        artworkUrl = "",
+        episodeInfo = "Your current video will appear here"
+    )
+)
 
 private fun sampleRecommended(providers: Set<Provider>): List<MediaItem> {
     if (providers.isEmpty()) return emptyList()

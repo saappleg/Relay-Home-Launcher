@@ -13,6 +13,7 @@ import android.widget.Toast
 internal object ProviderHandoff {
     private const val nuvioPackage = "com.nuvio.tv"
     private val smartTubePackages = listOf(
+        "com.relaytube.stable",
         "app.smarttube.stable",
         "org.smarttube.stable",
         "org.smarttube.beta"
@@ -72,7 +73,7 @@ internal object ProviderHandoff {
     }
 
     /** Opens a specific YouTube video in the installed SmartTube variant. */
-    fun openSmartTubeVideo(context: Context, videoId: String) {
+    fun openSmartTubeVideo(context: Context, videoId: String, resumePositionMs: Long = 0L) {
         val packageName = smartTubePackages.firstOrNull { context.packageManager.getLaunchIntentForPackage(it) != null }
         if (packageName == null) {
             notice(context, "SmartTube is not installed. Install its Android TV stable or beta build first.")
@@ -80,6 +81,9 @@ internal object ProviderHandoff {
         }
         val uri = Uri.parse("https://www.youtube.com/watch").buildUpon()
             .appendQueryParameter("v", videoId)
+            .apply {
+                if (resumePositionMs > 0L) appendQueryParameter("t", "${resumePositionMs / 1_000}s")
+            }
             .build()
         val intent = Intent(Intent.ACTION_VIEW, uri)
             .setPackage(packageName)
@@ -118,7 +122,7 @@ internal object ProviderHandoff {
                 launch(context, uri, "Stremio is not installed or does not support playback links yet.")
             }
             Provider.NUVIO -> openNuvioEpisode(context, item)
-            Provider.SMARTTUBE -> item.providerContentId?.let { openSmartTubeVideo(context, it) } ?: openSmartTube(context)
+            Provider.SMARTTUBE -> item.providerContentId?.let { openSmartTubeVideo(context, it, item.resumePositionMs) } ?: openSmartTube(context)
         }
     }
 

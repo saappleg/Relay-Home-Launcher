@@ -19,12 +19,12 @@ android {
         applicationId = "com.relayhome.launcher"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0-alpha1"
+        versionCode = 2
+        versionName = "0.1.0-beta.1"
         buildConfigField("String", "TMDB_API_KEY", "\"${localProperties.getProperty("tmdb.apiKey", "")}\"")
     }
 
-    buildFeatures { compose = true; buildConfig = true }
+    buildFeatures { compose = true; buildConfig = true; aidl = true }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -46,5 +46,7 @@ dependencies {
     implementation(libs.androidx.compose.material3)
     implementation(libs.coil.compose)
     implementation(libs.androidx.palette)
+    implementation("dev.rikka.shizuku:api:13.1.5")
+    implementation("dev.rikka.shizuku:provider:13.1.5")
     debugImplementation(libs.androidx.compose.ui.tooling)
 }
