@@ -8,6 +8,8 @@ import android.content.ComponentName
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
+import android.view.KeyEvent
+import android.view.ViewConfiguration
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.compose.BackHandler
@@ -86,6 +88,7 @@ import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -97,6 +100,7 @@ import androidx.palette.graphics.Palette
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -388,6 +392,7 @@ private fun RelayHomeApp() {
                 Destination.HOME -> HomeScreen(
                     hero = activeHero,
                     palette = palette,
+                    focusResetGeneration = homeGeneration,
                     providers = enabledProviders,
                     onDestination = { destination = it },
                     onProvider = { provider -> activeProvider = provider; destination = Destination.PROVIDER },
@@ -536,6 +541,7 @@ private fun RelayHomeApp() {
 private fun HomeScreen(
     hero: Hero,
     palette: RelayPalette,
+    focusResetGeneration: Int,
     providers: Set<Provider>,
     onDestination: (Destination) -> Unit,
     onProvider: (Provider) -> Unit,
@@ -631,7 +637,7 @@ private fun HomeScreen(
     }
     val homeScope = rememberCoroutineScope()
     // Do not restore a previous focus-scroll offset into the hero when returning to Home.
-    LaunchedEffect(Unit) {
+    LaunchedEffect(focusResetGeneration) {
         homeListState.scrollToItem(0)
         homeFocusRequester.requestFocus()
     }
@@ -1686,11 +1692,16 @@ private fun InstalledAppTile(
 ) {
     val source = remember { MutableInteractionSource() }
     val focused by source.collectIsFocusedAsState()
+    val scope = rememberCoroutineScope()
+    var selectHoldJob by remember { mutableStateOf<Job?>(null) }
     val scale by animateFloatAsState(if (focused) 1.07f else 1f, label = "app tile focus")
     val shape = RoundedCornerShape(16.dp)
     val artwork = remember(app.packageName) {
         if (app.hasLeanbackBanner) app.artwork.toBitmap(480, 270).asImageBitmap()
         else app.artwork.toBitmap(192, 192).asImageBitmap()
+    }
+    DisposableEffect(Unit) {
+        onDispose { selectHoldJob?.cancel() }
     }
     Box(
         modifier = (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
@@ -1700,6 +1711,38 @@ private fun InstalledAppTile(
             .clip(shape)
             .background(if (focused) palette.accent.copy(alpha = .24f) else Color(0xFF20232A))
             .combinedClickable(interactionSource = source, indication = null, onLongClick = onLongClick, onClick = onClick)
+            .onPreviewKeyEvent { event ->
+                val nativeEvent = event.nativeKeyEvent
+                val isSelectKey = nativeEvent.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+                    nativeEvent.keyCode == KeyEvent.KEYCODE_ENTER ||
+                    nativeEvent.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
+                if (!isSelectKey) {
+                    false
+                } else when (nativeEvent.action) {
+                    KeyEvent.ACTION_DOWN -> {
+                        if (nativeEvent.isLongPress && selectHoldJob != null) {
+                            selectHoldJob?.cancel()
+                            selectHoldJob = null
+                            onLongClick()
+                        } else if (nativeEvent.repeatCount == 0 && selectHoldJob == null) {
+                            selectHoldJob = scope.launch {
+                                delay(ViewConfiguration.getLongPressTimeout().toLong())
+                                selectHoldJob = null
+                                onLongClick()
+                            }
+                        }
+                        true
+                    }
+                    KeyEvent.ACTION_UP -> {
+                        val pendingClick = selectHoldJob
+                        selectHoldJob = null
+                        pendingClick?.cancel()
+                        if (pendingClick != null) onClick()
+                        true
+                    }
+                    else -> true
+                }
+            }
             .focusable(interactionSource = source),
         contentAlignment = Alignment.Center
     ) {
@@ -1736,8 +1779,26 @@ private fun AppActionsDialog(
     onAppInfo: () -> Unit,
     onDismiss: () -> Unit
 ) {
+    var suppressOpeningSelect by remember(app.packageName) { mutableStateOf(true) }
     BackHandler(onBack = onDismiss)
-    Box(Modifier.fillMaxSize().background(midnight.copy(alpha = .82f)), contentAlignment = Alignment.Center) {
+    Box(
+        Modifier
+            .fillMaxSize()
+            .onPreviewKeyEvent { event ->
+                val nativeEvent = event.nativeKeyEvent
+                val isSelectKey = nativeEvent.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+                    nativeEvent.keyCode == KeyEvent.KEYCODE_ENTER ||
+                    nativeEvent.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
+                if (suppressOpeningSelect && isSelectKey) {
+                    if (nativeEvent.action == KeyEvent.ACTION_UP) suppressOpeningSelect = false
+                    true
+                } else {
+                    false
+                }
+            }
+            .background(midnight.copy(alpha = .82f)),
+        contentAlignment = Alignment.Center
+    ) {
         Column(
             Modifier.width(420.dp).clip(RoundedCornerShape(22.dp)).background(Color(0xFF15121C))
                 .border(1.dp, palette.accent.copy(alpha = .6f), RoundedCornerShape(22.dp)).padding(28.dp)

@@ -35,9 +35,9 @@ val releaseSigningConfigured = listOf(
     releaseKeyAlias,
     releaseKeyPassword
 ).all { it.isNotBlank() }
-val relayVersionCode = providers.environmentVariable("RELAY_VERSION_CODE").orNull?.toIntOrNull() ?: 2
+val relayVersionCode = providers.environmentVariable("RELAY_VERSION_CODE").orNull?.toIntOrNull() ?: 4
 val relayVersionName = providers.environmentVariable("RELAY_VERSION_NAME").orNull?.takeIf { it.isNotBlank() }
-    ?: "0.1.0-beta.1"
+    ?: "0.1.0-beta.3"
 
 android {
     namespace = "com.relayhome.launcher"
