@@ -10,7 +10,7 @@ import java.net.URL
 import java.time.Instant
 
 internal data class NuvioSession(val accessToken: String)
-internal data class NuvioProfile(val index: Int, val name: String, val color: String)
+internal data class NuvioProfile(val index: Int, val name: String, val color: String, val imageUrl: String? = null)
 
 /** Client for Nuvio's documented public API. The session itself is device-encrypted by NuvioSessionStore. */
 internal object NuvioApi {
@@ -52,9 +52,6 @@ internal object NuvioApi {
                     item.firstString("content_id", "contentId", "media_id", "id")?.let { put(it, item) }
                 }
             }
-            // A show's library record is a title-level bookmark and can describe an older
-            // episode. Watch progress is the source of truth for the episode being resumed.
-            // Keep the newest progress entry when Nuvio has several episodes for one title.
             val progressByContent = buildMap<String, JSONObject> {
                 for (i in 0 until progress.length()) {
                     val item = progress.getJSONObject(i)
@@ -69,8 +66,6 @@ internal object NuvioApi {
                 val item = libraryByContent[contentId] ?: progressItem
                 val duration = progressItem.optDouble("duration", 0.0)
                 val season = progressItem.firstInt("season_number", "season", "seasonNumber") ?: item.firstInt("season_number", "season", "seasonNumber") ?: 0
-                // Nuvio's current sync payload reports the user-facing episode number directly.
-                // Do not offset it: doing so turns a watched E08 into E09 in Relay.
                 val episode = progressItem.firstInt("episode_number", "episode", "episodeNumber")
                     ?: item.firstInt("episode_number", "episode", "episodeNumber")
                     ?: 0
@@ -89,9 +84,6 @@ internal object NuvioApi {
                 val artworkUrl = item.firstString("background", "backdrop", "background_url", "poster", "poster_url", "image_url")
                     ?: progressItem.firstString("background", "backdrop", "background_url", "poster", "poster_url", "image_url")
                     ?: ""
-                // Nuvio can return a progress shell containing only season/episode numbers.
-                // It is not actionable without a title and image, so do not let it become a
-                // blank Peek card in Relay.
                 if ((showTitle ?: title).visibleRelayText().isBlank() || artworkUrl.visibleRelayText().isBlank()) {
                     return@mapNotNull null
                 }
@@ -111,8 +103,6 @@ internal object NuvioApi {
                     genres = item.optString("genres").trim().trim('[', ']').takeIf { it.isNotBlank() }
                 )
             }
-            // Do not infer Nuvio episode state from a metadata service. Nuvio's progress
-            // endpoint remains authoritative for the resume target and episode number.
             relayItems
         }
     }
@@ -122,7 +112,12 @@ internal object NuvioApi {
             val profiles = JSONArray(rpc(session, "sync_pull_profiles", JSONObject()))
             (0 until profiles.length()).map { index ->
                 val profile = profiles.getJSONObject(index)
-                NuvioProfile(profile.optInt("profile_index", 1), profile.optString("name", "Profile"), profile.optString("avatar_color_hex", "#AF7AFF"))
+                NuvioProfile(
+                    profile.optInt("profile_index", 1),
+                    profile.optString("name", "Profile"),
+                    profile.optString("avatar_color_hex", "#AF7AFF"),
+                    profile.firstString("avatar_url", "profile_picture", "profile_picture_url", "image_url", "avatar")
+                )
             }.sortedBy { it.index }
         }
     }
@@ -158,7 +153,8 @@ internal object NuvioApi {
 
     private fun rpc(session: NuvioSession, function: String, body: JSONObject): String {
         val connection = (URL("$baseUrl/rest/v1/rpc/$function").openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"; doOutput = true
+            requestMethod = "POST"
+            doOutput = true
             setRequestProperty("apikey", publishableKey)
             setRequestProperty("Authorization", "Bearer ${session.accessToken}")
             setRequestProperty("Content-Type", "application/json")
@@ -178,5 +174,4 @@ internal object NuvioApi {
         .asSequence()
         .map { optInt(it, 0) }
         .firstOrNull { it > 0 }
-
 }

@@ -1,0 +1,117 @@
+name: Publish Relay Home release
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Update channel
+        required: true
+        type: choice
+        options:
+          - beta
+          - stable
+      version_name:
+        description: Version name (for example 0.1.0-beta.2)
+        required: true
+        type: string
+      version_code:
+        description: Monotonically increasing Android version code
+        required: true
+        type: string
+      release_notes:
+        description: Short release notes
+        required: true
+        type: string
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out Relay Home
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Validate release inputs
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          VERSION_CODE: ${{ inputs.version_code }}
+          VERSION_NAME: ${{ inputs.version_name }}
+        run: |
+          test "$VERSION_CODE" -gt 2
+          case "$VERSION_NAME" in
+            *[!0-9A-Za-z._-]*) exit 1 ;;
+          esac
+          if [ "$CHANNEL" = "beta" ]; then
+            case "$VERSION_NAME" in *-beta.*) ;; *) exit 1 ;; esac
+          fi
+
+      - name: Configure release signing
+        env:
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
+        run: |
+          test -n "$SIGNING_KEY"
+          test -n "$STORE_PASSWORD"
+          test -n "$KEY_ALIAS"
+          test -n "$KEY_PASSWORD"
+          test -n "$TMDB_API_KEY"
+          printf '%s' "$SIGNING_KEY" | base64 --decode > "$GITHUB_WORKSPACE/relay-home-release.p12"
+          {
+            echo "sdk.dir=$ANDROID_HOME"
+            echo "relay.signing.storeFile=relay-home-release.p12"
+            echo "relay.signing.storePassword=$STORE_PASSWORD"
+            echo "relay.signing.keyAlias=$KEY_ALIAS"
+            echo "relay.signing.keyPassword=$KEY_PASSWORD"
+            echo "tmdb.apiKey=$TMDB_API_KEY"
+          } > local.properties
+
+      - name: Build and verify signed APK
+        env:
+          RELAY_VERSION_CODE: ${{ inputs.version_code }}
+          RELAY_VERSION_NAME: ${{ inputs.version_name }}
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:lintRelease :app:testReleaseUnitTest :app:assembleRelease
+          mkdir -p release-assets
+          cp app/build/outputs/apk/release/app-release.apk "release-assets/relay-home-${RELAY_VERSION_NAME}.apk"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)"
+          test -x "$APKSIGNER"
+          "$APKSIGNER" verify --verbose --print-certs "release-assets/relay-home-${RELAY_VERSION_NAME}.apk"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ inputs.channel }}
+          VERSION_NAME: ${{ inputs.version_name }}
+          RELEASE_NOTES: ${{ inputs.release_notes }}
+        run: |
+          TAG_NAME="v${VERSION_NAME}"
+          if [ "$CHANNEL" = "beta" ]; then
+            gh release create "$TAG_NAME" release-assets/* \
+              --target "$GITHUB_SHA" \
+              --title "Relay Home ${VERSION_NAME}" \
+              --notes "$RELEASE_NOTES" \
+              --prerelease \
+              --latest=false
+          else
+            gh release create "$TAG_NAME" release-assets/* \
+              --target "$GITHUB_SHA" \
+              --title "Relay Home ${VERSION_NAME}" \
+              --notes "$RELEASE_NOTES" \
+              --latest
+          fi

@@ -1,0 +1,6 @@
+# Copy these four entries into your ignored local.properties file. Never commit the real values.
+# The keystore path may be absolute or relative to this project.
+relay.signing.storeFile=/absolute/path/to/relay-home-release.p12
+relay.signing.storePassword=replace-with-keystore-password
+relay.signing.keyAlias=relay-home
+relay.signing.keyPassword=replace-with-key-password

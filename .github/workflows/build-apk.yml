@@ -1,11 +1,11 @@
 name: Build Android TV APK
-
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
+
 
 jobs:
   debug-apk:
@@ -19,7 +19,7 @@ jobs:
       - uses: android-actions/setup-android@v3
       - name: Build debug APK
         run: ./gradlew :app:assembleDebug
-      - name: Upload APK
+      -
         uses: actions/upload-artifact@v4
         with:
           name: relay-home-debug-apk

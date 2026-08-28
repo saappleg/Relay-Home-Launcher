@@ -6,3 +6,5 @@ local.properties
 *.iml
 **/build/
 *.apk
+.DS_Store
+*.apk

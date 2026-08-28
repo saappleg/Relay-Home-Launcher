@@ -14,7 +14,7 @@ Relay Home is an Android TV / Google TV media launcher. It is the discovery and 
 - Stremio board and search handoff through its public URI scheme.
 - TMDB-backed artwork, recommendations, episode metadata, and calendar data.
 - Weekly/monthly calendar, installed-app launcher, profile image overrides, provider limits, and paginated settings.
-- Android TV Home-role request plus optional Shizuku-assisted launcher switching on devices that force LauncherX.
+- In-app GitHub Releases updater with Stable-only and Include-betas channels, signed APK download, and Android's standard install confirmation.
 
 ## Known beta limits
 
@@ -30,6 +30,11 @@ Relay Home is an Android TV / Google TV media launcher. It is the discovery and 
 2. Add a TMDB v3 key as `tmdb.apiKey` in `local.properties` to enable exact metadata-backed episode choices.
 3. Build `app:assembleDebug` and install the APK on an Android TV emulator or test device.
 
+For a distributable APK, create a permanent PKCS12 signing key and add the four `relay.signing.*`
+entries from [`signing.properties.example`](signing.properties.example) to the ignored
+`local.properties` file. Relay intentionally refuses release builds until these values are set.
+Release publishing and updater requirements are documented in [`docs/RELEASES.md`](docs/RELEASES.md).
+
 Command line:
 
 ```bash
@@ -37,7 +42,7 @@ Command line:
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-`local.properties`, Gradle caches, and build outputs are intentionally excluded from Git. Before publishing, create an empty GitHub repository and add it as the `origin` remote; do not commit API keys or provider session data.
+`local.properties`, signing keys, Gradle caches, and build outputs are intentionally excluded from Git. Never commit API keys, signing credentials, or provider session data.
 
 ## Beta smoke test
 
@@ -47,6 +52,7 @@ adb install -r app/build/outputs/apk/debug/app-debug.apk
 4. Install RelayTube, play a video, and confirm Continue Watching, subscriptions, App Peek, details, and direct resume handoff.
 5. Use D-pad navigation through Home, App Peek, details, Search, All Apps, and Settings.
 6. Set Relay as the device Home app only after the above flows pass.
+7. Open Settings > Updates and confirm GitHub reports the installed version as current.
 
 ## License
 

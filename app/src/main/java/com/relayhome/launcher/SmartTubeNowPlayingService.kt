@@ -32,6 +32,29 @@ internal object SmartTubePlaybackStore {
     var subscriptionVideos by mutableStateOf(emptyList<SmartTubeSubscriptionVideo>())
     var continueWatchingVideos by mutableStateOf(emptyList<SmartTubeSubscriptionVideo>())
 
+    /**
+     * MediaSession position callbacks can arrive far more often than Home needs to redraw.
+     * Publish immediately for content/play-state changes, but bucket position-only changes so
+     * the launcher is not recomposed several times while the user moves across one card row.
+     */
+    fun updateNowPlaying(next: SmartTubeNowPlaying?) {
+        val current = nowPlaying
+        if (current == null || next == null) {
+            if (current != next) nowPlaying = next
+            return
+        }
+        val sameContent = current.videoId == next.videoId &&
+            current.title == next.title &&
+            current.channel == next.channel &&
+            current.artworkUrl == next.artworkUrl &&
+            current.description == next.description &&
+            current.metadata == next.metadata &&
+            current.durationMs == next.durationMs &&
+            current.playing == next.playing
+        if (sameContent && kotlin.math.abs(current.positionMs - next.positionMs) < 15_000L) return
+        nowPlaying = next
+    }
+
     fun loadSubscriptionVideos(context: Context): List<SmartTubeSubscriptionVideo> =
         parseSubscriptionVideos(context.getSharedPreferences(RELAY_TUBE_CACHE_PREFS, Context.MODE_PRIVATE)
             .getString(RELAY_TUBE_CACHE_SUBSCRIPTIONS, null))
@@ -90,7 +113,7 @@ class RelayTubePlaybackReceiver : BroadcastReceiver() {
         val title = intent.getStringExtra(RELAY_TUBE_EXTRA_TITLE).orEmpty().trim()
         val videoId = intent.getStringExtra(RELAY_TUBE_EXTRA_VIDEO_ID).orEmpty().trim()
         if (title.isBlank() || videoId.isBlank()) return
-        SmartTubePlaybackStore.nowPlaying = SmartTubeNowPlaying(
+        SmartTubePlaybackStore.updateNowPlaying(SmartTubeNowPlaying(
             videoId = videoId,
             title = title,
             channel = intent.getStringExtra(RELAY_TUBE_EXTRA_CHANNEL)?.trim()?.takeIf { it.isNotBlank() },
@@ -100,7 +123,7 @@ class RelayTubePlaybackReceiver : BroadcastReceiver() {
             positionMs = intent.getLongExtra(RELAY_TUBE_EXTRA_POSITION, 0L),
             durationMs = intent.getLongExtra(RELAY_TUBE_EXTRA_DURATION, 0L),
             playing = intent.getBooleanExtra(RELAY_TUBE_EXTRA_PLAYING, false)
-        )
+        ))
     }
 
 }
@@ -201,7 +224,7 @@ class SmartTubeNowPlayingService : NotificationListenerService() {
         sessionManager = null
         controller?.unregisterCallback(callback)
         controller = null
-        SmartTubePlaybackStore.nowPlaying = null
+        SmartTubePlaybackStore.updateNowPlaying(null)
         super.onListenerDisconnected()
     }
 
@@ -213,7 +236,7 @@ class SmartTubeNowPlayingService : NotificationListenerService() {
         val extras = sbn.notification.extras
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
         if (title.isBlank()) return
-        SmartTubePlaybackStore.nowPlaying = SmartTubeNowPlaying(
+        SmartTubePlaybackStore.updateNowPlaying(SmartTubeNowPlaying(
             videoId = null,
             title = title,
             channel = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString()?.trim()
@@ -224,7 +247,7 @@ class SmartTubeNowPlayingService : NotificationListenerService() {
             positionMs = 0L,
             durationMs = 0L,
             playing = true
-        )
+        ))
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
@@ -266,7 +289,7 @@ class SmartTubeNowPlayingService : NotificationListenerService() {
             // bridge value instead of replacing a resumable card with an app-only card.
             val relayTubeSnapshot = SmartTubePlaybackStore.nowPlaying
                 ?.takeIf { active.packageName.startsWith("com.relaytube") && it.title == title }
-            SmartTubePlaybackStore.nowPlaying = SmartTubeNowPlaying(
+            SmartTubePlaybackStore.updateNowPlaying(SmartTubeNowPlaying(
                 videoId = relayTubeSnapshot?.videoId,
                 title = title,
                 channel = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST),
@@ -281,12 +304,12 @@ class SmartTubeNowPlayingService : NotificationListenerService() {
                 positionMs = state?.position ?: 0L,
                 durationMs = metadata.getLong(MediaMetadata.METADATA_KEY_DURATION),
                 playing = state?.state == android.media.session.PlaybackState.STATE_PLAYING
-            )
+            ))
         }.onFailure { markLastPlaybackPaused() }
     }
 
     private fun markLastPlaybackPaused() {
-        SmartTubePlaybackStore.nowPlaying = SmartTubePlaybackStore.nowPlaying?.copy(playing = false)
+        SmartTubePlaybackStore.updateNowPlaying(SmartTubePlaybackStore.nowPlaying?.copy(playing = false))
     }
 
     private fun String.isSmartTubePackage(): Boolean =

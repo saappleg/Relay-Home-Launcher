@@ -1,5 +1,5 @@
 package com.relayhome.launcher;
 
 interface IRelayHomeShell {
-    String setLauncherEnabled(String packageName, boolean enabled);
+    String setLauncherEnabled(String packageName, String activityName, boolean enabled);
 }

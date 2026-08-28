@@ -13,11 +13,11 @@ import androidx.activity.compose.setContent
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.Image
@@ -64,6 +64,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -75,6 +76,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.geometry.Offset
@@ -103,9 +105,19 @@ import java.time.LocalDate
 import java.time.YearMonth
 
 class MainActivity : ComponentActivity() {
+    var homeRequestGeneration by mutableStateOf(0)
+        private set
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent { RelayHomeApp() }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        if (intent.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_HOME)) {
+            homeRequestGeneration += 1
+        }
     }
 
     fun requestHomeRole() {
@@ -141,7 +153,7 @@ private enum class Destination(val label: String) { HOME("Home"), DETAIL("Detail
 internal enum class Provider(val label: String, val accent: Color) {
     STREMIO("Stremio", Color(0xFF5B87FF)),
     NUVIO("Nuvio", Color(0xFFAF7AFF)),
-    SMARTTUBE("SmartTube", Color(0xFFFF5F5F))
+    SMARTTUBE("RelayTube", Color(0xFFFF5F5F))
 }
 
 internal data class MediaItem(
@@ -233,6 +245,17 @@ private fun RelayHomeApp() {
     val stockLauncherOverride = remember { LauncherOverride.detect(context) }
     var dateFormat by remember { mutableStateOf(DateFormatSettings.load(context)) }
     var profileImageUri by remember { mutableStateOf(ProfileImageSettings.load(context)) }
+    var favoriteApps by remember { mutableStateOf(FavoriteAppsStore.load(context)) }
+    var destination by remember { mutableStateOf(Destination.HOME) }
+    var activeProvider by remember { mutableStateOf(Provider.STREMIO) }
+    var peekProvider by remember { mutableStateOf<Provider?>(null) }
+    val homeGeneration = (context as? MainActivity)?.homeRequestGeneration ?: 0
+    LaunchedEffect(homeGeneration) {
+        if (homeGeneration > 0) {
+            destination = Destination.HOME
+            peekProvider = null
+        }
+    }
     var continueWatchingLimits by remember { mutableStateOf(ContinueWatchingLimits.load(context)) }
     var nuvioSession by remember { mutableStateOf(NuvioSessionStore.load(context)) }
     val defaultProviders = remember(nuvioSession) {
@@ -249,9 +272,6 @@ private fun RelayHomeApp() {
             )
         )
     }
-    var destination by remember { mutableStateOf(Destination.HOME) }
-    var activeProvider by remember { mutableStateOf(Provider.STREMIO) }
-    var peekProvider by remember { mutableStateOf<Provider?>(null) }
     // App Peek is a transient Home state. Never carry it through Details, Apps, Calendar,
     // Settings, or a provider screen and then restore a stale provider overlay on return.
     LaunchedEffect(destination) {
@@ -350,7 +370,9 @@ private fun RelayHomeApp() {
     }
 
     val palette = activeHero.palette
-    val background by animateColorAsState(palette.backdrop, label = "media background")
+    // The hero already crossfades through Coil. Animating this root gradient as well forced the
+    // entire launcher tree to recompose for many frames after every settled card selection.
+    val background = palette.backdrop
 
     MaterialTheme(colorScheme = darkColorScheme(background = midnight, onBackground = ivory)) {
         Box(
@@ -385,6 +407,7 @@ private fun RelayHomeApp() {
                     smartTubeContinueWatching = smartTubeContinueWatching,
                     hiddenSmartTubeChannels = hiddenSmartTubeChannels,
                     continueWatchingLimits = continueWatchingLimits,
+                    favoriteApps = favoriteApps,
                     nuvioProfiles = nuvioProfiles,
                     activeNuvioProfile = activeNuvioProfile,
                     profileImageUri = profileImageUri,
@@ -405,6 +428,11 @@ private fun RelayHomeApp() {
                 )
                 Destination.APPS -> AppsScreen(
                     palette = palette,
+                    favoriteApps = favoriteApps,
+                    onFavoriteChanged = { pkg, _ ->
+                        FavoriteAppsStore.toggle(context, pkg)
+                        favoriteApps = FavoriteAppsStore.load(context)
+                    },
                     onBackHome = { destination = Destination.HOME }
                 )
                 Destination.SETTINGS -> SettingsScreen(
@@ -527,12 +555,14 @@ private fun HomeScreen(
     smartTubeContinueWatching: List<SmartTubeSubscriptionVideo>,
     hiddenSmartTubeChannels: Set<String>,
     continueWatchingLimits: Map<Provider, Int>,
+    favoriteApps: Set<String>,
     nuvioProfiles: List<NuvioProfile>,
     activeNuvioProfile: Int,
     profileImageUri: String?,
     onRefreshNuvio: () -> Unit,
     onNuvioProfileSelected: (Int) -> Unit
 ) {
+    val context = LocalContext.current
     val homeFocusRequester = remember { FocusRequester() }
     val peekFocusRequester = remember { FocusRequester() }
     val heroFocusRequester = remember { FocusRequester() }
@@ -588,6 +618,11 @@ private fun HomeScreen(
             .groupBy { it.provider }
             .flatMap { (provider, items) -> items.take(continueWatchingLimits[provider] ?: ContinueWatchingLimits.defaultLimit) }
     }
+    val favoriteInstalledApps = remember(favoriteApps) {
+        InstalledApps.discover(context)
+            .filter { it.packageName in favoriteApps }
+            .sortedBy { it.label.lowercase() }
+    }
     val recommendationItems = remember(providers, recommendations, nuvioOnly) {
         recommendations.filter { it.provider in providers }
     }
@@ -629,10 +664,16 @@ private fun HomeScreen(
                 Spacer(Modifier.height(18.dp))
             }
             if (providers.isEmpty()) {
+                if (favoriteInstalledApps.isNotEmpty()) {
+                    item {
+                        FavoriteAppsRail(favoriteInstalledApps, palette) { app -> InstalledApps.launch(context, app) }
+                        Spacer(Modifier.height(18.dp))
+                    }
+                }
                 item {
                     EmptyHomeState(palette, onSettings)
                 }
-            } else if (continueWatching.isEmpty() && recommendationItems.isEmpty() && subscriptionItems.isEmpty() && upcomingEpisodes.isEmpty()) {
+            } else if (continueWatching.isEmpty() && favoriteInstalledApps.isEmpty() && recommendationItems.isEmpty() && subscriptionItems.isEmpty() && upcomingEpisodes.isEmpty()) {
                 item {
                     ProviderDataEmptyState(
                         palette = palette,
@@ -643,13 +684,23 @@ private fun HomeScreen(
                     )
                 }
             } else {
-                item {
-                    MediaRail("Continue Watching", continueWatching, palette, dateFormat, onHeroChanged, onItemSelected, upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester)
-                    Spacer(Modifier.height(18.dp))
+                if (continueWatching.isNotEmpty()) {
+                    item {
+                        MediaRail("Continue Watching", continueWatching, palette, dateFormat, onHeroChanged, onItemSelected, upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester)
+                        Spacer(Modifier.height(18.dp))
+                    }
                 }
-                item {
-                    MediaRail("Recommended TV Shows", recommendationItems, palette, dateFormat, onHeroChanged, onItemSelected, posters = true, upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester)
-                    Spacer(Modifier.height(18.dp))
+                if (favoriteInstalledApps.isNotEmpty()) {
+                    item {
+                        FavoriteAppsRail(favoriteInstalledApps, palette) { app -> InstalledApps.launch(context, app) }
+                        Spacer(Modifier.height(18.dp))
+                    }
+                }
+                if (recommendationItems.isNotEmpty()) {
+                    item {
+                        MediaRail("Recommended TV Shows", recommendationItems, palette, dateFormat, onHeroChanged, onItemSelected, posters = true, upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester)
+                        Spacer(Modifier.height(18.dp))
+                    }
                 }
                 if (subscriptionItems.isNotEmpty()) {
                     item {
@@ -668,7 +719,7 @@ private fun HomeScreen(
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(Brush.verticalGradient(listOf(midnight.copy(alpha = .78f), midnight.copy(alpha = .30f), Color.Transparent)))
+                .background(Brush.verticalGradient(listOf(midnight.copy(alpha = .96f), midnight.copy(alpha = .68f), Color.Transparent)))
                 .padding(top = 24.dp, bottom = 30.dp)
         ) {
             TopBar(
@@ -695,6 +746,7 @@ private fun HomeScreen(
                 palette = palette,
                 profiles = nuvioProfiles,
                 activeProfile = activeNuvioProfile,
+                profileImageUri = profileImageUri,
                 onSelect = {
                     onNuvioProfileSelected(it)
                     profilePickerVisible = false
@@ -790,27 +842,74 @@ private fun TopBar(
                     }
                 }) { onProvider(provider) }
             }
-            TopDestination("Calendar", selected = false, palette = palette, compact = compact) { onDestination(Destination.CALENDAR) }
-            TopDestination("Apps", selected = false, palette = palette, compact = compact) { onDestination(Destination.APPS) }
+            TopDestination("Calendar", selected = false, palette = palette, compact = compact, onFocused = {
+                if (it) {
+                    onPeekProvider(null)
+                    onTopFocused()
+                }
+            }) {
+                onPeekProvider(null)
+                onDestination(Destination.CALENDAR)
+            }
+            TopDestination("Apps", selected = false, palette = palette, compact = compact, onFocused = {
+                if (it) {
+                    onPeekProvider(null)
+                    onTopFocused()
+                }
+            }) {
+                onPeekProvider(null)
+                onDestination(Destination.APPS)
+            }
             // On a 1080p logical surface, keep the media destinations together but anchor
             // profile/settings to the right safe edge rather than leaving them mid-screen.
             if (compact) Spacer(Modifier.weight(1f))
             Spacer(Modifier.width(if (compact) 8.dp else 16.dp))
             if (nuvioProfiles.isNotEmpty()) {
-                ProfileAvatarButton(nuvioProfiles.firstOrNull { it.index == activeNuvioProfile }, profileImageUri, palette, onProfileClick, compact)
+                ProfileAvatarButton(
+                    profile = nuvioProfiles.firstOrNull { it.index == activeNuvioProfile },
+                    imageUri = profileImageUri,
+                    palette = palette,
+                    compact = compact,
+                    onFocused = { if (it) { onPeekProvider(null); onTopFocused() } },
+                    onClick = onProfileClick
+                )
                 Spacer(Modifier.width(if (compact) 7.dp else 12.dp))
             }
-            EmbossedSearchButton(palette, compact) { onDestination(Destination.SEARCH) }
+            EmbossedSearchButton(
+                palette = palette,
+                compact = compact,
+                onFocused = { if (it) { onPeekProvider(null); onTopFocused() } }
+            ) {
+                onPeekProvider(null)
+                onDestination(Destination.SEARCH)
+            }
             Spacer(Modifier.width(if (compact) 7.dp else 12.dp))
-            EmbossedSettingsButton(palette, onSettings, compact)
+            EmbossedSettingsButton(
+                palette = palette,
+                compact = compact,
+                onFocused = { if (it) { onPeekProvider(null); onTopFocused() } },
+                onClick = {
+                    onPeekProvider(null)
+                    onSettings()
+                }
+            )
         }
     }
 }
 
 @Composable
-private fun ProfileAvatarButton(profile: NuvioProfile?, imageUri: String?, palette: RelayPalette, onClick: () -> Unit, compact: Boolean = false) {
+private fun ProfileAvatarButton(
+    profile: NuvioProfile?,
+    imageUri: String?,
+    palette: RelayPalette,
+    compact: Boolean = false,
+    onFocused: (Boolean) -> Unit = {},
+    onClick: () -> Unit
+) {
+    val context = LocalContext.current
     val source = remember { MutableInteractionSource() }
     val focused by source.collectIsFocusedAsState()
+    LaunchedEffect(focused) { onFocused(focused) }
     Box(
         modifier = Modifier.size(if (compact) 38.dp else 45.dp).clip(CircleShape)
             .background(Provider.NUVIO.accent.copy(alpha = .78f))
@@ -819,9 +918,10 @@ private fun ProfileAvatarButton(profile: NuvioProfile?, imageUri: String?, palet
             .focusable(interactionSource = source),
         contentAlignment = Alignment.Center
     ) {
-        if (imageUri != null) {
+        val displayedImage = imageUri ?: profile?.imageUrl
+        if (displayedImage != null) {
             AsyncImage(
-                model = imageUri,
+                model = displayedImage,
                 contentDescription = "Profile picture",
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
@@ -837,6 +937,7 @@ private fun ProfileSwitcher(
     palette: RelayPalette,
     profiles: List<NuvioProfile>,
     activeProfile: Int,
+    profileImageUri: String?,
     onSelect: (Int) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -860,7 +961,17 @@ private fun ProfileSwitcher(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Box(Modifier.size(42.dp).clip(CircleShape).background(Provider.NUVIO.accent.copy(alpha = .82f)), contentAlignment = Alignment.Center) {
-                        Text(profile.name.firstOrNull()?.uppercase() ?: "P", color = ivory, fontWeight = FontWeight.Bold)
+                        val displayedImage = if (profile.index == activeProfile) profileImageUri ?: profile.imageUrl else profile.imageUrl
+                        if (displayedImage != null) {
+                            AsyncImage(
+                                model = displayedImage,
+                                contentDescription = profile.name,
+                                contentScale = ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        } else {
+                            Text(profile.name.firstOrNull()?.uppercase() ?: "P", color = ivory, fontWeight = FontWeight.Bold)
+                        }
                     }
                     Spacer(Modifier.width(12.dp))
                     Text(profile.name, color = ivory, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
@@ -958,9 +1069,9 @@ private fun AppPeekPanel(
                 Brush.verticalGradient(listOf(Color.Transparent, midnight.copy(alpha = .66f)))
             )
         )
-        Column(Modifier.padding(start = 78.dp, top = 164.dp, end = 78.dp, bottom = 42.dp).width(620.dp)) {
+        Column(Modifier.padding(start = 78.dp, top = 136.dp, end = 78.dp, bottom = 24.dp).width(620.dp)) {
             Text("${provider.label.uppercase()} PEEK", color = provider.accent, fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(10.dp))
             Text(
                 lead?.showTitle ?: lead?.title ?: provider.label,
                 color = ivory,
@@ -971,7 +1082,7 @@ private fun AppPeekPanel(
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
-            Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(6.dp))
             Text(
                 lead?.episodeInfo ?: lead?.let { item ->
                     if (item.progress > 0f) "Continue watching • ${(item.progress * 100).toInt()}% complete"
@@ -983,7 +1094,7 @@ private fun AppPeekPanel(
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis
             )
-            Spacer(Modifier.height(22.dp))
+            Spacer(Modifier.height(16.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 usableItems.take(4).forEachIndexed { index, item ->
                     key(item.providerContentId ?: "${item.provider}:${item.title}:${item.episodeInfo.orEmpty()}") {
@@ -1037,12 +1148,12 @@ private fun AppPeekPanel(
                 )
             }
             lead?.let { item ->
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(10.dp))
                 Box(Modifier.width(360.dp).height(4.dp).clip(CircleShape).background(Color.White.copy(alpha = .22f))) {
                     Box(Modifier.fillMaxWidth(item.progress).height(4.dp).background(provider.accent))
                 }
             }
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(12.dp))
             ActionButton(
                 when {
                     provider == Provider.SMARTTUBE -> "Video details"
@@ -1058,9 +1169,15 @@ private fun AppPeekPanel(
 }
 
 @Composable
-private fun EmbossedSettingsButton(palette: RelayPalette, onClick: () -> Unit, compact: Boolean = false) {
+private fun EmbossedSettingsButton(
+    palette: RelayPalette,
+    compact: Boolean = false,
+    onFocused: (Boolean) -> Unit = {},
+    onClick: () -> Unit
+) {
     val source = remember { MutableInteractionSource() }
     val focused by source.collectIsFocusedAsState()
+    LaunchedEffect(focused) { onFocused(focused) }
     Box(
         modifier = Modifier
             .size(if (compact) 38.dp else 42.dp)
@@ -1077,9 +1194,15 @@ private fun EmbossedSettingsButton(palette: RelayPalette, onClick: () -> Unit, c
 }
 
 @Composable
-private fun EmbossedSearchButton(palette: RelayPalette, compact: Boolean = false, onClick: () -> Unit) {
+private fun EmbossedSearchButton(
+    palette: RelayPalette,
+    compact: Boolean = false,
+    onFocused: (Boolean) -> Unit = {},
+    onClick: () -> Unit
+) {
     val source = remember { MutableInteractionSource() }
     val focused by source.collectIsFocusedAsState()
+    LaunchedEffect(focused) { onFocused(focused) }
     Row(
         Modifier.clip(RoundedCornerShape(22.dp)).background(Brush.linearGradient(listOf(Color(0xFF30343C), Color(0xFF111318))))
             .border(1.dp, if (focused) palette.accent else Color(0xFF3A3D45), RoundedCornerShape(22.dp))
@@ -1101,6 +1224,12 @@ private fun HeroPanel(
 ) {
     val context = LocalContext.current
     val paletteScope = rememberCoroutineScope()
+    val heroImageRequest = remember(hero.artworkUrl) {
+        ImageRequest.Builder(context)
+            .data(hero.artworkUrl)
+            .size(1920, 1080)
+            .build()
+    }
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -1108,7 +1237,7 @@ private fun HeroPanel(
             .background(midnight)
     ) {
         AsyncImage(
-            model = hero.artworkUrl,
+            model = heroImageRequest,
             contentDescription = null,
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize().alpha(.86f),
@@ -1194,6 +1323,7 @@ private fun ActionButton(
 }
 
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun MediaRail(
     title: String,
     items: List<MediaItem>,
@@ -1208,61 +1338,85 @@ private fun MediaRail(
     if (items.isEmpty()) return
     val context = LocalContext.current
     val railScope = rememberCoroutineScope()
+    val railBringIntoViewRequester = remember { BringIntoViewRequester() }
+    val railHasFocus = remember { booleanArrayOf(false) }
     // Changing a hero means drawing a large new backdrop. Wait for a focus movement to settle
     // before doing that work, so holding the D-pad stays responsive instead of redrawing a 4K
     // hero for every card the remote passes over.
-    var pendingHeroUpdate by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
-    Text(title, color = ivory, fontSize = 19.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 76.dp, bottom = 10.dp))
+    val pendingHeroUpdate = remember { arrayOfNulls<kotlinx.coroutines.Job>(1) }
+    DisposableEffect(Unit) {
+        onDispose { pendingHeroUpdate[0]?.cancel() }
+    }
     val listState = rememberLazyListState()
-    Box(Modifier.fillMaxWidth()) {
-        LazyRow(
-            state = listState,
-            contentPadding = PaddingValues(horizontal = 76.dp),
-            horizontalArrangement = Arrangement.spacedBy(13.dp)
-        ) {
-            items(items.size) { index ->
-                MediaCard(
-                    item = items[index],
-                    palette = palette,
-                    poster = posters,
-                    dateFormat = dateFormat,
-                    showEpisodeInfo = title == "Continue Watching" || title == "Coming Up",
-                    showPremiereDate = showPremiereDate,
-                    upFocusRequester = upFocusRequester,
-                    onClick = {
+    Column(
+        Modifier.fillMaxWidth()
+            .bringIntoViewRequester(railBringIntoViewRequester)
+            .onFocusChanged { focusState ->
+                if (focusState.hasFocus && !railHasFocus[0]) {
+                    railScope.launch { railBringIntoViewRequester.bringIntoView() }
+                }
+                railHasFocus[0] = focusState.hasFocus
+            }
+    ) {
+        Text(title, color = ivory, fontSize = 19.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 76.dp, bottom = 10.dp))
+        Box(Modifier.fillMaxWidth()) {
+            LazyRow(
+                state = listState,
+                contentPadding = PaddingValues(horizontal = 76.dp),
+                horizontalArrangement = Arrangement.spacedBy(13.dp)
+            ) {
+                items(
+                    count = items.size,
+                    key = { index ->
+                        val item = items[index]
+                        "${item.provider}:${item.providerContentId ?: item.title}:${item.episodeInfo.orEmpty()}:$index"
+                    }
+                ) { index ->
+                    MediaCard(
+                        item = items[index],
+                        palette = palette,
+                        poster = posters,
+                        dateFormat = dateFormat,
+                        showEpisodeInfo = title == "Continue Watching" || title == "Coming Up",
+                        showPremiereDate = showPremiereDate,
+                        upFocusRequester = upFocusRequester,
+                        onClick = {
                         val item = items[index]
                         if (item.provider == Provider.SMARTTUBE && item.providerContentId != null) {
                             ProviderHandoff.play(context, item)
                         } else {
                             onItemSelected(item)
                         }
-                    }
-                ) { extractedAccent ->
-                    val item = items[index]
-                    pendingHeroUpdate?.cancel()
-                    pendingHeroUpdate = railScope.launch {
-                        delay(120)
-                        onHeroChanged(Hero(
-                            item.title,
-                            "Continue the story, wherever you left off.",
-                            paletteFor(item, extractedAccent),
-                            item.artworkUrl,
-                            item
-                        ))
+                        }
+                    ) {
+                        val item = items[index]
+                        pendingHeroUpdate[0]?.cancel()
+                        pendingHeroUpdate[0] = railScope.launch {
+                            delay(1_100)
+                            // Keep the current palette until the settled hero artwork loads.
+                            // HeroPanel extracts Monet colors once, avoiding two whole-screen
+                            // palette recompositions for every horizontal focus movement.
+                            onHeroChanged(Hero(
+                                item.showTitle ?: item.title,
+                                item.episodeInfo ?: item.description ?: "Continue where you left off.",
+                                palette,
+                                item.artworkUrl,
+                                item
+                            ))
+                        }
                     }
                 }
             }
+            Box(
+                Modifier.align(Alignment.CenterEnd).width(58.dp)
+                    .height(if (posters) 203.dp else 175.dp)
+                    .background(Brush.horizontalGradient(listOf(Color.Transparent, midnight)))
+            )
         }
-        Box(
-            Modifier.align(Alignment.CenterEnd).width(58.dp)
-                .height(if (posters) 203.dp else 175.dp)
-                .background(Brush.horizontalGradient(listOf(Color.Transparent, midnight)))
-        )
     }
 }
 
 @Composable
-@OptIn(ExperimentalFoundationApi::class)
 private fun MediaCard(
     item: MediaItem,
     palette: RelayPalette,
@@ -1274,17 +1428,25 @@ private fun MediaCard(
     onClick: () -> Unit,
     onFocused: (Color?) -> Unit
 ) {
+    val context = LocalContext.current
     val source = remember { MutableInteractionSource() }
     val focused by source.collectIsFocusedAsState()
-    val bringIntoViewRequester = remember { BringIntoViewRequester() }
-    val scale by animateFloatAsState(if (focused) 1.055f else 1f, label = "card scale")
+    // Immediate focus geometry keeps D-pad traversal responsive on lower-power TV SoCs. The
+    // border and subtle scale still provide an unmistakable Google TV-style focus treatment.
+    val scale = if (focused) 1.04f else 1f
     val shape = RoundedCornerShape(16.dp)
     val width = if (poster) 140.dp else 310.dp
+    val artworkRequest = remember(item.artworkUrl, poster) {
+        ImageRequest.Builder(context)
+            .data(item.artworkUrl)
+            .size(if (poster) 360 else 640, if (poster) 520 else 360)
+            .crossfade(false)
+            .build()
+    }
     Box(
         modifier = Modifier.requiredWidth(width).aspectRatio(if (poster) .69f else 1.78f)
             .scale(scale).clip(shape)
             .background(Color(0xFF141519))
-            .bringIntoViewRequester(bringIntoViewRequester)
             .border(if (focused) 2.dp else 1.dp, if (focused) ivory.copy(alpha = .78f) else Color.White.copy(alpha = .12f), shape)
             .clickable(interactionSource = source, indication = null, onClick = onClick)
             .then(if (upFocusRequester != null) Modifier.focusProperties { up = upFocusRequester } else Modifier)
@@ -1293,7 +1455,7 @@ private fun MediaCard(
         AsyncImage(
             // A fresh ImageRequest on every focus recomposition can make Coil re-evaluate an
             // unchanged poster. Stable URL models keep navigation on the memory-cache path.
-            model = item.artworkUrl,
+            model = artworkRequest,
             contentDescription = item.title,
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize(),
@@ -1349,25 +1511,111 @@ private fun MediaCard(
     }
     LaunchedEffect(focused) {
         if (focused) {
-            bringIntoViewRequester.bringIntoView()
             onFocused(null)
         }
     }
 }
 
 @Composable
-private fun AppsScreen(palette: RelayPalette, onBackHome: () -> Unit) {
+@OptIn(ExperimentalFoundationApi::class)
+private fun FavoriteAppsRail(
+    apps: List<InstalledApp>,
+    palette: RelayPalette,
+    onLaunch: (InstalledApp) -> Unit
+) {
+    if (apps.isEmpty()) return
+    val railScope = rememberCoroutineScope()
+    val railBringIntoViewRequester = remember { BringIntoViewRequester() }
+    val railHasFocus = remember { booleanArrayOf(false) }
+    Column(
+        Modifier.fillMaxWidth()
+            .bringIntoViewRequester(railBringIntoViewRequester)
+            .onFocusChanged { focusState ->
+                if (focusState.hasFocus && !railHasFocus[0]) {
+                    railScope.launch { railBringIntoViewRequester.bringIntoView() }
+                }
+                railHasFocus[0] = focusState.hasFocus
+            }
+            .padding(start = 76.dp)
+    ) {
+        Text("Favorite Apps", color = ivory, fontSize = 19.sp, fontWeight = FontWeight.Medium)
+        Spacer(Modifier.height(10.dp))
+        LazyRow(
+            contentPadding = PaddingValues(end = 64.dp, top = 5.dp, bottom = 7.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            items(apps.size, key = { apps[it].packageName }) { index ->
+                val app = apps[index]
+                FavoriteAppCard(app, palette) { onLaunch(app) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FavoriteAppCard(
+    app: InstalledApp,
+    palette: RelayPalette,
+    onClick: () -> Unit
+) {
+    val source = remember { MutableInteractionSource() }
+    val focused by source.collectIsFocusedAsState()
+    val scale = if (focused) 1.07f else 1f
+    val icon = remember(app.packageName) { app.icon.toBitmap(144, 144).asImageBitmap() }
+    Column(
+        Modifier.width(104.dp)
+            .clickable(interactionSource = source, indication = null, onClick = onClick)
+            .focusable(interactionSource = source),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        Box(
+            Modifier.size(76.dp).graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+                shape = CircleShape
+                clip = true
+            }
+                .background(if (focused) palette.accent.copy(alpha = .30f) else Color(0xFF242730))
+                .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .12f), CircleShape),
+            contentAlignment = Alignment.Center
+        ) {
+            Image(
+                painter = BitmapPainter(icon),
+                contentDescription = app.label,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize()
+            )
+            if (focused) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = .08f)))
+        }
+        Spacer(Modifier.height(7.dp))
+        Text(
+            app.label,
+            color = if (focused) ivory else muted,
+            fontSize = 13.sp,
+            fontWeight = if (focused) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+private fun AppsScreen(
+    palette: RelayPalette,
+    favoriteApps: Set<String>,
+    onFavoriteChanged: (String, Boolean) -> Unit,
+    onBackHome: () -> Unit
+) {
     val context = LocalContext.current
-    // This is intentionally the full installed-app launcher. Provider destinations in the
-    // top bar are media-first shortcuts, while Apps remains the reliable way to launch every
-    // installed TV application (including a provider when the user wants its native UI).
     val apps = remember { InstalledApps.discover(context).sortedBy { it.label.lowercase() } }
     val firstAppFocusRequester = remember { FocusRequester() }
     val appsGridState = rememberLazyGridState()
+    var activeMenuApp by remember { mutableStateOf<InstalledApp?>(null) }
     LaunchedEffect(apps) {
         appsGridState.scrollToItem(0)
         if (apps.isNotEmpty()) firstAppFocusRequester.requestFocus()
     }
+    BackHandler(onBack = onBackHome)
     Column(Modifier.fillMaxSize().padding(horizontal = 56.dp, vertical = 48.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Apps", color = ivory, fontSize = 34.sp, fontWeight = FontWeight.Light)
@@ -1376,9 +1624,7 @@ private fun AppsScreen(palette: RelayPalette, onBackHome: () -> Unit) {
         }
         Spacer(Modifier.height(28.dp))
         Text("All apps", color = ivory, fontSize = 23.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(8.dp))
-        Text("Every launchable app installed on this TV, using each app’s Android TV banner when available.", color = muted, fontSize = 15.sp)
-        Spacer(Modifier.height(22.dp))
+        Spacer(Modifier.height(18.dp))
         if (apps.isEmpty()) {
             Text("No launchable apps were found yet.", color = muted, fontSize = 17.sp)
         } else {
@@ -1395,20 +1641,47 @@ private fun AppsScreen(palette: RelayPalette, onBackHome: () -> Unit) {
                     InstalledAppTile(
                         app = app,
                         palette = palette,
-                        focusRequester = if (index == 0) firstAppFocusRequester else null
-                    ) { InstalledApps.launch(context, app) }
+                        focusRequester = if (index == 0) firstAppFocusRequester else null,
+                        onLongClick = { activeMenuApp = app },
+                        onClick = { InstalledApps.launch(context, app) }
+                    )
                 }
             }
         }
+    }
+    activeMenuApp?.let { app ->
+        val isFavorite = app.packageName in favoriteApps
+        AppActionsDialog(
+            app = app,
+            isFavorite = isFavorite,
+            palette = palette,
+            onOpen = {
+                activeMenuApp = null
+                InstalledApps.launch(context, app)
+            },
+            onToggleFavorite = {
+                activeMenuApp = null
+                onFavoriteChanged(app.packageName, !isFavorite)
+            },
+            onAppInfo = {
+                activeMenuApp = null
+                runCatching {
+                    context.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).setData(Uri.fromParts("package", app.packageName, null)))
+                }
+            },
+            onDismiss = { activeMenuApp = null }
+        )
     }
 }
 
 /** Google TV-style artwork-only app tile using the application's own 16:9 TV banner. */
 @Composable
+@OptIn(ExperimentalFoundationApi::class)
 private fun InstalledAppTile(
     app: InstalledApp,
     palette: RelayPalette,
     focusRequester: FocusRequester? = null,
+    onLongClick: () -> Unit,
     onClick: () -> Unit
 ) {
     val source = remember { MutableInteractionSource() }
@@ -1426,8 +1699,9 @@ private fun InstalledAppTile(
             .scale(scale)
             .clip(shape)
             .background(if (focused) palette.accent.copy(alpha = .24f) else Color(0xFF20232A))
-            .clickable(interactionSource = source, indication = null, onClick = onClick)
-            .focusable(interactionSource = source)
+            .combinedClickable(interactionSource = source, indication = null, onLongClick = onLongClick, onClick = onClick)
+            .focusable(interactionSource = source),
+        contentAlignment = Alignment.Center
     ) {
         if (app.hasLeanbackBanner) {
             Image(
@@ -1448,6 +1722,35 @@ private fun InstalledAppTile(
             Box(
                 Modifier.fillMaxSize().background(Color.White.copy(alpha = .08f))
             )
+        }
+    }
+}
+
+@Composable
+private fun AppActionsDialog(
+    app: InstalledApp,
+    isFavorite: Boolean,
+    palette: RelayPalette,
+    onOpen: () -> Unit,
+    onToggleFavorite: () -> Unit,
+    onAppInfo: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    BackHandler(onBack = onDismiss)
+    Box(Modifier.fillMaxSize().background(midnight.copy(alpha = .82f)), contentAlignment = Alignment.Center) {
+        Column(
+            Modifier.width(420.dp).clip(RoundedCornerShape(22.dp)).background(Color(0xFF15121C))
+                .border(1.dp, palette.accent.copy(alpha = .6f), RoundedCornerShape(22.dp)).padding(28.dp)
+        ) {
+            Text(app.label, color = ivory, fontSize = 22.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Spacer(Modifier.height(18.dp))
+            ActionButton("Open", palette, primary = true, onClick = onOpen)
+            Spacer(Modifier.height(10.dp))
+            ActionButton(if (isFavorite) "Remove from favorites" else "Add to favorites", palette, primary = false, onClick = onToggleFavorite)
+            Spacer(Modifier.height(10.dp))
+            ActionButton("App info & uninstall", palette, primary = false, onClick = onAppInfo)
+            Spacer(Modifier.height(14.dp))
+            ActionButton("Cancel", palette, primary = false, onClick = onDismiss)
         }
     }
 }
@@ -1617,7 +1920,7 @@ private fun SearchScreen(
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf(emptyList<MediaItem>()) }
     var loading by remember { mutableStateOf(false) }
-    val searchProvider = providers.firstOrNull { it == Provider.STREMIO } ?: providers.firstOrNull() ?: Provider.NUVIO
+    var searchProvider by remember { mutableStateOf(providers.firstOrNull { it == Provider.STREMIO } ?: providers.firstOrNull() ?: Provider.NUVIO) }
     LaunchedEffect(query, searchProvider) {
         if (query.trim().length < 2) {
             results = emptyList()
@@ -1638,31 +1941,44 @@ private fun SearchScreen(
             Spacer(Modifier.weight(1f))
             ActionButton("‹  Back", palette, primary = false, onClick = onBackHome)
         }
-        Spacer(Modifier.height(27.dp))
+        Spacer(Modifier.height(20.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Search in:", color = muted, fontSize = 15.sp)
+            providers.sortedBy { it.label }.forEach { provider ->
+                ActionButton(
+                    provider.label,
+                    palette.copy(accent = provider.accent),
+                    primary = searchProvider == provider
+                ) {
+                    searchProvider = provider
+                }
+            }
+        }
+        Spacer(Modifier.height(18.dp))
         OutlinedTextField(
             value = query,
             onValueChange = { query = it },
             singleLine = true,
-            label = { Text("Search movies, series, and apps") },
+            label = { Text("Search movies, series, and videos in ${searchProvider.label}") },
             textStyle = androidx.compose.ui.text.TextStyle(color = ivory, fontSize = 20.sp),
             modifier = Modifier.fillMaxWidth().height(70.dp),
             colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = palette.accent,
+                focusedBorderColor = searchProvider.accent,
                 unfocusedBorderColor = Color(0xFF3C4049),
-                focusedLabelColor = palette.accent,
+                focusedLabelColor = searchProvider.accent,
                 unfocusedLabelColor = muted,
-                cursorColor = palette.accent
+                cursorColor = searchProvider.accent
             )
         )
-        Spacer(Modifier.height(34.dp))
-        Text(if (query.isBlank()) "Start typing to search TMDB" else "Results for “$query”", color = ivory, fontSize = 21.sp, fontWeight = FontWeight.Medium)
+        Spacer(Modifier.height(24.dp))
+        Text(if (query.isBlank()) "Start typing to search ${searchProvider.label}" else "Results for “$query”", color = ivory, fontSize = 21.sp, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(13.dp))
         if (loading) {
-            Text("Searching TMDB…", color = muted, fontSize = 17.sp)
+            Text("Searching…", color = muted, fontSize = 17.sp)
         } else if (query.trim().length < 2) {
-            Text("Enter at least two characters to find movies and series with artwork and descriptions.", color = muted, fontSize = 17.sp)
+            Text("Enter at least two characters to find titles with artwork and descriptions.", color = muted, fontSize = 17.sp)
         } else if (results.isEmpty()) {
-            Text("No TMDB matches found. Try a more specific title.", color = muted, fontSize = 17.sp)
+            Text("No matches found. Try a more specific title.", color = muted, fontSize = 17.sp)
         } else {
             LazyRow(horizontalArrangement = Arrangement.spacedBy(15.dp)) {
                 items(results.size) { index ->
@@ -1670,15 +1986,15 @@ private fun SearchScreen(
                 }
             }
         }
-        if (Provider.STREMIO in providers) {
-            Spacer(Modifier.height(22.dp))
+        if (query.isNotBlank()) {
+            Spacer(Modifier.height(20.dp))
             ActionButton(
-                if (query.isBlank()) "Open Stremio search" else "Search “$query” in Stremio",
-                palette,
+                "Search “$query” in ${searchProvider.label}",
+                palette.copy(accent = searchProvider.accent),
                 primary = false
-            ) { ProviderHandoff.searchStremio(context, query) }
+            ) { ProviderHandoff.search(context, searchProvider, query) }
         }
-        Spacer(Modifier.height(38.dp))
+        Spacer(Modifier.height(30.dp))
         Text("Apps", color = ivory, fontSize = 21.sp, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(13.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(13.dp)) {
@@ -1711,7 +2027,7 @@ private fun AppTile(
 }
 
 private enum class SettingsPage(val label: String) {
-    STATUS("Relay status"), DISPLAY("Display"), PROVIDERS("Providers"), PROFILE("Profile"), INTEGRATIONS("Integrations"), LAUNCHER("Launcher"), SYSTEM("System")
+    STATUS("Relay status"), DISPLAY("Display"), PROVIDERS("Providers"), PROFILE("Profile"), SUBSCRIPTIONS("Subscriptions"), UPDATES("Updates"), LAUNCHER("Launcher"), SYSTEM("System")
 }
 
 private data class SystemSettingsEntry(val label: String, val action: String, val symbol: String)
@@ -1770,6 +2086,11 @@ private fun SettingsScreen(
     var showSmartTubeAdbSetup by remember { mutableStateOf(false) }
     var shizukuMessage by remember { mutableStateOf<String?>(null) }
     var shizukuWorking by remember { mutableStateOf(false) }
+    var includeBetaUpdates by remember { mutableStateOf(RelayUpdateSettings.includesBetas(context)) }
+    var availableRelease by remember { mutableStateOf<RelayRelease?>(null) }
+    var updateMessage by remember { mutableStateOf<String?>(null) }
+    var updateWorking by remember { mutableStateOf(false) }
+    val updateScope = rememberCoroutineScope()
     var webProfileUrl by remember(profileImageUri) { mutableStateOf(profileImageUri?.takeIf { it.startsWith("http://") || it.startsWith("https://") }.orEmpty()) }
     var profileUrlError by remember { mutableStateOf<String?>(null) }
     // The previous one-item LazyColumn made focus treat an entire Settings page as a single
@@ -1962,14 +2283,8 @@ private fun SettingsScreen(
                             Spacer(Modifier.height(12.dp))
                             Text("Relay keeps the selected local image or web address across restarts and app updates.", color = muted, fontSize = 14.sp)
                         }
-                        SettingsPage.INTEGRATIONS -> {
-                            SettingsSectionTitle("Integrations", "Allow Relay to surface useful playback state from supported apps.")
-                            Spacer(Modifier.height(26.dp))
-                            Text("SmartTube Now Playing", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                            Spacer(Modifier.height(8.dp))
-                            Text("Relay reads SmartTube's active media session. Existing private watch history stays private.", color = muted, fontSize = 15.sp, lineHeight = 22.sp)
-                            Spacer(Modifier.height(18.dp))
-                            ActionButton("Enable SmartTube access", palette.copy(accent = Provider.SMARTTUBE.accent), primary = false, onClick = onRequestSmartTubeAccess)
+                        SettingsPage.SUBSCRIPTIONS -> {
+                            SettingsSectionTitle("Subscriptions", "Choose which subscribed creators appear in New from subscriptions.")
                             val smartTubeChannels = remember(smartTubeSubscriptions) {
                                 smartTubeSubscriptions
                                     .mapNotNull { video -> video.channelId?.let { id -> id to (video.channel ?: "Unknown channel") } }
@@ -1997,32 +2312,86 @@ private fun SettingsScreen(
                                     }
                                     Spacer(Modifier.height(8.dp))
                                 }
+                            } else {
+                                Spacer(Modifier.height(24.dp))
+                                Text("No RelayTube subscriptions found yet. Subscriptions from RelayTube will appear here automatically.", color = muted, fontSize = 15.sp, lineHeight = 22.sp)
                             }
-                            Spacer(Modifier.height(18.dp))
-                            Text("Required SmartTube setting", color = ivory, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                        }
+                        SettingsPage.UPDATES -> {
+                            SettingsSectionTitle("Relay updates", "Check GitHub Releases and install a newer Relay Home build without leaving the launcher.")
+                            Spacer(Modifier.height(24.dp))
+                            Text("Installed version", color = muted, fontSize = 14.sp)
+                            Spacer(Modifier.height(5.dp))
+                            Text(BuildConfig.VERSION_NAME, color = ivory, fontSize = 20.sp, fontWeight = FontWeight.Medium)
+                            Spacer(Modifier.height(24.dp))
+                            Text("Update channel", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
                             Spacer(Modifier.height(7.dp))
-                            Text("In SmartTube, leave “Disable playback notifications” turned OFF. That setting deactivates SmartTube’s Android media session, so no launcher can read the currently playing video. Find it under Settings → Player → Developer.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
-                            Spacer(Modifier.height(18.dp))
-                            Text("Having trouble with the Android TV switch?", color = ivory, fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                            Spacer(Modifier.height(7.dp))
-                            Text("Some Google TV builds trap remote focus on the system Notification Access page. The ADB option grants access only to Relay's SmartTube listener.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+                            Text("Beta builds receive newer Relay features first. Stable builds update only on tagged production releases.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
                             Spacer(Modifier.height(12.dp))
-                            ActionButton(if (showSmartTubeAdbSetup) "Hide ADB fallback" else "Show ADB fallback", palette.copy(accent = Provider.SMARTTUBE.accent), primary = false) {
-                                showSmartTubeAdbSetup = !showSmartTubeAdbSetup
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                ActionButton("Stable", palette, primary = !includeBetaUpdates) {
+                                    includeBetaUpdates = false
+                                    RelayUpdateSettings.setIncludesBetas(context, false)
+                                    availableRelease = null
+                                    updateMessage = null
+                                }
+                                ActionButton("Beta & pre-releases", palette, primary = includeBetaUpdates) {
+                                    includeBetaUpdates = true
+                                    RelayUpdateSettings.setIncludesBetas(context, true)
+                                    availableRelease = null
+                                    updateMessage = null
+                                }
                             }
-                            if (showSmartTubeAdbSetup) {
-                                Spacer(Modifier.height(14.dp))
+                            Spacer(Modifier.height(24.dp))
+                            Text("Check for updates", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                            Spacer(Modifier.height(7.dp))
+                            Text("Relay checks the open GitHub repository releases for a newer APK.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+                            Spacer(Modifier.height(12.dp))
+                            ActionButton(if (updateWorking) "Checking GitHub…" else "Check now", palette, primary = true) {
+                                if (!updateWorking) {
+                                    updateWorking = true
+                                    updateMessage = null
+                                    updateScope.launch {
+                                        RelayUpdater.check(includeBetaUpdates)
+                                            .onSuccess { release ->
+                                                availableRelease = release
+                                                updateMessage = if (release != null) "A newer build is ready to download (${release.tag})." else "Relay is up to date."
+                                            }
+                                            .onFailure { error -> updateMessage = error.message ?: "Could not check for updates." }
+                                        updateWorking = false
+                                    }
+                                }
+                            }
+                            updateMessage?.let { message ->
+                                Spacer(Modifier.height(10.dp))
+                                Text(message, color = palette.accent, fontSize = 14.sp, lineHeight = 20.sp)
+                            }
+                            availableRelease?.let { release ->
+                                Spacer(Modifier.height(16.dp))
                                 Column(
                                     Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFF090B10))
                                         .border(1.dp, Color.White.copy(alpha = .10f), RoundedCornerShape(12.dp)).padding(16.dp)
                                 ) {
-                                    Text("With USB or wireless ADB connected to your TV, run:", color = ivory, fontSize = 14.sp)
-                                    Spacer(Modifier.height(9.dp))
-                                    Text("adb shell cmd notification allow_listener com.relayhome.launcher/com.relayhome.launcher.SmartTubeNowPlayingService", color = palette.accent, fontSize = 13.sp, lineHeight = 19.sp)
-                                    Spacer(Modifier.height(10.dp))
-                                    Text("To revoke it later:", color = muted, fontSize = 13.sp)
-                                    Spacer(Modifier.height(6.dp))
-                                    Text("adb shell cmd notification disallow_listener com.relayhome.launcher/com.relayhome.launcher.SmartTubeNowPlayingService", color = palette.accent, fontSize = 13.sp, lineHeight = 19.sp)
+                                    Text("Ready to install: ${release.title}", color = ivory, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                                    if (release.notes.isNotBlank()) {
+                                        Spacer(Modifier.height(6.dp))
+                                        Text(release.notes, color = muted, fontSize = 13.sp, lineHeight = 18.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
+                                    }
+                                    Spacer(Modifier.height(12.dp))
+                                    ActionButton(if (updateWorking) "Downloading update…" else "Download and install", palette, primary = true) {
+                                        if (!updateWorking) {
+                                            updateWorking = true
+                                            updateScope.launch {
+                                                RelayUpdater.download(context, release)
+                                                    .onSuccess { apkFile ->
+                                                        updateMessage = "Starting installation…"
+                                                        RelayUpdater.install(context, apkFile)
+                                                    }
+                                                    .onFailure { error -> updateMessage = error.message ?: "Download failed." }
+                                                updateWorking = false
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

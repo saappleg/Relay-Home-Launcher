@@ -12,6 +12,7 @@ import android.widget.Toast
  */
 internal object ProviderHandoff {
     private const val nuvioPackage = "com.nuvio.tv"
+    private const val stremioPackage = "com.stremio.one"
     private val smartTubePackages = listOf(
         "com.relaytube.stable",
         "app.smarttube.stable",
@@ -23,10 +24,13 @@ internal object ProviderHandoff {
         smartTubePackages.any { context.packageManager.getLaunchIntentForPackage(it) != null }
 
     fun isProviderPackage(packageName: String): Boolean =
-        packageName == nuvioPackage || packageName in smartTubePackages
+        packageName == nuvioPackage || packageName == stremioPackage || packageName in smartTubePackages
 
     fun isNuvioInstalled(context: Context): Boolean =
         context.packageManager.getLaunchIntentForPackage(nuvioPackage) != null
+
+    fun isStremioInstalled(context: Context): Boolean =
+        context.packageManager.getLaunchIntentForPackage(stremioPackage) != null
 
     fun openNuvio(context: Context) {
         val intent = context.packageManager.getLaunchIntentForPackage(nuvioPackage)
@@ -65,18 +69,20 @@ internal object ProviderHandoff {
             .mapNotNull { context.packageManager.getLaunchIntentForPackage(it) }
             .firstOrNull()
         if (intent == null) {
-            notice(context, "SmartTube is not installed. Install its Android TV stable or beta build, then Relay will add it automatically.")
+            notice(context, "RelayTube is not installed. Install RelayTube, then Relay will add it automatically.")
         } else {
             runCatching { context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
-                .onFailure { notice(context, "SmartTube could not be opened.") }
+                .onFailure { notice(context, "RelayTube could not be opened.") }
         }
     }
 
-    /** Opens a specific YouTube video in the installed SmartTube variant. */
+    /** Opens a specific YouTube video in the installed SmartTube / RelayTube variant. */
     fun openSmartTubeVideo(context: Context, videoId: String, resumePositionMs: Long = 0L) {
-        val packageName = smartTubePackages.firstOrNull { context.packageManager.getLaunchIntentForPackage(it) != null }
+        val packageName = smartTubePackages.firstOrNull {
+            context.packageManager.getLaunchIntentForPackage(it) != null
+        }
         if (packageName == null) {
-            notice(context, "SmartTube is not installed. Install its Android TV stable or beta build first.")
+            notice(context, "RelayTube is not installed. Install RelayTube first.")
             return
         }
         val uri = Uri.parse("https://www.youtube.com/watch").buildUpon()
@@ -89,11 +95,22 @@ internal object ProviderHandoff {
             .setPackage(packageName)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         if (intent.resolveActivity(context.packageManager) == null) {
-            notice(context, "This SmartTube build does not support direct video links.")
+            notice(context, "This RelayTube build does not support direct video links.")
+            openSmartTube(context)
             return
         }
         runCatching { context.startActivity(intent) }
-            .onFailure { notice(context, "SmartTube could not open that video.") }
+            .onFailure { notice(context, "RelayTube could not open that video.") }
+    }
+
+    fun openStremio(context: Context) {
+        val intent = context.packageManager.getLaunchIntentForPackage(stremioPackage)
+        if (intent == null) {
+            notice(context, "Stremio is not installed on this device.")
+        } else {
+            runCatching { context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+                .onFailure { notice(context, "Stremio could not be opened.") }
+        }
     }
 
     fun openStremioBoard(context: Context) = launch(
@@ -107,6 +124,46 @@ internal object ProviderHandoff {
             .appendQueryParameter("search", query)
             .build()
         launch(context, uri, "Stremio is not installed or does not support search links yet.")
+    }
+
+    fun search(context: Context, provider: Provider, query: String) {
+        val cleanQuery = query.trim()
+        if (cleanQuery.isBlank()) return
+        when (provider) {
+            Provider.STREMIO -> searchStremio(context, cleanQuery)
+            Provider.NUVIO -> {
+                val intent = Intent(
+                    Intent.ACTION_VIEW,
+                    Uri.parse("nuvio://search").buildUpon().appendQueryParameter("query", cleanQuery).build()
+                ).setPackage(nuvioPackage).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                if (intent.resolveActivity(context.packageManager) != null) {
+                    runCatching { context.startActivity(intent) }.onFailure { openNuvio(context) }
+                } else {
+                    openNuvio(context)
+                }
+            }
+            Provider.SMARTTUBE -> {
+                val packageName = smartTubePackages.firstOrNull {
+                    context.packageManager.getLaunchIntentForPackage(it) != null
+                }
+                if (packageName == null) {
+                    notice(context, "RelayTube is not installed on this device.")
+                    return
+                }
+                val uri = Uri.parse("https://www.youtube.com/results").buildUpon()
+                    .appendQueryParameter("search_query", cleanQuery)
+                    .build()
+                val intent = Intent(Intent.ACTION_VIEW, uri)
+                    .setPackage(packageName)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                if (intent.resolveActivity(context.packageManager) != null) {
+                    runCatching { context.startActivity(intent) }
+                        .onFailure { openSmartTube(context) }
+                } else {
+                    openSmartTube(context)
+                }
+            }
+        }
     }
 
     fun play(context: Context, item: MediaItem) {
@@ -123,6 +180,14 @@ internal object ProviderHandoff {
             }
             Provider.NUVIO -> openNuvioEpisode(context, item)
             Provider.SMARTTUBE -> item.providerContentId?.let { openSmartTubeVideo(context, it, item.resumePositionMs) } ?: openSmartTube(context)
+        }
+    }
+
+    fun openProvider(context: Context, provider: Provider) {
+        when (provider) {
+            Provider.STREMIO -> openStremio(context)
+            Provider.NUVIO -> openNuvio(context)
+            Provider.SMARTTUBE -> openSmartTube(context)
         }
     }
 

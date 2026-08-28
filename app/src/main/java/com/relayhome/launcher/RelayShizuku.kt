@@ -17,8 +17,6 @@ internal object RelayShizuku {
     private const val permissionRequestCode = 7412
     private val mainHandler = Handler(Looper.getMainLooper())
 
-    // Shizuku answers permission requests outside Relay's Compose state. Keep a tiny observable
-    // revision so Settings immediately changes from "Authorize" to "Enable" after approval.
     private var readinessRevision by mutableIntStateOf(0)
     val readinessRevisionForUi: Int get() = readinessRevision
 
@@ -58,7 +56,6 @@ internal object RelayShizuku {
         val args = Shizuku.UserServiceArgs(
             ComponentName("com.relayhome.launcher", RelayShizukuService::class.java.name)
         )
-            // Required by Shizuku's user-service API. Without it the service cannot start.
             .processNameSuffix("relay-home-shell")
             .tag("relay-home-launcher-override-v1")
         val finished = AtomicBoolean(false)
@@ -72,7 +69,7 @@ internal object RelayShizuku {
                 mainHandler.removeCallbacks(timeout)
                 val shell = IRelayHomeShell.Stub.asInterface(service)
                 Thread {
-                    val result = runCatching { shell.setLauncherEnabled(override.packageName, enabled) }
+                    val result = runCatching { shell.setLauncherEnabled(override.packageName, override.activityName, enabled) }
                     mainHandler.post {
                         if (finished.compareAndSet(false, true)) onResult(result)
                     }

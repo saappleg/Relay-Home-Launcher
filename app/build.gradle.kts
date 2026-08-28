@@ -6,10 +6,38 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// Never accidentally publish an unsigned (or debug-signed) release APK.
+tasks.configureEach {
+    if (name.contains("Release", ignoreCase = true)) {
+        doFirst {
+            check(releaseSigningConfigured) {
+                "Release signing is not configured. Add relay.signing.* values to local.properties."
+            }
+            check(rootProject.file(releaseStoreFile).isFile) {
+                "Release keystore was not found at: $releaseStoreFile"
+            }
+        }
+    }
+}
+
 val localProperties = Properties().apply {
     val localFile = rootProject.file("local.properties")
     if (localFile.exists()) localFile.inputStream().use { input -> load(input) }
 }
+
+val releaseStoreFile = localProperties.getProperty("relay.signing.storeFile").orEmpty()
+val releaseStorePassword = localProperties.getProperty("relay.signing.storePassword").orEmpty()
+val releaseKeyAlias = localProperties.getProperty("relay.signing.keyAlias").orEmpty()
+val releaseKeyPassword = localProperties.getProperty("relay.signing.keyPassword").orEmpty()
+val releaseSigningConfigured = listOf(
+    releaseStoreFile,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword
+).all { it.isNotBlank() }
+val relayVersionCode = providers.environmentVariable("RELAY_VERSION_CODE").orNull?.toIntOrNull() ?: 2
+val relayVersionName = providers.environmentVariable("RELAY_VERSION_NAME").orNull?.takeIf { it.isNotBlank() }
+    ?: "0.1.0-beta.1"
 
 android {
     namespace = "com.relayhome.launcher"
@@ -19,12 +47,31 @@ android {
         applicationId = "com.relayhome.launcher"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.1.0-beta.1"
+        versionCode = relayVersionCode
+        versionName = relayVersionName
         buildConfigField("String", "TMDB_API_KEY", "\"${localProperties.getProperty("tmdb.apiKey", "")}\"")
     }
 
     buildFeatures { compose = true; buildConfig = true; aidl = true }
+
+    signingConfigs {
+        if (releaseSigningConfigured) {
+            create("release") {
+                storeFile = rootProject.file(releaseStoreFile)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
+    buildTypes {
+        getByName("release") {
+            if (releaseSigningConfigured) {
+                signingConfig = signingConfigs.getByName("release")
+            }
+        }
+    }
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

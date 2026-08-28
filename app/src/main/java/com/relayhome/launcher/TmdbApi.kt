@@ -6,9 +6,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.graphics.Color
 import java.net.HttpURLConnection
-import java.net.URLEncoder
 import java.net.URL
+import java.net.URLEncoder
 import java.time.LocalDate
+
+internal data class TmdbCalendarEntry(val date: LocalDate, val item: MediaItem)
+internal data class TvEpisode(val number: Int, val title: String)
+internal data class TvSeason(val seasons: List<Int>, val episodes: List<TvEpisode>)
 
 /** Read-only metadata supplement for Nuvio episodes. Nuvio remains the progress authority. */
 internal object TmdbApi {
@@ -20,10 +24,143 @@ internal object TmdbApi {
         return items.map { item -> runCatching { enrichEpisode(item) }.getOrDefault(item) }
     }
 
-    /** Resolves a single selected episode for Relay's detail screen. */
     suspend fun enrichEpisodeDetails(item: MediaItem): MediaItem = withContext(Dispatchers.IO) {
         if (apiKey.isBlank()) return@withContext item
         runCatching { enrichEpisode(item) }.getOrDefault(item)
+    }
+
+    private fun tmdbArtwork(path: String?, size: String): String? = path
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() && !it.equals("null", ignoreCase = true) }
+        ?.let { "https://image.tmdb.org/t/p/$size$it" }
+
+    /** Searches TMDB for real movie and TV metadata; playback still hands off to the chosen provider. */
+    suspend fun search(query: String, provider: Provider): List<MediaItem> = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank() || query.isBlank()) return@withContext emptyList()
+        runCatching {
+            val movies = JSONObject(get("/search/movie", mapOf("query" to query))).optJSONArray("results") ?: JSONArray()
+            val shows = JSONObject(get("/search/tv", mapOf("query" to query))).optJSONArray("results") ?: JSONArray()
+            fun map(values: JSONArray, type: String) = (0 until values.length()).mapNotNull { index ->
+                values.optJSONObject(index)?.let { result ->
+                    val title = result.optString(if (type == "movie") "title" else "name").trim().takeIf { it.isNotBlank() } ?: return@let null
+                    MediaItem(
+                        title = title,
+                        provider = provider,
+                        progress = 0f,
+                        colors = listOf(provider.accent.copy(alpha = .45f), Color(0xFF080A10)),
+                        artworkUrl = result.optString("poster_path").takeIf { it.isNotBlank() }?.let { "https://image.tmdb.org/t/p/w780$it" }.orEmpty(),
+                        providerContentId = "tmdb:${result.optInt("id")}",
+                        contentType = type,
+                        showTitle = if (type == "tv") title else null,
+                        description = result.optString("overview").ifBlank { null },
+                        releaseInfo = result.optString(if (type == "movie") "release_date" else "first_air_date").ifBlank { null },
+                        rating = result.optDouble("vote_average", 0.0).takeIf { it > 0 }
+                    )
+                }
+            }
+            (map(shows, "tv") + map(movies, "movie")).distinctBy { "${it.contentType}:${it.title}" }.take(20)
+        }.getOrDefault(emptyList())
+    }
+
+    /** Personalized TV recommendations seeded by exact titles in the active provider library. */
+    suspend fun recommendations(items: List<MediaItem>): List<MediaItem> = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) return@withContext emptyList()
+        // Three exact seeds already provide a full rail; avoid a burst of serial requests when
+        // Home opens on a TV with a slower connection.
+        items.take(3).flatMap { item -> runCatching { recommendationsFor(item) }.getOrDefault(emptyList()) }
+            .distinctBy { normalize(it.title) }
+            .take(18)
+    }
+
+    private fun recommendationsFor(source: MediaItem): List<MediaItem> {
+        val queryTitle = source.showTitle ?: source.title
+        val search = JSONObject(get("/search/tv", mapOf("query" to queryTitle)))
+        val series = (search.optJSONArray("results") ?: JSONArray()).optJSONObject(0) ?: return emptyList()
+        if (normalize(series.optString("name")) != normalize(queryTitle)) return emptyList()
+        val results = JSONObject(get("/tv/${series.getInt("id")}/recommendations")).optJSONArray("results") ?: JSONArray()
+        return (0 until minOf(results.length(), 8)).mapNotNull { index ->
+            results.optJSONObject(index)?.let { show ->
+                val title = show.optString("name").trim().takeIf { it.isNotBlank() } ?: return@let null
+                MediaItem(
+                    title = title,
+                    provider = source.provider,
+                    progress = 0f,
+                    colors = listOf(source.provider.accent.copy(alpha = .45f), Color(0xFF080A10)),
+                    artworkUrl = show.optString("poster_path").takeIf { it.isNotBlank() }?.let { "https://image.tmdb.org/t/p/w780$it" }.orEmpty(),
+                    providerContentId = "tmdb:${show.optInt("id")}",
+                    contentType = "tv",
+                    showTitle = title,
+                    description = show.optString("overview").ifBlank { null },
+                    releaseInfo = show.optString("first_air_date").ifBlank { null },
+                    rating = show.optDouble("vote_average", 0.0).takeIf { it > 0 }
+                )
+            }
+        }
+    }
+
+    /** Next aired episodes for exact library matches, used by Relay's Home and Calendar views. */
+    suspend fun upcomingEpisodes(items: List<MediaItem>): List<TmdbCalendarEntry> = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) return@withContext emptyList()
+        items.mapNotNull { item -> runCatching { upcomingEpisode(item) }.getOrNull() }
+            .distinctBy { "${it.date}:${it.item.providerContentId ?: normalize(it.item.title)}:${it.item.episodeInfo}" }
+            .sortedBy { it.date }
+    }
+
+    private fun upcomingEpisode(item: MediaItem): TmdbCalendarEntry? {
+        val queryTitle = item.showTitle ?: item.title
+        val search = JSONObject(get("/search/tv", mapOf("query" to queryTitle)))
+        val series = (search.optJSONArray("results") ?: JSONArray()).optJSONObject(0) ?: return null
+        if (normalize(series.optString("name")) != normalize(queryTitle)) return null
+        val details = JSONObject(get("/tv/${series.getInt("id")}"))
+        val episode = details.optJSONObject("next_episode_to_air") ?: return null
+        val airDate = episode.optString("air_date").takeIf { it.isNotBlank() } ?: return null
+        val season = episode.optInt("season_number")
+        val number = episode.optInt("episode_number")
+        val episodeInfo = "S${season.toString().padStart(2, '0')} • E${number.toString().padStart(2, '0')}" +
+            episode.optString("name").trim().takeIf { it.isNotBlank() }?.let { " • $it" }.orEmpty()
+        val seriesArtwork = tmdbArtwork(details.optString("backdrop_path"), "w1280")
+            ?: tmdbArtwork(details.optString("poster_path"), "w780")
+            ?: tmdbArtwork(series.optString("backdrop_path"), "w1280")
+            ?: tmdbArtwork(series.optString("poster_path"), "w780")
+            ?: item.artworkUrl.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+            .orEmpty()
+        return TmdbCalendarEntry(
+            LocalDate.parse(airDate),
+            item.copy(
+                showTitle = series.optString("name"),
+                episodeInfo = episodeInfo,
+                description = episode.optString("overview").ifBlank { item.description },
+                releaseInfo = airDate,
+                artworkUrl = tmdbArtwork(episode.optString("still_path"), "w1280") ?: seriesArtwork,
+                progress = 0f
+            )
+        )
+    }
+
+    /** Supplies dated, exact-match TV metadata for Relay's calendar without changing provider progress. */
+    suspend fun calendarEntries(items: List<MediaItem>): List<TmdbCalendarEntry> = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) return@withContext emptyList()
+        items.mapNotNull { item -> runCatching { calendarEntry(item) }.getOrNull() }
+    }
+
+    private fun calendarEntry(item: MediaItem): TmdbCalendarEntry? {
+        val queryTitle = item.showTitle ?: item.title
+        val search = JSONObject(get("/search/tv", mapOf("query" to queryTitle)))
+        val series = (search.optJSONArray("results") ?: JSONArray()).optJSONObject(0) ?: return null
+        if (normalize(series.optString("name")) != normalize(queryTitle)) return null
+        val seriesId = series.getInt("id")
+        val match = Regex("S(\\d+)\\s*•\\s*E(\\d+)").find(item.episodeInfo.orEmpty())
+        if (match != null) {
+            val season = match.groupValues[1].toInt()
+            val episode = match.groupValues[2].toInt()
+            val details = JSONObject(get("/tv/$seriesId/season/$season/episode/$episode"))
+            val airDate = details.optString("air_date").takeIf { it.isNotBlank() } ?: return null
+            val episodeName = details.optString("name").trim()
+            val currentEpisode = match.value + if (episodeName.isBlank()) "" else " • $episodeName"
+            return TmdbCalendarEntry(LocalDate.parse(airDate), item.copy(showTitle = series.optString("name"), episodeInfo = currentEpisode))
+        }
+        val premiere = series.optString("first_air_date").takeIf { it.isNotBlank() } ?: return null
+        return TmdbCalendarEntry(LocalDate.parse(premiere), item.copy(showTitle = series.optString("name")))
     }
 
     /** Accurate season/episode choices for Relay's picker; never inferred from titles alone. */
@@ -54,143 +191,11 @@ internal object TmdbApi {
         }
     }
 
-    /** Supplies dated, exact-match TV metadata for Relay's calendar without changing provider progress. */
-    suspend fun calendarEntries(items: List<MediaItem>): List<TmdbCalendarEntry> = withContext(Dispatchers.IO) {
-        if (apiKey.isBlank()) return@withContext emptyList()
-        items.mapNotNull { item -> runCatching { calendarEntry(item) }.getOrNull() }
-    }
-
-    /** Next aired episodes for exact library matches, used by Relay's Home and Calendar views. */
-    suspend fun upcomingEpisodes(items: List<MediaItem>): List<TmdbCalendarEntry> = withContext(Dispatchers.IO) {
-        if (apiKey.isBlank()) return@withContext emptyList()
-        items.mapNotNull { item -> runCatching { upcomingEpisode(item) }.getOrNull() }
-            .sortedBy { it.date }
-    }
-
-    /** Personalized TV recommendations seeded by exact titles in the active provider library. */
-    suspend fun recommendations(items: List<MediaItem>): List<MediaItem> = withContext(Dispatchers.IO) {
-        if (apiKey.isBlank()) return@withContext emptyList()
-        // Three exact seeds already provide a full rail; avoid a burst of serial requests when
-        // Home opens on a TV with a slower connection.
-        items.take(3).flatMap { item -> runCatching { recommendationsFor(item) }.getOrDefault(emptyList()) }
-            .distinctBy { it.title }
-            .take(18)
-    }
-
-    /** Searches TMDB for real movie and TV metadata; playback still hands off to the chosen provider. */
-    suspend fun search(query: String, provider: Provider): List<MediaItem> = withContext(Dispatchers.IO) {
-        if (apiKey.isBlank() || query.isBlank()) return@withContext emptyList()
-        runCatching {
-            val movies = JSONObject(get("/search/movie", mapOf("query" to query))).optJSONArray("results") ?: JSONArray()
-            val shows = JSONObject(get("/search/tv", mapOf("query" to query))).optJSONArray("results") ?: JSONArray()
-            fun map(values: JSONArray, type: String) = (0 until values.length()).mapNotNull { index ->
-                values.optJSONObject(index)?.let { result ->
-                    val title = result.optString(if (type == "movie") "title" else "name").trim().takeIf { it.isNotBlank() } ?: return@let null
-                    MediaItem(
-                        title = title,
-                        provider = provider,
-                        progress = 0f,
-                        colors = listOf(provider.accent.copy(alpha = .45f), Color(0xFF080A10)),
-                        artworkUrl = result.optString("poster_path").takeIf { it.isNotBlank() }?.let { "https://image.tmdb.org/t/p/w780$it" }.orEmpty(),
-                        providerContentId = "tmdb:${result.optInt("id")}",
-                        contentType = type,
-                        showTitle = if (type == "tv") title else null,
-                        description = result.optString("overview").ifBlank { null },
-                        releaseInfo = result.optString(if (type == "movie") "release_date" else "first_air_date").ifBlank { null },
-                        rating = result.optDouble("vote_average", 0.0).takeIf { it > 0 }
-                    )
-                }
-            }
-            (map(shows, "tv") + map(movies, "movie")).distinctBy { "${it.contentType}:${it.title}" }.take(20)
-        }.getOrDefault(emptyList())
-    }
-
-    private fun recommendationsFor(source: MediaItem): List<MediaItem> {
-        val queryTitle = source.showTitle ?: source.title
-        val search = JSONObject(get("/search/tv", mapOf("query" to queryTitle)))
-        val series = (search.optJSONArray("results") ?: JSONArray()).optJSONObject(0) ?: return emptyList()
-        if (normalize(series.optString("name")) != normalize(queryTitle)) return emptyList()
-        val results = JSONObject(get("/tv/${series.getInt("id")}/recommendations")).optJSONArray("results") ?: JSONArray()
-        return (0 until minOf(results.length(), 8)).mapNotNull { index ->
-            results.optJSONObject(index)?.let { show ->
-                val title = show.optString("name").trim().takeIf { it.isNotBlank() } ?: return@let null
-                MediaItem(
-                    title = title,
-                    provider = source.provider,
-                    progress = 0f,
-                    colors = listOf(source.provider.accent.copy(alpha = .45f), Color(0xFF080A10)),
-                    artworkUrl = show.optString("poster_path").takeIf { it.isNotBlank() }?.let { "https://image.tmdb.org/t/p/w780$it" }.orEmpty(),
-                    providerContentId = "tmdb:${show.optInt("id")}",
-                    contentType = "tv",
-                    showTitle = title,
-                    description = show.optString("overview").ifBlank { null },
-                    releaseInfo = show.optString("first_air_date").ifBlank { null },
-                    rating = show.optDouble("vote_average", 0.0).takeIf { it > 0 }
-                )
-            }
-        }
-    }
-
-    private fun upcomingEpisode(item: MediaItem): TmdbCalendarEntry? {
-        val queryTitle = item.showTitle ?: item.title
-        val search = JSONObject(get("/search/tv", mapOf("query" to queryTitle)))
-        val series = (search.optJSONArray("results") ?: JSONArray()).optJSONObject(0) ?: return null
-        if (normalize(series.optString("name")) != normalize(queryTitle)) return null
-        val details = JSONObject(get("/tv/${series.getInt("id")}"))
-        // Episode stills are optional in TMDB. Always keep the rail visually complete by
-        // falling back to the show's own backdrop/poster before falling back to provider art.
-        val seriesArtwork = tmdbArtwork(details.optString("backdrop_path"), "w1280")
-            ?: tmdbArtwork(details.optString("poster_path"), "w780")
-            ?: tmdbArtwork(series.optString("backdrop_path"), "w1280")
-            ?: tmdbArtwork(series.optString("poster_path"), "w780")
-            ?: item.artworkUrl.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
-            .orEmpty()
-        val episode = details.optJSONObject("next_episode_to_air") ?: return null
-        val airDate = episode.optString("air_date").takeIf { it.isNotBlank() } ?: return null
-        val season = episode.optInt("season_number")
-        val number = episode.optInt("episode_number")
-        val episodeInfo = "S${season.toString().padStart(2, '0')} • E${number.toString().padStart(2, '0')}" +
-            episode.optString("name").trim().takeIf { it.isNotBlank() }?.let { " • $it" }.orEmpty()
-        return TmdbCalendarEntry(
-            LocalDate.parse(airDate),
-            item.copy(
-                showTitle = series.optString("name"),
-                episodeInfo = episodeInfo,
-                description = episode.optString("overview").ifBlank { item.description },
-                releaseInfo = airDate,
-                artworkUrl = tmdbArtwork(episode.optString("still_path"), "w1280") ?: seriesArtwork,
-                progress = 0f
-            )
-        )
-    }
-
-    private fun tmdbArtwork(path: String?, size: String): String? = path
-        ?.trim()
-        ?.takeIf { it.isNotEmpty() && !it.equals("null", ignoreCase = true) }
-        ?.let { "https://image.tmdb.org/t/p/$size$it" }
-
-    private fun calendarEntry(item: MediaItem): TmdbCalendarEntry? {
-        val queryTitle = item.showTitle ?: item.title
-        val search = JSONObject(get("/search/tv", mapOf("query" to queryTitle)))
-        val series = (search.optJSONArray("results") ?: JSONArray()).optJSONObject(0) ?: return null
-        if (normalize(series.optString("name")) != normalize(queryTitle)) return null
-        val seriesId = series.getInt("id")
-        val match = Regex("S(\\d+)\\s*•\\s*E(\\d+)").find(item.episodeInfo.orEmpty())
-        if (match != null) {
-            val season = match.groupValues[1].toInt()
-            val episode = match.groupValues[2].toInt()
-            val details = JSONObject(get("/tv/$seriesId/season/$season/episode/$episode"))
-            val airDate = details.optString("air_date").takeIf { it.isNotBlank() } ?: return null
-            val episodeName = details.optString("name").trim()
-            val currentEpisode = match.value + if (episodeName.isBlank()) "" else " • $episodeName"
-            return TmdbCalendarEntry(LocalDate.parse(airDate), item.copy(showTitle = series.optString("name"), episodeInfo = currentEpisode))
-        }
-        val premiere = series.optString("first_air_date").takeIf { it.isNotBlank() } ?: return null
-        return TmdbCalendarEntry(LocalDate.parse(premiere), item.copy(showTitle = series.optString("name")))
-    }
+    private fun normalize(value: String): String = value.lowercase().replace(Regex("[^a-z0-9]"), "")
 
     private fun enrichEpisode(item: MediaItem): MediaItem {
-        // Nuvio's sync payload does not include a TMDB series ID. Do not guess across media types.
+        // Nuvio's sync payload does not include a TMDB series ID. Restrict enrichment to TV-like
+        // media and require an exact normalized title match before attaching episode metadata.
         if (item.contentType.lowercase() !in setOf("tv", "show", "series", "episode")) return item
         val match = Regex("S(\\d+)\\s*•\\s*E(\\d+)").find(item.episodeInfo ?: "") ?: return item
         val season = match.groupValues[1].toInt()
@@ -214,11 +219,9 @@ internal object TmdbApi {
         )
     }
 
-    private fun normalize(value: String): String = value.lowercase().replace(Regex("[^a-z0-9]"), "")
-
     private fun get(path: String, query: Map<String, String> = emptyMap()): String {
         val params = (query + ("api_key" to apiKey)).entries.joinToString("&") {
-            URLEncoder.encode(it.key, "UTF-8") + "=" + URLEncoder.encode(it.value, "UTF-8")
+            "${URLEncoder.encode(it.key, "UTF-8")}=${URLEncoder.encode(it.value, "UTF-8")}"
         }
         val connection = (URL("$baseUrl$path?$params").openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
@@ -230,7 +233,3 @@ internal object TmdbApi {
         return body
     }
 }
-
-internal data class TvEpisode(val number: Int, val title: String)
-internal data class TvSeason(val seasons: List<Int>, val episodes: List<TvEpisode>)
-internal data class TmdbCalendarEntry(val date: LocalDate, val item: MediaItem)
