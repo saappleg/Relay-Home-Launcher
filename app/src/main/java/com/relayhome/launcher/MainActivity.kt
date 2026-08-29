@@ -21,7 +21,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
-import androidx.compose.foundation.focusable
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -95,6 +94,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.graphics.drawable.toBitmap
 import androidx.palette.graphics.Palette
 import coil.compose.AsyncImage
@@ -290,12 +291,17 @@ private fun RelayHomeApp() {
     var upcomingEpisodes by remember { mutableStateOf(emptyList<TmdbCalendarEntry>()) }
     var tmdbRecommendations by remember { mutableStateOf(emptyList<MediaItem>()) }
     val smartTubeNowPlaying = SmartTubePlaybackStore.nowPlaying
+    val relayTubeProfiles = SmartTubePlaybackStore.profiles
     val smartTubeSubscriptions = SmartTubePlaybackStore.subscriptionVideos
         .ifEmpty { SmartTubePlaybackStore.loadSubscriptionVideos(context) }
     val smartTubeContinueWatching = SmartTubePlaybackStore.continueWatchingVideos
         .ifEmpty { SmartTubePlaybackStore.loadContinueWatchingVideos(context) }
     val hiddenSmartTubeChannels = SmartTubeChannelFilter.hiddenChannelIds
-    LaunchedEffect(Unit) { SmartTubeChannelFilter.load(context) }
+    LaunchedEffect(Unit) {
+        SmartTubeChannelFilter.load(context)
+        SmartTubePlaybackStore.initialize(context)
+        RelayTubeProfileBridge.requestProfiles(context)
+    }
     LaunchedEffect(nuvioSession) {
         nuvioSession?.let { session ->
             NuvioApi.pullProfiles(session).onSuccess { profiles ->
@@ -319,6 +325,39 @@ private fun RelayHomeApp() {
                 }
             nuvioSyncing = false
         }
+    }
+    LaunchedEffect(nuvioProfiles, relayTubeProfiles, activeNuvioProfile) {
+        if (nuvioProfiles.size == relayTubeProfiles.size && nuvioProfiles.size > 1) {
+            nuvioProfiles.forEachIndexed { index, profile ->
+                if (RelayProfileMappingStore.get(context, profile.index) == null) {
+                    val exact = relayTubeProfiles.firstOrNull { it.name.equals(profile.name, ignoreCase = true) }
+                    RelayProfileMappingStore.set(context, profile.index, (exact ?: relayTubeProfiles[index]).id)
+                }
+            }
+        }
+        val nuvioProfile = nuvioProfiles.firstOrNull { it.index == activeNuvioProfile }
+        if (nuvioProfile != null && relayTubeProfiles.isNotEmpty()) {
+            val pairedId = RelayProfileMappingStore.resolve(
+                context,
+                nuvioProfile,
+                relayTubeProfiles,
+                allowSelectedFallback = true
+            )
+            if (pairedId != null && pairedId != SmartTubePlaybackStore.activeProfileId) {
+                RelayTubeProfileBridge.selectProfile(context, pairedId)
+            }
+        }
+    }
+    fun selectRelayProfile(profileIndex: Int) {
+        activeNuvioProfile = profileIndex
+        NuvioSessionStore.saveProfile(context, profileIndex)
+        val nuvioProfile = nuvioProfiles.firstOrNull { it.index == profileIndex } ?: return
+        RelayProfileMappingStore.resolve(
+            context,
+            nuvioProfile,
+            relayTubeProfiles,
+            allowSelectedFallback = false
+        )?.let { RelayTubeProfileBridge.selectProfile(context, it) }
     }
     LaunchedEffect(nuvioMedia) {
         upcomingEpisodes = TmdbApi.upcomingEpisodes(nuvioMedia)
@@ -418,8 +457,7 @@ private fun RelayHomeApp() {
                     profileImageUri = profileImageUri,
                     onRefreshNuvio = { nuvioRefreshGeneration++ },
                     onNuvioProfileSelected = {
-                        activeNuvioProfile = it
-                        NuvioSessionStore.saveProfile(context, it)
+                        selectRelayProfile(it)
                     }
                 )
                 Destination.DETAIL -> DetailsScreen(
@@ -505,8 +543,7 @@ private fun RelayHomeApp() {
                     nuvioProfiles = nuvioProfiles,
                     activeNuvioProfile = activeNuvioProfile,
                     onNuvioProfileSelected = {
-                        activeNuvioProfile = it
-                        NuvioSessionStore.saveProfile(context, it)
+                        selectRelayProfile(it)
                     },
                     onRefreshNuvio = { nuvioRefreshGeneration++ },
                     onDisconnectNuvio = {
@@ -751,6 +788,7 @@ private fun HomeScreen(
             ProfileSwitcher(
                 palette = palette,
                 profiles = nuvioProfiles,
+                relayTubeProfiles = SmartTubePlaybackStore.profiles,
                 activeProfile = activeNuvioProfile,
                 profileImageUri = profileImageUri,
                 onSelect = {
@@ -920,8 +958,7 @@ private fun ProfileAvatarButton(
         modifier = Modifier.size(if (compact) 38.dp else 45.dp).clip(CircleShape)
             .background(Provider.NUVIO.accent.copy(alpha = .78f))
             .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .3f), CircleShape)
-            .clickable(interactionSource = source, indication = null, onClick = onClick)
-            .focusable(interactionSource = source),
+            .clickable(interactionSource = source, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         val displayedImage = imageUri ?: profile?.imageUrl
@@ -942,52 +979,81 @@ private fun ProfileAvatarButton(
 private fun ProfileSwitcher(
     palette: RelayPalette,
     profiles: List<NuvioProfile>,
+    relayTubeProfiles: List<RelayTubeProfile>,
     activeProfile: Int,
     profileImageUri: String?,
     onSelect: (Int) -> Unit,
     onDismiss: () -> Unit
 ) {
-    Box(Modifier.fillMaxSize().background(midnight.copy(alpha = .82f)), contentAlignment = Alignment.Center) {
-        Column(
-            Modifier.width(430.dp).clip(RoundedCornerShape(22.dp)).background(Color(0xFF15121C)).border(1.dp, palette.accent.copy(alpha = .6f), RoundedCornerShape(22.dp)).padding(28.dp)
-        ) {
-            Text("Who’s watching?", color = ivory, fontSize = 26.sp, fontWeight = FontWeight.Light)
-            Spacer(Modifier.height(8.dp))
-            Text("Switching profiles refreshes Relay with that Nuvio profile’s Continue Watching.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
-            Spacer(Modifier.height(24.dp))
-            profiles.forEach { profile ->
-                val source = remember { MutableInteractionSource() }
-                val focused by source.collectIsFocusedAsState()
-                Row(
-                    Modifier.fillMaxWidth().clip(RoundedCornerShape(20.dp))
-                        .background(if (focused || profile.index == activeProfile) Provider.NUVIO.accent.copy(alpha = .22f) else Color(0xFF1A1C23))
-                        .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .10f), RoundedCornerShape(20.dp))
-                        .clickable(interactionSource = source, indication = null) { onSelect(profile.index) }
-                        .focusable(interactionSource = source).padding(12.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Box(Modifier.size(42.dp).clip(CircleShape).background(Provider.NUVIO.accent.copy(alpha = .82f)), contentAlignment = Alignment.Center) {
-                        val displayedImage = if (profile.index == activeProfile) profileImageUri ?: profile.imageUrl else profile.imageUrl
-                        if (displayedImage != null) {
-                            AsyncImage(
-                                model = displayedImage,
-                                contentDescription = profile.name,
-                                contentScale = ContentScale.Crop,
-                                modifier = Modifier.fillMaxSize()
-                            )
-                        } else {
-                            Text(profile.name.firstOrNull()?.uppercase() ?: "P", color = ivory, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                    Spacer(Modifier.width(12.dp))
-                    Text(profile.name, color = ivory, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                    Spacer(Modifier.weight(1f))
-                    if (profile.index == activeProfile) Text("Watching", color = Provider.NUVIO.accent, fontSize = 13.sp)
-                }
-                Spacer(Modifier.height(10.dp))
+    val initialFocusRequester = remember(activeProfile, profiles) { FocusRequester() }
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+            usePlatformDefaultWidth = false
+        )
+    ) {
+        BackHandler(onBack = onDismiss)
+        LaunchedEffect(activeProfile, profiles) {
+            repeat(4) {
+                delay(75)
+                initialFocusRequester.requestFocus()
             }
-            Spacer(Modifier.height(8.dp))
-            ActionButton("Cancel", palette, primary = false, onClick = onDismiss)
+        }
+        Box(Modifier.fillMaxSize().background(midnight.copy(alpha = .82f)), contentAlignment = Alignment.Center) {
+            Column(
+                Modifier.width(430.dp).clip(RoundedCornerShape(22.dp)).background(Color(0xFF15121C)).border(1.dp, palette.accent.copy(alpha = .6f), RoundedCornerShape(22.dp)).padding(28.dp)
+            ) {
+                Text("Who’s watching?", color = ivory, fontSize = 26.sp, fontWeight = FontWeight.Light)
+                Spacer(Modifier.height(8.dp))
+                Text("Each Relay profile keeps its own Nuvio and RelayTube viewing feeds.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+                Spacer(Modifier.height(24.dp))
+                profiles.forEachIndexed { index, profile ->
+                    val relayTubeProfile = RelayProfileMappingStore.get(LocalContext.current, profile.index)
+                        ?.let { id -> relayTubeProfiles.firstOrNull { it.id == id } }
+                        ?: relayTubeProfiles.firstOrNull { it.name.equals(profile.name, ignoreCase = true) }
+                    val source = remember(profile.index) { MutableInteractionSource() }
+                    val focused by source.collectIsFocusedAsState()
+                    val receivesInitialFocus = profile.index == activeProfile ||
+                        (profiles.none { it.index == activeProfile } && index == 0)
+                    Row(
+                        (if (receivesInitialFocus) Modifier.focusRequester(initialFocusRequester) else Modifier)
+                            .fillMaxWidth().clip(RoundedCornerShape(20.dp))
+                            .background(if (focused || profile.index == activeProfile) Provider.NUVIO.accent.copy(alpha = .22f) else Color(0xFF1A1C23))
+                            .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .10f), RoundedCornerShape(20.dp))
+                            // clickable already contributes the TV focus target. Adding a second
+                            // focusable node made each visible profile consume two D-pad moves.
+                            .clickable(interactionSource = source, indication = null) { onSelect(profile.index) }
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(Modifier.size(42.dp).clip(CircleShape).background(Provider.NUVIO.accent.copy(alpha = .82f)), contentAlignment = Alignment.Center) {
+                            val displayedImage = if (profile.index == activeProfile) profileImageUri ?: profile.imageUrl else profile.imageUrl
+                            if (displayedImage != null) {
+                                AsyncImage(
+                                    model = displayedImage,
+                                    contentDescription = profile.name,
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
+                                )
+                            } else {
+                                Text(profile.name.firstOrNull()?.uppercase() ?: "P", color = ivory, fontWeight = FontWeight.Bold)
+                            }
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text(profile.name, color = ivory, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                            relayTubeProfile?.let { Text("RelayTube · ${it.name}", color = muted, fontSize = 12.sp) }
+                        }
+                        Spacer(Modifier.weight(1f))
+                        if (profile.index == activeProfile) Text("Watching", color = Provider.NUVIO.accent, fontSize = 13.sp)
+                    }
+                    Spacer(Modifier.height(10.dp))
+                }
+                Spacer(Modifier.height(8.dp))
+                ActionButton("Cancel", palette, primary = false, onClick = onDismiss)
+            }
         }
     }
 }
@@ -1126,7 +1192,6 @@ private fun AppPeekPanel(
                                     onItemSelected(item)
                                 }
                             }
-                            .focusable(interactionSource = source)
                     ) {
                         AsyncImage(model = item.artworkUrl, contentDescription = item.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
                         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, midnight.copy(alpha = .84f)))))
@@ -1191,8 +1256,7 @@ private fun EmbossedSettingsButton(
             .clip(CircleShape)
             .background(Brush.radialGradient(listOf(Color(0xFF31353D), Color(0xFF111318))))
             .border(1.dp, if (focused) palette.accent else Color(0xFF3A3D45), CircleShape)
-            .clickable(interactionSource = source, indication = null, onClick = onClick)
-            .focusable(interactionSource = source),
+            .clickable(interactionSource = source, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         Text("⚙", color = if (focused) palette.accent else ivory, fontSize = if (compact) 20.sp else 23.sp)
@@ -1212,7 +1276,7 @@ private fun EmbossedSearchButton(
     Row(
         Modifier.clip(RoundedCornerShape(22.dp)).background(Brush.linearGradient(listOf(Color(0xFF30343C), Color(0xFF111318))))
             .border(1.dp, if (focused) palette.accent else Color(0xFF3A3D45), RoundedCornerShape(22.dp))
-            .clickable(interactionSource = source, indication = null, onClick = onClick).focusable(interactionSource = source)
+            .clickable(interactionSource = source, indication = null, onClick = onClick)
             .padding(horizontal = if (compact) 11.dp else 14.dp, vertical = if (compact) 8.dp else 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) { Text("⌕", color = ivory, fontSize = 19.sp); Spacer(Modifier.width(6.dp)); Text("Search", color = ivory, fontSize = if (compact) 14.sp else 16.sp) }
@@ -1324,7 +1388,7 @@ private fun ActionButton(
             .background(if (primary) ivory else Color(0xFF171A20))
             .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color(0xFF363A42), RoundedCornerShape(24.dp))
             .clickable(interactionSource = source, indication = null, onClick = onClick)
-            .focusable(interactionSource = source).padding(horizontal = 21.dp, vertical = 12.dp)
+            .padding(horizontal = 21.dp, vertical = 12.dp)
     )
 }
 
@@ -1456,7 +1520,6 @@ private fun MediaCard(
             .border(if (focused) 2.dp else 1.dp, if (focused) ivory.copy(alpha = .78f) else Color.White.copy(alpha = .12f), shape)
             .clickable(interactionSource = source, indication = null, onClick = onClick)
             .then(if (upFocusRequester != null) Modifier.focusProperties { up = upFocusRequester } else Modifier)
-            .focusable(interactionSource = source)
     ) {
         AsyncImage(
             // A fresh ImageRequest on every focus recomposition can make Coil re-evaluate an
@@ -1567,11 +1630,13 @@ private fun FavoriteAppCard(
     val source = remember { MutableInteractionSource() }
     val focused by source.collectIsFocusedAsState()
     val scale = if (focused) 1.07f else 1f
-    val icon = remember(app.packageName) { app.icon.toBitmap(144, 144).asImageBitmap() }
+    val icon = remember(app.packageName, app.hasRoundIcon) {
+        if (app.hasRoundIcon) app.icon.toBitmap(144, 144).asImageBitmap()
+        else app.icon.toRoundLauncherBitmap(144).asImageBitmap()
+    }
     Column(
         Modifier.width(104.dp)
-            .clickable(interactionSource = source, indication = null, onClick = onClick)
-            .focusable(interactionSource = source),
+            .clickable(interactionSource = source, indication = null, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Box(
@@ -1582,13 +1647,13 @@ private fun FavoriteAppCard(
                 clip = true
             }
                 .background(if (focused) palette.accent.copy(alpha = .30f) else Color(0xFF242730))
-                .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .12f), CircleShape),
+                .border(if (focused) 2.dp else 0.dp, if (focused) palette.accent else Color.Transparent, CircleShape),
             contentAlignment = Alignment.Center
         ) {
             Image(
                 painter = BitmapPainter(icon),
                 contentDescription = app.label,
-                contentScale = ContentScale.Crop,
+                contentScale = ContentScale.FillBounds,
                 modifier = Modifier.fillMaxSize()
             )
             if (focused) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = .08f)))
@@ -1621,7 +1686,7 @@ private fun AppsScreen(
         appsGridState.scrollToItem(0)
         if (apps.isNotEmpty()) firstAppFocusRequester.requestFocus()
     }
-    BackHandler(onBack = onBackHome)
+    BackHandler(enabled = activeMenuApp == null, onBack = onBackHome)
     Column(Modifier.fillMaxSize().padding(horizontal = 56.dp, vertical = 48.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Apps", color = ivory, fontSize = 34.sp, fontWeight = FontWeight.Light)
@@ -1648,6 +1713,7 @@ private fun AppsScreen(
                         app = app,
                         palette = palette,
                         focusRequester = if (index == 0) firstAppFocusRequester else null,
+                        menuOpen = activeMenuApp != null,
                         onLongClick = { activeMenuApp = app },
                         onClick = { InstalledApps.launch(context, app) }
                     )
@@ -1687,6 +1753,7 @@ private fun InstalledAppTile(
     app: InstalledApp,
     palette: RelayPalette,
     focusRequester: FocusRequester? = null,
+    menuOpen: Boolean,
     onLongClick: () -> Unit,
     onClick: () -> Unit
 ) {
@@ -1694,7 +1761,9 @@ private fun InstalledAppTile(
     val focused by source.collectIsFocusedAsState()
     val scope = rememberCoroutineScope()
     var selectHoldJob by remember { mutableStateOf<Job?>(null) }
-    val scale by animateFloatAsState(if (focused) 1.07f else 1f, label = "app tile focus")
+    var longPressHandled by remember { mutableStateOf(false) }
+    val showFocus = focused && !menuOpen
+    val scale by animateFloatAsState(if (showFocus) 1.07f else 1f, label = "app tile focus")
     val shape = RoundedCornerShape(16.dp)
     val artwork = remember(app.packageName) {
         if (app.hasLeanbackBanner) app.artwork.toBitmap(480, 270).asImageBitmap()
@@ -1703,14 +1772,20 @@ private fun InstalledAppTile(
     DisposableEffect(Unit) {
         onDispose { selectHoldJob?.cancel() }
     }
+    LaunchedEffect(menuOpen) {
+        if (!menuOpen) {
+            selectHoldJob?.cancel()
+            selectHoldJob = null
+            longPressHandled = false
+        }
+    }
     Box(
         modifier = (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .fillMaxWidth()
             .aspectRatio(16f / 9f)
             .scale(scale)
             .clip(shape)
-            .background(if (focused) palette.accent.copy(alpha = .24f) else Color(0xFF20232A))
-            .combinedClickable(interactionSource = source, indication = null, onLongClick = onLongClick, onClick = onClick)
+            .background(if (showFocus) palette.accent.copy(alpha = .24f) else Color(0xFF20232A))
             .onPreviewKeyEvent { event ->
                 val nativeEvent = event.nativeKeyEvent
                 val isSelectKey = nativeEvent.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
@@ -1720,14 +1795,16 @@ private fun InstalledAppTile(
                     false
                 } else when (nativeEvent.action) {
                     KeyEvent.ACTION_DOWN -> {
-                        if (nativeEvent.isLongPress && selectHoldJob != null) {
+                        if (nativeEvent.isLongPress && !longPressHandled) {
                             selectHoldJob?.cancel()
                             selectHoldJob = null
+                            longPressHandled = true
                             onLongClick()
-                        } else if (nativeEvent.repeatCount == 0 && selectHoldJob == null) {
+                        } else if (nativeEvent.repeatCount == 0 && selectHoldJob == null && !longPressHandled) {
                             selectHoldJob = scope.launch {
                                 delay(ViewConfiguration.getLongPressTimeout().toLong())
                                 selectHoldJob = null
+                                longPressHandled = true
                                 onLongClick()
                             }
                         }
@@ -1737,13 +1814,14 @@ private fun InstalledAppTile(
                         val pendingClick = selectHoldJob
                         selectHoldJob = null
                         pendingClick?.cancel()
-                        if (pendingClick != null) onClick()
+                        if (pendingClick != null && !longPressHandled) onClick()
+                        longPressHandled = false
                         true
                     }
                     else -> true
                 }
             }
-            .focusable(interactionSource = source),
+            .combinedClickable(interactionSource = source, indication = null, onLongClick = onLongClick, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
         if (app.hasLeanbackBanner) {
@@ -1761,7 +1839,7 @@ private fun InstalledAppTile(
                 modifier = Modifier.fillMaxSize(.58f).align(Alignment.Center)
             )
         }
-        if (focused) {
+        if (showFocus) {
             Box(
                 Modifier.fillMaxSize().background(Color.White.copy(alpha = .08f))
             )
@@ -1780,38 +1858,55 @@ private fun AppActionsDialog(
     onDismiss: () -> Unit
 ) {
     var suppressOpeningSelect by remember(app.packageName) { mutableStateOf(true) }
-    BackHandler(onBack = onDismiss)
-    Box(
-        Modifier
-            .fillMaxSize()
-            .onPreviewKeyEvent { event ->
-                val nativeEvent = event.nativeKeyEvent
-                val isSelectKey = nativeEvent.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
-                    nativeEvent.keyCode == KeyEvent.KEYCODE_ENTER ||
-                    nativeEvent.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
-                if (suppressOpeningSelect && isSelectKey) {
-                    if (nativeEvent.action == KeyEvent.ACTION_UP) suppressOpeningSelect = false
-                    true
-                } else {
-                    false
-                }
-            }
-            .background(midnight.copy(alpha = .82f)),
-        contentAlignment = Alignment.Center
+    val openFocusRequester = remember(app.packageName) { FocusRequester() }
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+            usePlatformDefaultWidth = false
+        )
     ) {
-        Column(
-            Modifier.width(420.dp).clip(RoundedCornerShape(22.dp)).background(Color(0xFF15121C))
-                .border(1.dp, palette.accent.copy(alpha = .6f), RoundedCornerShape(22.dp)).padding(28.dp)
+        BackHandler(onBack = onDismiss)
+        LaunchedEffect(app.packageName) {
+            // Wait until the dialog owns its window before moving D-pad focus into it.
+            repeat(4) {
+                delay(75)
+                openFocusRequester.requestFocus()
+            }
+        }
+        Box(
+            Modifier
+                .fillMaxSize()
+                .onPreviewKeyEvent { event ->
+                    val nativeEvent = event.nativeKeyEvent
+                    val isSelectKey = nativeEvent.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+                        nativeEvent.keyCode == KeyEvent.KEYCODE_ENTER ||
+                        nativeEvent.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
+                    if (suppressOpeningSelect && isSelectKey) {
+                        if (nativeEvent.action == KeyEvent.ACTION_UP) suppressOpeningSelect = false
+                        true
+                    } else {
+                        false
+                    }
+                }
+                .background(midnight.copy(alpha = .82f)),
+            contentAlignment = Alignment.Center
         ) {
-            Text(app.label, color = ivory, fontSize = 22.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Spacer(Modifier.height(18.dp))
-            ActionButton("Open", palette, primary = true, onClick = onOpen)
-            Spacer(Modifier.height(10.dp))
-            ActionButton(if (isFavorite) "Remove from favorites" else "Add to favorites", palette, primary = false, onClick = onToggleFavorite)
-            Spacer(Modifier.height(10.dp))
-            ActionButton("App info & uninstall", palette, primary = false, onClick = onAppInfo)
-            Spacer(Modifier.height(14.dp))
-            ActionButton("Cancel", palette, primary = false, onClick = onDismiss)
+            Column(
+                Modifier.width(420.dp).clip(RoundedCornerShape(22.dp)).background(Color(0xFF15121C))
+                    .border(1.dp, palette.accent.copy(alpha = .6f), RoundedCornerShape(22.dp)).padding(28.dp)
+            ) {
+                Text(app.label, color = ivory, fontSize = 22.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Spacer(Modifier.height(18.dp))
+                ActionButton("Open", palette, primary = true, focusRequester = openFocusRequester, onClick = onOpen)
+                Spacer(Modifier.height(10.dp))
+                ActionButton(if (isFavorite) "Remove from favorites" else "Add to favorites", palette, primary = false, onClick = onToggleFavorite)
+                Spacer(Modifier.height(10.dp))
+                ActionButton("App info & uninstall", palette, primary = false, onClick = onAppInfo)
+                Spacer(Modifier.height(14.dp))
+                ActionButton("Cancel", palette, primary = false, onClick = onDismiss)
+            }
         }
     }
 }
@@ -1907,7 +2002,7 @@ private fun CalendarScreen(
                     modifier = Modifier.aspectRatio(1.15f).clip(RoundedCornerShape(10.dp))
                         .background(if (event != null) palette.accent.copy(alpha = .24f) else Color.White.copy(alpha = .045f))
                         .border(if (event != null) 1.dp else 0.dp, palette.accent.copy(alpha = .7f), RoundedCornerShape(10.dp))
-                        .then(if (dayEvents.isNotEmpty()) Modifier.clickable { date?.let { selectedDay = it } }.focusable() else Modifier)
+                        .then(if (dayEvents.isNotEmpty()) Modifier.clickable { date?.let { selectedDay = it } } else Modifier)
                         .padding(9.dp)
                 ) {
                     date?.let { Text(if (weekView) "${it.dayOfWeek.name.take(3).lowercase().replaceFirstChar { char -> char.uppercase() }} ${it.dayOfMonth}" else it.dayOfMonth.toString(), color = if (event != null) ivory else muted, fontSize = 14.sp, fontWeight = if (event != null) FontWeight.Bold else FontWeight.Normal) }
@@ -2081,8 +2176,7 @@ private fun AppTile(
             .size(132.dp, 86.dp).clip(RoundedCornerShape(13.dp))
             .background(Color(0xFF171A20))
             .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color(0xFF333740), RoundedCornerShape(13.dp))
-            .clickable(interactionSource = source, indication = null, onClick = onClick)
-            .focusable(interactionSource = source),
+            .clickable(interactionSource = source, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center
     ) { Text(label, color = ivory, fontSize = 15.sp) }
 }
@@ -2599,7 +2693,7 @@ private fun SystemSettingsTile(entry: SystemSettingsEntry, palette: RelayPalette
             .background(if (focused) palette.accent.copy(alpha = .20f) else Color(0xFF171A20))
             .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .09f), RoundedCornerShape(16.dp))
             .clickable(interactionSource = source, indication = null, onClick = onClick)
-            .focusable(interactionSource = source).padding(18.dp),
+            .padding(18.dp),
         verticalArrangement = Arrangement.SpaceBetween
     ) {
         Box(
@@ -2621,7 +2715,7 @@ private fun SettingsNavigationItem(label: String, selected: Boolean, palette: Re
             .background(if (selected || focused) palette.accent.copy(alpha = .20f) else Color.Transparent)
             .border(if (focused) 2.dp else 0.dp, if (focused) palette.accent else Color.Transparent, RoundedCornerShape(12.dp))
             .clickable(interactionSource = source, indication = null, onClick = onClick)
-            .focusable(interactionSource = source).padding(horizontal = 16.dp, vertical = 14.dp),
+            .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Box(Modifier.size(7.dp).clip(CircleShape).background(if (selected) palette.accent else Color.Transparent))
@@ -3108,7 +3202,7 @@ private fun SeasonEpisodeChoice(
             .background(if (selected || focused) palette.accent.copy(alpha = .22f) else Color.Transparent)
             .border(if (focused) 2.dp else 0.dp, if (focused) palette.accent else Color.Transparent, RoundedCornerShape(10.dp))
             .clickable(interactionSource = source, indication = null, onClick = onClick)
-            .focusable(interactionSource = source).padding(horizontal = 14.dp, vertical = 11.dp)
+            .padding(horizontal = 14.dp, vertical = 11.dp)
     )
 }
 
