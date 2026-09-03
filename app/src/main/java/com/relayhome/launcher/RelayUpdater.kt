@@ -41,7 +41,7 @@ internal object RelayUpdateSettings {
 }
 
 internal object RelayUpdater {
-    private const val releasesUrl = "https://api.github.com/repos/saapplegate/Relay-Home-Launcher/releases?per_page=100"
+    private const val releasesUrl = "https://api.github.com/repos/saappleg/Relay-Home-Launcher/releases?per_page=100"
     private const val maxApkBytes = 200L * 1024L * 1024L
     private const val minimumApkBytes = 256L * 1024L
     private val versionPattern = Regex(

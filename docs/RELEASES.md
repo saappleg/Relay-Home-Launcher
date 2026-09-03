@@ -47,6 +47,11 @@ Version code 9 fixes a stale App Peek focus callback that could leave a previous
 RelayTube, Nuvio, or Stremio peek visible after moving focus to Home, Calendar,
 Apps, Search, or Settings.
 
+## v0.1.0-alpha.4 release notes
+
+Version code 10 fixes the in-app GitHub update check, which was requesting a
+misspelled repository URL and returning HTTP 404.
+
 Before publishing:
 
 1. Build and smoke-test both 1080p and 4K layouts.
