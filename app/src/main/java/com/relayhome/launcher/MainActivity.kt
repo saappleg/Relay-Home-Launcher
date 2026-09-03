@@ -125,6 +125,7 @@ import java.time.YearMonth
 class MainActivity : ComponentActivity() {
     var homeRequestGeneration by mutableStateOf(0)
         private set
+    private var resetHomeOnResume = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -136,6 +137,23 @@ class MainActivity : ComponentActivity() {
         if (intent.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_HOME)) {
             homeRequestGeneration += 1
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (resetHomeOnResume) {
+            resetHomeOnResume = false
+            resetHomeFocus()
+        }
+    }
+
+    fun resetHomeFocus() {
+        homeRequestGeneration += 1
+    }
+
+    fun resetHomeOnNextResume() {
+        resetHomeOnResume = true
+        resetHomeFocus()
     }
 
     fun requestHomeRole() {
@@ -441,6 +459,25 @@ private fun RelayHomeApp() {
     var destination by remember { mutableStateOf(Destination.HOME) }
     var activeProvider by remember { mutableStateOf(Provider.STREMIO) }
     var peekProvider by remember { mutableStateOf<Provider?>(null) }
+    var suppressProviderPeek by remember { mutableStateOf(false) }
+    fun returnHome() {
+        // Returning from a provider must discard its transient Home peek and reset
+        // the Home list/focus, otherwise RelayTube can remain visually selected.
+        suppressProviderPeek = true
+        peekProvider = null
+        destination = Destination.HOME
+        (context as? MainActivity)?.resetHomeFocus()
+    }
+    fun openRelayTube() {
+        returnHome()
+        (context as? MainActivity)?.resetHomeOnNextResume()
+        ProviderHandoff.openSmartTube(context)
+    }
+    fun playRelayTube(item: MediaItem) {
+        returnHome()
+        (context as? MainActivity)?.resetHomeOnNextResume()
+        ProviderHandoff.play(context, item)
+    }
     val homeGeneration = (context as? MainActivity)?.homeRequestGeneration ?: 0
     LaunchedEffect(homeGeneration) {
         if (homeGeneration > 0) {
@@ -681,6 +718,10 @@ private fun RelayHomeApp() {
                     providers = enabledProviders,
                     onDestination = { destination = it },
                     onProvider = { provider -> activeProvider = provider; destination = Destination.PROVIDER },
+                    onOpenRelayTube = ::openRelayTube,
+                    onPlayRelayTube = ::playRelayTube,
+                    suppressProviderPeek = suppressProviderPeek,
+                    onHomeFocusRestored = { suppressProviderPeek = false },
                     peekProvider = peekProvider,
                     onPeekProvider = { peekProvider = it },
                     onSettings = { destination = Destination.SETTINGS },
@@ -714,7 +755,7 @@ private fun RelayHomeApp() {
                     nuvioSession = nuvioSession,
                     nuvioProfileId = activeNuvioProfile,
                     onLibraryChanged = { nuvioRefreshGeneration++ },
-                    onBackHome = { destination = Destination.HOME }
+                    onBackHome = ::returnHome
                 )
                 Destination.APPS -> AppsScreen(
                     palette = palette,
@@ -723,13 +764,13 @@ private fun RelayHomeApp() {
                         FavoriteAppsStore.toggle(context, pkg)
                         favoriteApps = FavoriteAppsStore.load(context)
                     },
-                    onBackHome = { destination = Destination.HOME }
+                    onBackHome = ::returnHome
                 )
                 Destination.SETTINGS -> SettingsScreen(
                     palette = palette,
                     appearance = appearance,
                     providers = enabledProviders,
-                    onBackHome = { destination = Destination.HOME },
+                    onBackHome = ::returnHome,
                     onProviderToggle = { provider ->
                         enabledProviders = if (provider in enabledProviders) enabledProviders - provider else enabledProviders + provider
                         ProviderSettingsStore.save(context, enabledProviders)
@@ -771,7 +812,7 @@ private fun RelayHomeApp() {
                 Destination.SEARCH -> SearchScreen(
                     palette = palette,
                     providers = enabledProviders,
-                    onBackHome = { destination = Destination.HOME },
+                    onBackHome = ::returnHome,
                     onItemSelected = ::openMediaDetails
                 )
                 Destination.CALENDAR -> CalendarScreen(
@@ -780,13 +821,14 @@ private fun RelayHomeApp() {
                     nuvioItems = nuvioMedia,
                     upcomingEpisodes = upcomingEpisodes,
                     dateFormat = dateFormat,
-                    onBackHome = { destination = Destination.HOME },
+                    onBackHome = ::returnHome,
                     onItemSelected = ::openMediaDetails
                 )
                 Destination.PROVIDER -> ProviderHubScreen(
                     activeProvider,
                     palette,
-                    onBack = { destination = Destination.HOME },
+                    onBack = ::returnHome,
+                    onOpenRelayTube = ::openRelayTube,
                     onConnectNuvio = { destination = Destination.NUVIO_CONNECT },
                     nuvioConnected = nuvioSession != null,
                     nuvioSyncing = nuvioSyncing,
@@ -855,6 +897,10 @@ private fun HomeScreen(
     hiddenSmartTubeChannels: Set<String>,
     continueWatchingLimits: Map<Provider, Int>,
     favoriteApps: Set<String>,
+    onOpenRelayTube: () -> Unit,
+    onPlayRelayTube: (MediaItem) -> Unit,
+    suppressProviderPeek: Boolean,
+    onHomeFocusRestored: () -> Unit,
     nuvioProfiles: List<NuvioProfile>,
     activeNuvioProfile: Int,
     profileImageUri: String?,
@@ -935,6 +981,8 @@ private fun HomeScreen(
     LaunchedEffect(focusResetGeneration) {
         homeListState.scrollToItem(0)
         homeFocusRequester.requestFocus()
+        withFrameNanos { }
+        onHomeFocusRestored()
     }
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
@@ -952,6 +1000,8 @@ private fun HomeScreen(
                         focusRequester = peekFocusRequester,
                         onPreviewFocused = { homeScope.launch { homeListState.scrollToItem(0) } },
                         onItemSelected = onItemSelected,
+                        onOpenRelayTube = onOpenRelayTube,
+                        onPlayRelayTube = onPlayRelayTube,
                         onArtworkColor = { accent ->
                             if (accent != null) onHeroChanged(hero.copy(palette = paletteFor(MediaItem("", peekProvider, 0f, emptyList(), ""), accent)))
                         }
@@ -1035,6 +1085,7 @@ private fun HomeScreen(
                 onProvider = onProvider,
                 onSettings = onSettings,
                 onPeekProvider = ::activatePeek,
+                allowProviderPeek = !suppressProviderPeek,
                 onTopFocused = { homeScope.launch { homeListState.scrollToItem(0) } },
                 nuvioProfiles = nuvioProfiles,
                 activeNuvioProfile = activeNuvioProfile,
@@ -1108,6 +1159,7 @@ private fun TopBar(
     onProvider: (Provider) -> Unit,
     onSettings: () -> Unit,
     onPeekProvider: (Provider?) -> Unit,
+    allowProviderPeek: Boolean,
     onTopFocused: () -> Unit,
     nuvioProfiles: List<NuvioProfile>,
     activeNuvioProfile: Int,
@@ -1139,7 +1191,7 @@ private fun TopBar(
             }
             providers.sortedBy { it.label }.forEach { provider ->
                 TopDestination(provider.label, icon = providerNavigationIcon(provider), selected = peekProvider == provider, palette = palette, compact = compact, downFocusRequester = peekFocusRequester, onFocused = {
-                    if (it) {
+                    if (it && allowProviderPeek) {
                         onTopFocused()
                         onPeekProvider(provider)
                     }
@@ -1472,9 +1524,10 @@ private fun AppPeekPanel(
     focusRequester: FocusRequester,
     onPreviewFocused: () -> Unit,
     onItemSelected: (MediaItem) -> Unit,
+    onOpenRelayTube: () -> Unit,
+    onPlayRelayTube: (MediaItem) -> Unit,
     onArtworkColor: (Color?) -> Unit
 ) {
-    val context = LocalContext.current
     val paletteScope = rememberCoroutineScope()
     val usableItems = remember(provider, items) {
         items.filter { item -> item.isUsableForPeek() }
@@ -1575,7 +1628,7 @@ private fun AppPeekPanel(
                             .border(if (focused) 2.dp else if (selected) 1.dp else 0.dp, ivory.copy(alpha = if (focused) .78f else .28f), RoundedCornerShape(14.dp))
                             .clickable(interactionSource = source, indication = null) {
                                 if (item.provider == Provider.SMARTTUBE && item.providerContentId != null) {
-                                    ProviderHandoff.play(context, item)
+                                    onPlayRelayTube(item)
                                 } else {
                                     onItemSelected(item)
                                 }
@@ -1633,7 +1686,7 @@ private fun AppPeekPanel(
                     primary = false,
                     focusRequester = focusRequester,
                     onFocused = { if (it) onPreviewFocused() },
-                    onClick = { if (provider == Provider.SMARTTUBE && !loading) ProviderHandoff.openSmartTube(context) }
+                    onClick = { if (provider == Provider.SMARTTUBE && !loading) onOpenRelayTube() }
                 )
             }
             if (lead != null) {
@@ -3489,6 +3542,7 @@ private fun ProviderHubScreen(
     provider: Provider,
     palette: RelayPalette,
     onBack: () -> Unit,
+    onOpenRelayTube: () -> Unit,
     onConnectNuvio: () -> Unit,
     nuvioConnected: Boolean,
     nuvioSyncing: Boolean,
@@ -3506,6 +3560,7 @@ private fun ProviderHubScreen(
         withFrameNanos { }
         firstActionFocusRequester.requestFocus()
     }
+    BackHandler(onBack = onBack)
     Column(Modifier.fillMaxSize().padding(64.dp), verticalArrangement = Arrangement.Center) {
         Text(provider.label, color = ivory, fontSize = 42.sp, fontWeight = FontWeight.Light)
         Spacer(Modifier.height(12.dp))
@@ -3535,7 +3590,7 @@ private fun ProviderHubScreen(
         }
         if (provider == Provider.SMARTTUBE) {
             ActionButton("Open SmartTube", palette.copy(accent = provider.accent), primary = true, focusRequester = firstActionFocusRequester) {
-                ProviderHandoff.openSmartTube(context)
+                onOpenRelayTube()
             }
             Spacer(Modifier.height(12.dp))
         }

@@ -38,6 +38,8 @@ Version code 8 fixes the TV search layout at narrow widths, adds deterministic
 first focus and scroll-to-top behavior across settings and provider pages, uses
 Google TV-style circular treatment for opaque legacy app artwork, and hardens
 GitHub alpha, beta, and stable update discovery and installation.
+It also returns cleanly to Home after RelayTube provider, handoff, and playback
+navigation instead of leaving RelayTube selected in the underlying launcher.
 
 Before publishing:
 
