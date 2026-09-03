@@ -125,7 +125,12 @@ import java.time.YearMonth
 class MainActivity : ComponentActivity() {
     var homeRequestGeneration by mutableStateOf(0)
         private set
+    var launcherStateRevision by mutableStateOf(0)
+        private set
     private var resetHomeOnResume = false
+    private val homeRoleRequest = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        refreshLauncherState()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -141,6 +146,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        launcherStateRevision += 1
         if (resetHomeOnResume) {
             resetHomeOnResume = false
             resetHomeFocus()
@@ -156,15 +162,23 @@ class MainActivity : ComponentActivity() {
         resetHomeFocus()
     }
 
+    fun refreshLauncherState() {
+        launcherStateRevision += 1
+    }
+
     fun requestHomeRole() {
+        val homeSettings = Intent(Settings.ACTION_HOME_SETTINGS)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
             val roleManager = getSystemService(RoleManager::class.java)
             if (roleManager.isRoleAvailable(RoleManager.ROLE_HOME) && !roleManager.isRoleHeld(RoleManager.ROLE_HOME)) {
-                startActivityForResult(roleManager.createRequestRoleIntent(RoleManager.ROLE_HOME), 801)
+                homeRoleRequest.launch(roleManager.createRequestRoleIntent(RoleManager.ROLE_HOME))
+                return
             }
-        } else {
-            startActivity(Intent(Settings.ACTION_HOME_SETTINGS))
         }
+        // Some Android TV builds expose the Home intent but not the HOME role, and some expose
+        // the role while already holding it. In both cases the system Home page is the reliable
+        // next step instead of silently doing nothing.
+        startActivity(if (homeSettings.resolveActivity(packageManager) != null) homeSettings else Intent(Settings.ACTION_SETTINGS))
     }
 
     fun requestNotificationListenerAccess() {
@@ -450,7 +464,10 @@ private fun providerNavigationIcon(provider: Provider): ImageVector = when (prov
 @Composable
 private fun RelayHomeApp() {
     val context = LocalContext.current
-    val stockLauncherOverride = remember { LauncherOverride.detect(context) }
+    val launcherStateRevision = (context as? MainActivity)?.launcherStateRevision ?: 0
+    val launcherState = remember(context, launcherStateRevision) {
+        LauncherOverride.inspect(context)
+    }
     var dateFormat by remember { mutableStateOf(DateFormatSettings.load(context)) }
     var appearance by remember { mutableStateOf(loadRelayAppearance(context)) }
     val dynamicColorScheme = remember(context) { dynamicRelayColorScheme(context) }
@@ -807,7 +824,9 @@ private fun RelayHomeApp() {
                         profileImageUri = uri
                         if (uri == null) ProfileImageSettings.clear(context) else ProfileImageSettings.save(context, uri)
                     },
-                    stockLauncherOverride = stockLauncherOverride
+                    relayIsDefault = launcherState.relayIsDefault,
+                    stockLauncherOverride = launcherState.stockLauncherOverride,
+                    onLauncherChanged = { (context as? MainActivity)?.refreshLauncherState() }
                 )
                 Destination.SEARCH -> SearchScreen(
                     palette = palette,
@@ -911,6 +930,11 @@ private fun HomeScreen(
     val homeFocusRequester = remember { FocusRequester() }
     val peekFocusRequester = remember { FocusRequester() }
     val heroFocusRequester = remember { FocusRequester() }
+    val continueFocusRequester = remember { FocusRequester() }
+    val favoriteAppsFocusRequester = remember { FocusRequester() }
+    val recommendationFocusRequester = remember { FocusRequester() }
+    val subscriptionFocusRequester = remember { FocusRequester() }
+    val upcomingFocusRequester = remember { FocusRequester() }
     val homeListState = rememberLazyListState()
     var profilePickerVisible by remember { mutableStateOf(false) }
     val smartTubeItem = smartTubeNowPlaying?.toRelayMediaItem()
@@ -976,6 +1000,32 @@ private fun HomeScreen(
     val subscriptionItems = remember(providers, visibleSmartTubeSubscriptionItems) {
         if (Provider.SMARTTUBE in providers) visibleSmartTubeSubscriptionItems else emptyList()
     }
+    val firstRowFocusRequester = when {
+        continueWatching.isNotEmpty() -> continueFocusRequester
+        favoriteInstalledApps.isNotEmpty() -> favoriteAppsFocusRequester
+        recommendationItems.isNotEmpty() -> recommendationFocusRequester
+        subscriptionItems.isNotEmpty() -> subscriptionFocusRequester
+        upcomingEpisodes.isNotEmpty() -> upcomingFocusRequester
+        else -> null
+    }
+    val firstAfterContinue = when {
+        favoriteInstalledApps.isNotEmpty() -> favoriteAppsFocusRequester
+        recommendationItems.isNotEmpty() -> recommendationFocusRequester
+        subscriptionItems.isNotEmpty() -> subscriptionFocusRequester
+        upcomingEpisodes.isNotEmpty() -> upcomingFocusRequester
+        else -> null
+    }
+    val firstAfterFavorites = when {
+        recommendationItems.isNotEmpty() -> recommendationFocusRequester
+        subscriptionItems.isNotEmpty() -> subscriptionFocusRequester
+        upcomingEpisodes.isNotEmpty() -> upcomingFocusRequester
+        else -> null
+    }
+    val firstAfterRecommendations = when {
+        subscriptionItems.isNotEmpty() -> subscriptionFocusRequester
+        upcomingEpisodes.isNotEmpty() -> upcomingFocusRequester
+        else -> null
+    }
     val homeScope = rememberCoroutineScope()
     // Do not restore a previous focus-scroll offset into the hero when returning to Home.
     LaunchedEffect(focusResetGeneration) {
@@ -1008,6 +1058,7 @@ private fun HomeScreen(
                     )
                 } else HeroPanel(
                     hero, palette, homeFocusRequester, heroFocusRequester,
+                    downFocusRequester = firstRowFocusRequester,
                     onHeroFocused = { homeScope.launch { homeListState.scrollToItem(0) } },
                     onItemSelected = onItemSelected
                 ) { accent ->
@@ -1018,7 +1069,13 @@ private fun HomeScreen(
             if (providers.isEmpty()) {
                 if (favoriteInstalledApps.isNotEmpty()) {
                     item {
-                        FavoriteAppsRail(favoriteInstalledApps, palette) { app -> InstalledApps.launch(context, app) }
+                        FavoriteAppsRail(
+                            apps = favoriteInstalledApps,
+                            palette = palette,
+                            focusRequester = favoriteAppsFocusRequester,
+                            upFocusRequester = heroFocusRequester,
+                            downFocusRequester = null
+                        ) { app -> InstalledApps.launch(context, app) }
                         Spacer(Modifier.height(18.dp))
                     }
                 }
@@ -1038,31 +1095,93 @@ private fun HomeScreen(
             } else {
                 if (continueWatching.isNotEmpty()) {
                     item {
-                        MediaRail("Continue Watching", continueWatching, palette, dateFormat, onHeroChanged, onItemSelected, upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester)
+                        MediaRail(
+                            title = "Continue Watching",
+                            items = continueWatching,
+                            palette = palette,
+                            dateFormat = dateFormat,
+                            onHeroChanged = onHeroChanged,
+                            onItemSelected = onItemSelected,
+                            upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester,
+                            firstFocusRequester = continueFocusRequester,
+                            downFocusRequester = firstAfterContinue
+                        )
                         Spacer(Modifier.height(18.dp))
                     }
                 }
                 if (favoriteInstalledApps.isNotEmpty()) {
                     item {
-                        FavoriteAppsRail(favoriteInstalledApps, palette) { app -> InstalledApps.launch(context, app) }
+                        FavoriteAppsRail(
+                            apps = favoriteInstalledApps,
+                            palette = palette,
+                            focusRequester = favoriteAppsFocusRequester,
+                            upFocusRequester = if (continueWatching.isNotEmpty()) continueFocusRequester else heroFocusRequester,
+                            downFocusRequester = firstAfterFavorites
+                        ) { app -> InstalledApps.launch(context, app) }
                         Spacer(Modifier.height(18.dp))
                     }
                 }
                 if (recommendationItems.isNotEmpty()) {
                     item {
-                        MediaRail("Recommended TV Shows", recommendationItems, palette, dateFormat, onHeroChanged, onItemSelected, posters = true, upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester)
+                        MediaRail(
+                            title = "Recommended TV Shows",
+                            items = recommendationItems,
+                            palette = palette,
+                            dateFormat = dateFormat,
+                            onHeroChanged = onHeroChanged,
+                            onItemSelected = onItemSelected,
+                            posters = true,
+                            upFocusRequester = when {
+                                favoriteInstalledApps.isNotEmpty() -> favoriteAppsFocusRequester
+                                continueWatching.isNotEmpty() -> continueFocusRequester
+                                else -> if (peekProvider != null) peekFocusRequester else heroFocusRequester
+                            },
+                            firstFocusRequester = recommendationFocusRequester,
+                            downFocusRequester = firstAfterRecommendations
+                        )
                         Spacer(Modifier.height(18.dp))
                     }
                 }
                 if (subscriptionItems.isNotEmpty()) {
                     item {
-                        MediaRail("New from subscriptions", subscriptionItems, palette, dateFormat, onHeroChanged, onItemSelected, upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester)
+                        MediaRail(
+                            title = "New from subscriptions",
+                            items = subscriptionItems,
+                            palette = palette,
+                            dateFormat = dateFormat,
+                            onHeroChanged = onHeroChanged,
+                            onItemSelected = onItemSelected,
+                            upFocusRequester = when {
+                                recommendationItems.isNotEmpty() -> recommendationFocusRequester
+                                favoriteInstalledApps.isNotEmpty() -> favoriteAppsFocusRequester
+                                continueWatching.isNotEmpty() -> continueFocusRequester
+                                else -> if (peekProvider != null) peekFocusRequester else heroFocusRequester
+                            },
+                            firstFocusRequester = subscriptionFocusRequester,
+                            downFocusRequester = if (upcomingEpisodes.isNotEmpty()) upcomingFocusRequester else null
+                        )
                         Spacer(Modifier.height(18.dp))
                     }
                 }
                 if (upcomingEpisodes.isNotEmpty()) {
                     item {
-                        MediaRail("Coming Up", upcomingEpisodes.map { it.item }, palette, dateFormat, onHeroChanged, onItemSelected, showPremiereDate = true, upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester)
+                        MediaRail(
+                            title = "Coming Up",
+                            items = upcomingEpisodes.map { it.item },
+                            palette = palette,
+                            dateFormat = dateFormat,
+                            onHeroChanged = onHeroChanged,
+                            onItemSelected = onItemSelected,
+                            showPremiereDate = true,
+                            upFocusRequester = when {
+                                subscriptionItems.isNotEmpty() -> subscriptionFocusRequester
+                                recommendationItems.isNotEmpty() -> recommendationFocusRequester
+                                favoriteInstalledApps.isNotEmpty() -> favoriteAppsFocusRequester
+                                continueWatching.isNotEmpty() -> continueFocusRequester
+                                else -> if (peekProvider != null) peekFocusRequester else heroFocusRequester
+                            },
+                            firstFocusRequester = upcomingFocusRequester
+                        )
                     }
                 }
             }
@@ -1081,6 +1200,7 @@ private fun HomeScreen(
                 homeFocusRequester = homeFocusRequester,
                 heroFocusRequester = heroFocusRequester,
                 peekFocusRequester = peekFocusRequester,
+                firstContentFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester,
                 onDestination = onDestination,
                 onProvider = onProvider,
                 onSettings = onSettings,
@@ -1155,6 +1275,7 @@ private fun TopBar(
     homeFocusRequester: FocusRequester,
     heroFocusRequester: FocusRequester,
     peekFocusRequester: FocusRequester,
+    firstContentFocusRequester: FocusRequester,
     onDestination: (Destination) -> Unit,
     onProvider: (Provider) -> Unit,
     onSettings: () -> Unit,
@@ -1180,7 +1301,7 @@ private fun TopBar(
             Text(logo, color = ivory, fontSize = if (compact) 16.sp else 18.sp, fontWeight = FontWeight.Light, letterSpacing = if (compact) 2.sp else 3.sp)
             Spacer(Modifier.width(if (compact) 12.dp else 26.dp))
             if (!compact) Spacer(Modifier.weight(1f))
-            TopDestination("Home", icon = relayHomeIcon, selected = peekProvider == null, palette = palette, compact = compact, focusRequester = homeFocusRequester, downFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester, onFocused = {
+            TopDestination("Home", icon = relayHomeIcon, selected = peekProvider == null, palette = palette, compact = compact, focusRequester = homeFocusRequester, downFocusRequester = firstContentFocusRequester, onFocused = {
                 if (it) {
                     onPeekProvider(null)
                     onTopFocused()
@@ -1191,13 +1312,19 @@ private fun TopBar(
             }
             providers.sortedBy { it.label }.forEach { provider ->
                 TopDestination(provider.label, icon = providerNavigationIcon(provider), selected = peekProvider == provider, palette = palette, compact = compact, downFocusRequester = peekFocusRequester, onFocused = {
-                    if (it && allowProviderPeek) {
-                        onTopFocused()
-                        onPeekProvider(provider)
+                    if (it) {
+                        if (allowProviderPeek) {
+                            onTopFocused()
+                            onPeekProvider(provider)
+                        } else {
+                            // Returning from a provider can briefly restore the old focused
+                            // tab. Keep that transient focus from reopening a stale peek panel.
+                            onPeekProvider(null)
+                        }
                     }
                 }) { onProvider(provider) }
             }
-            TopDestination("Calendar", icon = relayCalendarIcon, selected = false, palette = palette, compact = compact, onFocused = {
+            TopDestination("Calendar", icon = relayCalendarIcon, selected = false, palette = palette, compact = compact, downFocusRequester = firstContentFocusRequester, onFocused = {
                 if (it) {
                     onPeekProvider(null)
                     onTopFocused()
@@ -1206,7 +1333,7 @@ private fun TopBar(
                 onPeekProvider(null)
                 onDestination(Destination.CALENDAR)
             }
-            TopDestination("Apps", icon = relayAppsIcon, selected = false, palette = palette, compact = compact, onFocused = {
+            TopDestination("Apps", icon = relayAppsIcon, selected = false, palette = palette, compact = compact, downFocusRequester = firstContentFocusRequester, onFocused = {
                 if (it) {
                     onPeekProvider(null)
                     onTopFocused()
@@ -1225,6 +1352,7 @@ private fun TopBar(
                     imageUri = profileImageUri,
                     palette = palette,
                     compact = compact,
+                    downFocusRequester = firstContentFocusRequester,
                     onFocused = { if (it) { onPeekProvider(null); onTopFocused() } },
                     onClick = onProfileClick
                 )
@@ -1236,6 +1364,7 @@ private fun TopBar(
                 selected = false,
                 palette = palette,
                 compact = compact,
+                downFocusRequester = firstContentFocusRequester,
                 onFocused = { if (it) { onPeekProvider(null); onTopFocused() } }
             ) {
                 onPeekProvider(null)
@@ -1248,6 +1377,7 @@ private fun TopBar(
                 selected = false,
                 palette = palette,
                 compact = compact,
+                downFocusRequester = firstContentFocusRequester,
                 onFocused = { if (it) { onPeekProvider(null); onTopFocused() } },
             ) {
                 onPeekProvider(null)
@@ -1263,6 +1393,7 @@ private fun ProfileAvatarButton(
     imageUri: String?,
     palette: RelayPalette,
     compact: Boolean = false,
+    downFocusRequester: FocusRequester? = null,
     onFocused: (Boolean) -> Unit = {},
     onClick: () -> Unit
 ) {
@@ -1271,7 +1402,8 @@ private fun ProfileAvatarButton(
     val focused by source.collectIsFocusedAsState()
     LaunchedEffect(focused) { onFocused(focused) }
     Box(
-        modifier = Modifier.size(if (compact) 38.dp else 45.dp).clip(CircleShape)
+        modifier = (if (downFocusRequester != null) Modifier.focusProperties { down = downFocusRequester } else Modifier)
+            .size(if (compact) 38.dp else 45.dp).clip(CircleShape)
             .background(Provider.NUVIO.accent.copy(alpha = .78f))
             .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .3f), CircleShape)
             .clickable(interactionSource = source, indication = null, onClick = onClick),
@@ -1755,6 +1887,7 @@ private fun HeroPanel(
     palette: RelayPalette,
     homeFocusRequester: FocusRequester,
     resumeFocusRequester: FocusRequester,
+    downFocusRequester: FocusRequester? = null,
     onHeroFocused: () -> Unit,
     onItemSelected: (MediaItem) -> Unit,
     onArtworkColor: (Color?) -> Unit
@@ -1826,6 +1959,7 @@ private fun HeroPanel(
                     primary = true,
                     focusRequester = resumeFocusRequester,
                     upFocusRequester = homeFocusRequester,
+                    downFocusRequester = downFocusRequester,
                     onFocused = { if (it) onHeroFocused() }
                 ) { hero.item?.let { ProviderHandoff.play(context, it) } }
                 ActionButton("ⓘ  Details", palette, primary = false, onFocused = { if (it) onHeroFocused() }) { hero.item?.let(onItemSelected) }
@@ -1886,7 +2020,9 @@ private fun MediaRail(
     onItemSelected: (MediaItem) -> Unit,
     posters: Boolean = false,
     showPremiereDate: Boolean = false,
-    upFocusRequester: FocusRequester
+    upFocusRequester: FocusRequester,
+    firstFocusRequester: FocusRequester? = null,
+    downFocusRequester: FocusRequester? = null
 ) {
     if (items.isEmpty()) return
     val context = LocalContext.current
@@ -1942,7 +2078,9 @@ private fun MediaRail(
                         dateFormat = dateFormat,
                         showEpisodeInfo = title == "Continue Watching" || title == "Coming Up",
                         showPremiereDate = showPremiereDate,
+                        focusRequester = if (index == 0) firstFocusRequester else null,
                         upFocusRequester = upFocusRequester,
+                        downFocusRequester = downFocusRequester,
                         onClick = {
                         val item = items[index]
                         if (item.provider == Provider.SMARTTUBE && item.providerContentId != null) {
@@ -2101,6 +2239,9 @@ private fun MediaCard(
 private fun FavoriteAppsRail(
     apps: List<InstalledApp>,
     palette: RelayPalette,
+    focusRequester: FocusRequester? = null,
+    upFocusRequester: FocusRequester? = null,
+    downFocusRequester: FocusRequester? = null,
     onLaunch: (InstalledApp) -> Unit
 ) {
     if (apps.isEmpty()) return
@@ -2126,7 +2267,13 @@ private fun FavoriteAppsRail(
         ) {
             items(apps.size, key = { apps[it].packageName }) { index ->
                 val app = apps[index]
-                FavoriteAppCard(app, palette) { onLaunch(app) }
+                FavoriteAppCard(
+                    app = app,
+                    palette = palette,
+                    focusRequester = if (index == 0) focusRequester else null,
+                    upFocusRequester = upFocusRequester,
+                    downFocusRequester = downFocusRequester
+                ) { onLaunch(app) }
             }
         }
     }
@@ -2136,6 +2283,9 @@ private fun FavoriteAppsRail(
 private fun FavoriteAppCard(
     app: InstalledApp,
     palette: RelayPalette,
+    focusRequester: FocusRequester? = null,
+    upFocusRequester: FocusRequester? = null,
+    downFocusRequester: FocusRequester? = null,
     onClick: () -> Unit
 ) {
     val source = remember { MutableInteractionSource() }
@@ -2145,7 +2295,12 @@ private fun FavoriteAppCard(
         app.icon.toBitmap(192, 192).asImageBitmap()
     }
     Column(
-        Modifier.width(104.dp)
+        (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .then(if (upFocusRequester != null || downFocusRequester != null) Modifier.focusProperties {
+                if (upFocusRequester != null) up = upFocusRequester
+                if (downFocusRequester != null) down = downFocusRequester
+            } else Modifier)
+            .width(104.dp)
             .clickable(interactionSource = source, indication = null, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -2877,7 +3032,9 @@ private fun SettingsScreen(
     onAppearanceChanged: (RelayAppearance) -> Unit,
     profileImageUri: String?,
     onProfileImageChanged: (String?) -> Unit,
-    stockLauncherOverride: StockLauncherOverride?
+    relayIsDefault: Boolean,
+    stockLauncherOverride: StockLauncherOverride?,
+    onLauncherChanged: () -> Unit
 ) {
     val context = LocalContext.current
     var page by remember { mutableStateOf(SettingsPage.DISPLAY) }
@@ -2899,6 +3056,39 @@ private fun SettingsScreen(
     val settingsNavigationState = rememberScrollState()
     val shizukuReadinessRevision = RelayShizuku.readinessRevisionForUi
     val shizukuReady = remember(shizukuReadinessRevision) { RelayShizuku.isReady() }
+    fun applyRelayHomeWithShizuku() {
+        if (shizukuWorking) return
+        if (!shizukuReady) {
+            shizukuMessage = RelayShizuku.requestAccess()
+            return
+        }
+        stockLauncherOverride?.let { LauncherOverride.remember(context, it) }
+        shizukuWorking = true
+        RelayShizuku.setRelayHome(
+            stock = stockLauncherOverride,
+            disableStockLauncher = stockLauncherOverride != null
+        ) { result ->
+            shizukuMessage = result.fold(
+                onSuccess = { it },
+                onFailure = { it.message ?: "Could not make Relay Home the default launcher." }
+            )
+            shizukuWorking = false
+            onLauncherChanged()
+        }
+    }
+    fun restoreStockLauncherWithShizuku() {
+        if (shizukuWorking) return
+        val stock = stockLauncherOverride ?: return
+        shizukuWorking = true
+        RelayShizuku.restoreStockLauncher(stock) { result ->
+            shizukuMessage = result.fold(
+                onSuccess = { it },
+                onFailure = { it.message ?: "Could not restore the stock launcher." }
+            )
+            shizukuWorking = false
+            onLauncherChanged()
+        }
+    }
     val profileImagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         uri?.let {
             runCatching {
@@ -2991,8 +3181,12 @@ private fun SettingsScreen(
                             Spacer(Modifier.height(12.dp))
                             StatusCard(
                                 title = "Home launcher",
-                                detail = if (shizukuReady) "Shizuku authorized · ready to apply an override" else "Android Home role active · Shizuku override not authorized",
-                                healthy = shizukuReady,
+                                detail = when {
+                                    relayIsDefault -> "Relay Home is the active default launcher"
+                                    shizukuReady -> "Relay Home is not default · Shizuku is ready"
+                                    else -> "Relay Home is not default · choose it in Android Home settings"
+                                },
+                                healthy = relayIsDefault,
                                 palette = palette
                             ) { page = SettingsPage.LAUNCHER }
                         }
@@ -3281,12 +3475,18 @@ private fun SettingsScreen(
                             Spacer(Modifier.height(24.dp))
                             Text("Standard Home app", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
                             Spacer(Modifier.height(7.dp))
-                            Text("Works on TVs that honor Android's Home role. Some Google TV builds keep their stock launcher in control even after Relay is selected.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+                            Text(
+                                if (relayIsDefault) "Relay Home is currently the default Home app."
+                                else "Use Android's Home role first. Some Google TV builds keep their stock launcher in control even after Relay is selected.",
+                                color = muted,
+                                fontSize = 14.sp,
+                                lineHeight = 20.sp
+                            )
                             Spacer(Modifier.height(12.dp))
                             ActionButton(
-                                "Open Android Home chooser",
+                                if (relayIsDefault) "Review Android Home settings" else "Make Relay Home the default",
                                 palette,
-                                primary = true,
+                                primary = !relayIsDefault,
                                 focusRequester = pageContentFocusRequester,
                                 upFocusRequester = backHomeFocusRequester,
                                 leftFocusRequester = pageNavigationFocusRequesters[page],
@@ -3324,10 +3524,21 @@ private fun SettingsScreen(
                                 Spacer(Modifier.height(8.dp))
                                 Text(message, color = if (message.startsWith("Could") || message.startsWith("Start")) Provider.SMARTTUBE.accent else palette.accent, fontSize = 13.sp, lineHeight = 18.sp)
                             }
+                            Spacer(Modifier.height(12.dp))
+                            ActionButton(
+                                when {
+                                    shizukuWorking -> "Applying Relay Home…"
+                                    !shizukuReady -> "Authorize Shizuku to set Relay Home"
+                                    relayIsDefault -> "Re-apply Relay Home with Shizuku"
+                                    else -> "Make Relay Home default with Shizuku"
+                                },
+                                palette,
+                                primary = shizukuReady && !relayIsDefault
+                            ) { applyRelayHomeWithShizuku() }
                             Spacer(Modifier.height(24.dp))
-                            Text("Advanced ADB mode", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                            Text("Advanced override and ADB fallback", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
                             Spacer(Modifier.height(7.dp))
-                            Text("Reliable Google TV override. Relay detects the stock launcher Android is actually resolving, then gives you its precise reversible ADB command.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+                            Text("Shizuku verifies the Home role and can disable the detected stock launcher when a Google TV build keeps reclaiming Home. The precise reversible ADB command is available as a fallback.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
                             Spacer(Modifier.height(12.dp))
                             ActionButton(if (showAdvancedHomeSetup) "Hide ADB guide" else "Show ADB guide", palette, primary = false) {
                                 showAdvancedHomeSetup = !showAdvancedHomeSetup
@@ -3344,34 +3555,8 @@ private fun SettingsScreen(
                                     Text(if (override != null) "2. Relay detected ${override.label}. Connect with ADB, then run:" else "2. Connect with ADB, then run the command for your stock launcher:", color = ivory, fontSize = 14.sp)
                                     Spacer(Modifier.height(8.dp))
                                     Text(override?.disableCommand ?: "adb shell pm disable-user --user 0 <stock-launcher-package>", color = palette.accent, fontSize = 13.sp, lineHeight = 19.sp)
-                                    if (override != null) {
-                                        Spacer(Modifier.height(12.dp))
-                                        ActionButton(
-                                            when {
-                                                shizukuWorking -> "Applying Relay override…"
-                                                shizukuReady -> "Enable Relay Home override"
-                                                else -> "Authorize Shizuku override"
-                                            },
-                                            palette,
-                                            primary = true
-                                        ) {
-                                            if (!shizukuReady) {
-                                                shizukuMessage = RelayShizuku.requestAccess()
-                                            } else {
-                                                shizukuWorking = true
-                                                RelayShizuku.setStockLauncherEnabled(override, enabled = false) { result ->
-                                                    shizukuMessage = result.fold(onSuccess = { it }, onFailure = { it.message ?: "Could not apply the override." })
-                                                    shizukuWorking = false
-                                                }
-                                            }
-                                        }
-                                        Spacer(Modifier.height(8.dp))
-                                        Text("Uses only the Shizuku permission you approve. Relay never runs ADB commands on its own.", color = muted, fontSize = 13.sp, lineHeight = 18.sp)
-                                        shizukuMessage?.let { message ->
-                                            Spacer(Modifier.height(8.dp))
-                                            Text(message, color = if (message.startsWith("Could") || message.startsWith("Start")) Provider.SMARTTUBE.accent else palette.accent, fontSize = 13.sp, lineHeight = 18.sp)
-                                        }
-                                    }
+                                    Spacer(Modifier.height(8.dp))
+                                    Text("Uses only the Shizuku permission you approve. Relay never runs arbitrary ADB commands.", color = muted, fontSize = 13.sp, lineHeight = 18.sp)
                                     if (override != null) {
                                         Spacer(Modifier.height(10.dp))
                                         ActionButton("Copy disable command", palette, primary = false) {
@@ -3386,11 +3571,7 @@ private fun SettingsScreen(
                                     if (override != null && shizukuReady) {
                                         Spacer(Modifier.height(10.dp))
                                         ActionButton("Restore stock launcher with Shizuku", palette, primary = false) {
-                                            shizukuWorking = true
-                                            RelayShizuku.setStockLauncherEnabled(override, enabled = true) { result ->
-                                                shizukuMessage = result.fold(onSuccess = { it }, onFailure = { it.message ?: "Could not restore the stock launcher." })
-                                                shizukuWorking = false
-                                            }
+                                            restoreStockLauncherWithShizuku()
                                         }
                                     }
                                 }

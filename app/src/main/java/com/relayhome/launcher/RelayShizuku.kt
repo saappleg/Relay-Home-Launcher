@@ -12,9 +12,10 @@ import androidx.compose.runtime.setValue
 import rikka.shizuku.Shizuku
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** User-authorized shell bridge. Relay exposes only launcher enable/disable, never a shell. */
+/** User-authorized, narrowly scoped bridge for the launcher role override. */
 internal object RelayShizuku {
     private const val permissionRequestCode = 7412
+    private const val userServiceVersion = 2
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private var readinessRevision by mutableIntStateOf(0)
@@ -44,49 +45,82 @@ internal object RelayShizuku {
         }
     }.getOrElse { "Start Shizuku first, then try again." }
 
-    fun setStockLauncherEnabled(
-        override: StockLauncherOverride,
-        enabled: Boolean,
+    fun setRelayHome(
+        stock: StockLauncherOverride?,
+        disableStockLauncher: Boolean,
         onResult: (Result<String>) -> Unit
+    ) = runUserService(onResult) { shell ->
+        shell.setRelayHome(
+            stock?.packageName,
+            stock?.activityName,
+            disableStockLauncher && stock != null
+        )
+    }
+
+    fun restoreStockLauncher(
+        stock: StockLauncherOverride,
+        onResult: (Result<String>) -> Unit
+    ) = runUserService(onResult) { shell ->
+        shell.restoreStockLauncher(stock.packageName, stock.activityName)
+    }
+
+    private fun runUserService(
+        onResult: (Result<String>) -> Unit,
+        operation: (IRelayHomeShell) -> String
     ) {
         if (!isReady()) {
             onResult(Result.failure(IllegalStateException("Shizuku permission is not available.")))
             return
         }
         val args = Shizuku.UserServiceArgs(
-            ComponentName("com.relayhome.launcher", RelayShizukuService::class.java.name)
+            ComponentName(BuildConfig.APPLICATION_ID, RelayShizukuService::class.java.name)
         )
             .processNameSuffix("relay-home-shell")
-            .tag("relay-home-launcher-override-v1")
+            .tag("relay-home-launcher-v2")
+            .version(userServiceVersion)
+            .daemon(false)
         val finished = AtomicBoolean(false)
-        val timeout = Runnable {
-            if (finished.compareAndSet(false, true)) {
-                onResult(Result.failure(IllegalStateException("Shizuku did not start Relay's service. Open Shizuku, confirm it is running, then allow Relay again.")))
-            }
+        lateinit var connection: ServiceConnection
+        lateinit var timeout: Runnable
+
+        fun finish(result: Result<String>) {
+            if (!finished.compareAndSet(false, true)) return
+            mainHandler.removeCallbacks(timeout)
+            // The service is one-shot. Detach this callback immediately; daemon(false) also
+            // prevents it from surviving the Relay process after an unexpected app exit.
+            runCatching { Shizuku.unbindUserService(args, connection, false) }
+            onResult(result)
         }
-        val connection = object : ServiceConnection {
+
+        timeout = Runnable {
+            finish(
+                Result.failure(
+                    IllegalStateException(
+                        "Shizuku did not start Relay's service. Open Shizuku, confirm it is " +
+                            "running, then allow Relay again."
+                    )
+                )
+            )
+        }
+        connection = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName, service: IBinder) {
                 mainHandler.removeCallbacks(timeout)
+                if (finished.get()) return
                 val shell = IRelayHomeShell.Stub.asInterface(service)
                 Thread {
-                    val result = runCatching { shell.setLauncherEnabled(override.packageName, override.activityName, enabled) }
-                    mainHandler.post {
-                        if (finished.compareAndSet(false, true)) onResult(result)
-                    }
+                    val result = runCatching { operation(shell) }
+                    mainHandler.post { finish(result) }
                 }.start()
             }
 
             override fun onServiceDisconnected(name: ComponentName) {
-                mainHandler.removeCallbacks(timeout)
-                if (finished.compareAndSet(false, true)) {
-                    onResult(Result.failure(IllegalStateException("Shizuku disconnected before Relay could apply the launcher override.")))
-                }
+                finish(Result.failure(IllegalStateException("Shizuku disconnected before Relay could apply the launcher change.")))
             }
         }
         runCatching {
             Shizuku.bindUserService(args, connection)
             mainHandler.postDelayed(timeout, 8_000)
         }
-            .onFailure { onResult(Result.failure(it)) }
+            .onFailure { finish(Result.failure(it)) }
     }
 }
