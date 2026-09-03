@@ -161,49 +161,66 @@ internal data class SmartTubeSubscriptionVideo(
 /** Receives RelayTube's package-targeted, opt-in playback handoff with the exact video id. */
 class RelayTubePlaybackReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == RELAY_TUBE_SUBSCRIPTIONS_ACTION) {
-            val payload = intent.getStringExtra(RELAY_TUBE_EXTRA_SUBSCRIPTION_VIDEOS).orEmpty()
-            val videos = parseSubscriptionVideos(payload)
-            val profileId = intent.getStringExtra(RELAY_TUBE_EXTRA_PROFILE_ID).orEmpty()
-            if (profileId.isNotBlank()) SmartTubePlaybackStore.saveSubscriptionVideos(context, profileId, payload, videos)
-            return
-        }
-        if (intent.action == RELAY_TUBE_CONTINUE_WATCHING_ACTION) {
-            val payload = intent.getStringExtra(RELAY_TUBE_EXTRA_SUBSCRIPTION_VIDEOS).orEmpty()
-            val videos = parseSubscriptionVideos(payload)
-            val profileId = intent.getStringExtra(RELAY_TUBE_EXTRA_PROFILE_ID).orEmpty()
-            if (profileId.isNotBlank()) SmartTubePlaybackStore.saveContinueWatchingVideos(context, profileId, payload, videos)
-            return
-        }
-        if (intent.action == RELAY_TUBE_PROFILES_ACTION) {
-            val profiles = parseRelayTubeProfiles(intent.getStringExtra(RELAY_TUBE_EXTRA_PROFILES))
-            SmartTubePlaybackStore.updateProfiles(context, intent.getStringExtra(RELAY_TUBE_EXTRA_PROFILE_ID), profiles)
-            return
-        }
-        if (intent.action != RELAY_TUBE_PLAYBACK_ACTION) return
-        val title = intent.getStringExtra(RELAY_TUBE_EXTRA_TITLE).orEmpty().trim()
-        val videoId = intent.getStringExtra(RELAY_TUBE_EXTRA_VIDEO_ID).orEmpty().trim()
-        if (title.isBlank() || videoId.isBlank()) return
-        val profileId = intent.getStringExtra(RELAY_TUBE_EXTRA_PROFILE_ID).orEmpty().trim()
-        if (profileId.isNotBlank() && SmartTubePlaybackStore.activeProfileId != null &&
-            profileId != SmartTubePlaybackStore.activeProfileId
-        ) return
-        if (profileId.isNotBlank() && SmartTubePlaybackStore.activeProfileId == null) {
-            SmartTubePlaybackStore.activateProfile(context, profileId)
-        }
-        SmartTubePlaybackStore.updateNowPlaying(SmartTubeNowPlaying(
-            videoId = videoId,
-            title = title,
-            channel = intent.getStringExtra(RELAY_TUBE_EXTRA_CHANNEL)?.trim()?.takeIf { it.isNotBlank() },
-            artworkUrl = intent.getStringExtra(RELAY_TUBE_EXTRA_ARTWORK)?.trim()?.takeIf { it.isNotBlank() },
-            description = intent.getStringExtra(RELAY_TUBE_EXTRA_DESCRIPTION)?.trim()?.takeIf { it.isNotBlank() },
-            metadata = intent.getStringExtra(RELAY_TUBE_EXTRA_METADATA)?.trim()?.takeIf { it.isNotBlank() },
-            positionMs = intent.getLongExtra(RELAY_TUBE_EXTRA_POSITION, 0L),
-            durationMs = intent.getLongExtra(RELAY_TUBE_EXTRA_DURATION, 0L),
-            playing = intent.getBooleanExtra(RELAY_TUBE_EXTRA_PLAYING, false)
-        ))
+        dispatchRelayTubeBroadcast(context, intent)
     }
+}
 
+/** Beta/alpha permission alias for RelayTube's package-specific protected broadcast contract. */
+class RelayTubePlaybackReceiverBeta : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        dispatchRelayTubeBroadcast(context, intent)
+    }
+}
+
+/** F-Droid permission alias for RelayTube's package-specific protected broadcast contract. */
+class RelayTubePlaybackReceiverFdroid : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        dispatchRelayTubeBroadcast(context, intent)
+    }
+}
+
+private fun dispatchRelayTubeBroadcast(context: Context, intent: Intent) {
+    if (intent.action == RELAY_TUBE_SUBSCRIPTIONS_ACTION) {
+        val payload = intent.getStringExtra(RELAY_TUBE_EXTRA_SUBSCRIPTION_VIDEOS).orEmpty()
+        val videos = parseSubscriptionVideos(payload)
+        val profileId = intent.getStringExtra(RELAY_TUBE_EXTRA_PROFILE_ID).orEmpty()
+        if (profileId.isNotBlank()) SmartTubePlaybackStore.saveSubscriptionVideos(context, profileId, payload, videos)
+        return
+    }
+    if (intent.action == RELAY_TUBE_CONTINUE_WATCHING_ACTION) {
+        val payload = intent.getStringExtra(RELAY_TUBE_EXTRA_SUBSCRIPTION_VIDEOS).orEmpty()
+        val videos = parseSubscriptionVideos(payload)
+        val profileId = intent.getStringExtra(RELAY_TUBE_EXTRA_PROFILE_ID).orEmpty()
+        if (profileId.isNotBlank()) SmartTubePlaybackStore.saveContinueWatchingVideos(context, profileId, payload, videos)
+        return
+    }
+    if (intent.action == RELAY_TUBE_PROFILES_ACTION) {
+        val profiles = parseRelayTubeProfiles(intent.getStringExtra(RELAY_TUBE_EXTRA_PROFILES))
+        SmartTubePlaybackStore.updateProfiles(context, intent.getStringExtra(RELAY_TUBE_EXTRA_PROFILE_ID), profiles)
+        return
+    }
+    if (intent.action != RELAY_TUBE_PLAYBACK_ACTION) return
+    val title = intent.getStringExtra(RELAY_TUBE_EXTRA_TITLE).orEmpty().trim()
+    val videoId = intent.getStringExtra(RELAY_TUBE_EXTRA_VIDEO_ID).orEmpty().trim()
+    if (title.isBlank() || videoId.isBlank()) return
+    val profileId = intent.getStringExtra(RELAY_TUBE_EXTRA_PROFILE_ID).orEmpty().trim()
+    if (profileId.isNotBlank() && SmartTubePlaybackStore.activeProfileId != null &&
+        profileId != SmartTubePlaybackStore.activeProfileId
+    ) return
+    if (profileId.isNotBlank() && SmartTubePlaybackStore.activeProfileId == null) {
+        SmartTubePlaybackStore.activateProfile(context, profileId)
+    }
+    SmartTubePlaybackStore.updateNowPlaying(SmartTubeNowPlaying(
+        videoId = videoId,
+        title = title,
+        channel = intent.getStringExtra(RELAY_TUBE_EXTRA_CHANNEL)?.trim()?.takeIf { it.isNotBlank() },
+        artworkUrl = intent.getStringExtra(RELAY_TUBE_EXTRA_ARTWORK)?.trim()?.takeIf { it.isNotBlank() },
+        description = intent.getStringExtra(RELAY_TUBE_EXTRA_DESCRIPTION)?.trim()?.takeIf { it.isNotBlank() },
+        metadata = intent.getStringExtra(RELAY_TUBE_EXTRA_METADATA)?.trim()?.takeIf { it.isNotBlank() },
+        positionMs = intent.getLongExtra(RELAY_TUBE_EXTRA_POSITION, 0L),
+        durationMs = intent.getLongExtra(RELAY_TUBE_EXTRA_DURATION, 0L),
+        playing = intent.getBooleanExtra(RELAY_TUBE_EXTRA_PLAYING, false)
+    ))
 }
 
 private fun parseRelayTubeProfiles(payload: String?): List<RelayTubeProfile> = runCatching {
@@ -271,22 +288,26 @@ private const val RELAY_TUBE_CACHE_CONTINUE_WATCHING = "continue_watching_videos
 private const val RELAY_TUBE_ACTIVE_PROFILE = "active_profile"
 
 internal object RelayTubeProfileBridge {
-    private const val relayTubePackage = "com.relaytube.stable"
     private const val selectAction = "com.relaytube.action.SELECT_PROFILE"
     private const val requestAction = "com.relaytube.action.REQUEST_PROFILES"
-    private val providerUri = Uri.parse("content://com.relaytube.stable.relayprofiles")
+    private val relayTubePackages = listOf(
+        "com.relaytube.beta",
+        "com.relaytube.stable",
+        "com.relaytube.fdroid"
+    )
     private val mainHandler = Handler(Looper.getMainLooper())
 
     fun requestProfiles(context: Context) {
         // Treat each request as a fresh public snapshot. If RelayTube is absent, stopped, or a
         // stock SmartTube build is installed, the launcher should settle on an empty state.
         SmartTubePlaybackStore.clearUnavailableRelayTubeData(context)
-        if (!readProvider(context, "profiles", null)) {
-            runCatching { context.sendBroadcast(Intent(requestAction).setPackage(relayTubePackage)) }
+        val endpoint = findEndpoint(context) ?: return
+        if (!readProvider(context, endpoint, "profiles", null)) {
+            runCatching { context.sendBroadcast(Intent(requestAction).setPackage(endpoint.packageName)) }
         } else {
             SmartTubePlaybackStore.activeProfileId?.let { profileId ->
-                readFeeds(context, profileId)
-                mainHandler.postDelayed({ readFeeds(context.applicationContext, profileId) }, 1_500L)
+                readFeeds(context, endpoint, profileId)
+                mainHandler.postDelayed({ readFeeds(context.applicationContext, endpoint, profileId) }, 1_500L)
             }
         }
     }
@@ -294,26 +315,36 @@ internal object RelayTubeProfileBridge {
     fun selectProfile(context: Context, profileId: String) {
         SmartTubePlaybackStore.activateProfile(context, profileId)
         SmartTubePlaybackStore.clearUnavailableRelayTubeData(context, profileId)
-        if (!readProvider(context, "select", profileId)) {
+        val endpoint = findEndpoint(context)
+        if (endpoint != null && !readProvider(context, endpoint, "select", profileId)) {
             runCatching {
-                context.sendBroadcast(Intent(selectAction).setPackage(relayTubePackage).putExtra(RELAY_TUBE_EXTRA_PROFILE_ID, profileId))
+                context.sendBroadcast(Intent(selectAction).setPackage(endpoint.packageName).putExtra(RELAY_TUBE_EXTRA_PROFILE_ID, profileId))
             }
         }
-        readFeeds(context, profileId)
-        mainHandler.postDelayed({ readFeeds(context.applicationContext, profileId) }, 1_500L)
-        mainHandler.postDelayed({ readFeeds(context.applicationContext, profileId) }, 4_000L)
+        if (endpoint != null) {
+            readFeeds(context, endpoint, profileId)
+            mainHandler.postDelayed({ readFeeds(context.applicationContext, endpoint, profileId) }, 1_500L)
+            mainHandler.postDelayed({ readFeeds(context.applicationContext, endpoint, profileId) }, 4_000L)
+        }
     }
 
-    private fun readProvider(context: Context, method: String, profileId: String?): Boolean = runCatching {
-        val result = context.contentResolver.call(providerUri, method, profileId, null) ?: return false
+    private fun findEndpoint(context: Context): RelayTubeEndpoint? = relayTubePackages.firstNotNullOfOrNull { packageName ->
+        runCatching {
+            context.packageManager.getApplicationInfo(packageName, 0)
+            RelayTubeEndpoint(packageName, "content://$packageName.relayprofiles")
+        }.getOrNull()
+    }
+
+    private fun readProvider(context: Context, endpoint: RelayTubeEndpoint, method: String, profileId: String?): Boolean = runCatching {
+        val result = context.contentResolver.call(Uri.parse(endpoint.providerUri), method, profileId, null) ?: return false
         val profiles = parseRelayTubeProfiles(result.getString(RELAY_TUBE_EXTRA_PROFILES))
         SmartTubePlaybackStore.updateProfiles(context, result.getString(RELAY_TUBE_EXTRA_PROFILE_ID), profiles)
         true
     }.getOrDefault(false)
 
-    private fun readFeeds(context: Context, profileId: String) {
+    private fun readFeeds(context: Context, endpoint: RelayTubeEndpoint, profileId: String) {
         runCatching {
-            val result = context.contentResolver.call(providerUri, "feeds", profileId, null) ?: return
+            val result = context.contentResolver.call(Uri.parse(endpoint.providerUri), "feeds", profileId, null) ?: return
             val subscriptionsPayload = result.getString("subscriptions").orEmpty()
             val continuePayload = result.getString("continue_watching").orEmpty()
             SmartTubePlaybackStore.saveSubscriptionVideos(
@@ -330,6 +361,8 @@ internal object RelayTubeProfileBridge {
             )
         }
     }
+
+    private data class RelayTubeEndpoint(val packageName: String, val providerUri: String)
 }
 
 /** Relay-only display preferences; these never modify the viewer's YouTube subscriptions. */

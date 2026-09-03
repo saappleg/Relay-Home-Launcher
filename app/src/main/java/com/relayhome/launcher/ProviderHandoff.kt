@@ -15,8 +15,8 @@ internal object ProviderHandoff {
     private const val nuvioPackage = "com.nuvio.tv"
     private const val stremioPackage = "com.stremio.one"
     private val smartTubePackages = listOf(
-        "com.relaytube.stable",
         "com.relaytube.beta",
+        "com.relaytube.stable",
         "com.relaytube.fdroid",
         "app.smarttube.stable",
         "org.smarttube.stable",

@@ -2,6 +2,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="com.relaytube.stable.ACCESS_VIDEO_DATA" />
+    <uses-permission android:name="com.relaytube.beta.ACCESS_VIDEO_DATA" />
+    <uses-permission android:name="com.relaytube.fdroid.ACCESS_VIDEO_DATA" />
     <uses-feature android:name="android.software.leanback" android:required="false" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
 
@@ -65,6 +67,28 @@
             android:name=".RelayTubePlaybackReceiver"
             android:exported="true"
             android:permission="com.relaytube.stable.ACCESS_VIDEO_DATA">
+            <intent-filter>
+                <action android:name="com.relaytube.action.PLAYBACK" />
+                <action android:name="com.relaytube.action.SUBSCRIPTIONS" />
+                <action android:name="com.relaytube.action.CONTINUE_WATCHING" />
+                <action android:name="com.relaytube.action.PROFILES" />
+            </intent-filter>
+        </receiver>
+        <receiver
+            android:name=".RelayTubePlaybackReceiverBeta"
+            android:exported="true"
+            android:permission="com.relaytube.beta.ACCESS_VIDEO_DATA">
+            <intent-filter>
+                <action android:name="com.relaytube.action.PLAYBACK" />
+                <action android:name="com.relaytube.action.SUBSCRIPTIONS" />
+                <action android:name="com.relaytube.action.CONTINUE_WATCHING" />
+                <action android:name="com.relaytube.action.PROFILES" />
+            </intent-filter>
+        </receiver>
+        <receiver
+            android:name=".RelayTubePlaybackReceiverFdroid"
+            android:exported="true"
+            android:permission="com.relaytube.fdroid.ACCESS_VIDEO_DATA">
             <intent-filter>
                 <action android:name="com.relaytube.action.PLAYBACK" />
                 <action android:name="com.relaytube.action.SUBSCRIPTIONS" />

@@ -52,6 +52,12 @@ Apps, Search, or Settings.
 Version code 10 fixes the in-app GitHub update check, which was requesting a
 misspelled repository URL and returning HTTP 404.
 
+## v0.1.0-alpha.5 release notes
+
+Version code 11 accepts RelayTube alpha, beta, stable, and F-Droid bridge
+broadcasts, discovers the installed RelayTube profile provider dynamically, and
+keeps the package-specific bridge permissions aligned across flavors.
+
 Before publishing:
 
 1. Build and smoke-test both 1080p and 4K layouts.
