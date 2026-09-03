@@ -974,10 +974,13 @@ private fun HomeScreen(
         }
     }
     fun activatePeek(provider: Provider?) {
-        if (provider != peekProvider) {
-            onPeekProvider(provider)
-            if (provider == Provider.NUVIO) onRefreshNuvio()
-        }
+        // Always write the transient state, including null. Focus callbacks can outlive the
+        // composition that created them while D-pad navigation moves between top-bar items;
+        // comparing against that callback's captured value could otherwise leave an old peek
+        // panel visible when Home, Calendar, Apps, Search, or Settings receives focus.
+        val changed = provider != peekProvider
+        onPeekProvider(provider)
+        if (changed && provider == Provider.NUVIO) onRefreshNuvio()
     }
     // The primary rail is deliberately provider-neutral: real Nuvio progress,
     // active SmartTube playback, and each enabled provider's available feed.
