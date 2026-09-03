@@ -41,6 +41,12 @@ GitHub alpha, beta, and stable update discovery and installation.
 It also returns cleanly to Home after RelayTube provider, handoff, and playback
 navigation instead of leaving RelayTube selected in the underlying launcher.
 
+## v0.1.0-alpha.3 release notes
+
+Version code 9 fixes a stale App Peek focus callback that could leave a previous
+RelayTube, Nuvio, or Stremio peek visible after moving focus to Home, Calendar,
+Apps, Search, or Settings.
+
 Before publishing:
 
 1. Build and smoke-test both 1080p and 4K layouts.
