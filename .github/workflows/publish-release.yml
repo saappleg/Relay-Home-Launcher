@@ -8,10 +8,11 @@ on:
         required: true
         type: choice
         options:
+          - alpha
           - beta
           - stable
       version_name:
-        description: Version name (for example 0.1.0-beta.2)
+        description: Version name (for example 0.1.0-alpha.1)
         required: true
         type: string
       version_code:
@@ -53,9 +54,14 @@ jobs:
           case "$VERSION_NAME" in
             *[!0-9A-Za-z._-]*) exit 1 ;;
           esac
-          if [ "$CHANNEL" = "beta" ]; then
-            case "$VERSION_NAME" in *-beta.*) ;; *) exit 1 ;; esac
-          fi
+          case "$CHANNEL" in
+            alpha)
+              case "$VERSION_NAME" in *-alpha.*) ;; *) exit 1 ;; esac
+              ;;
+            beta)
+              case "$VERSION_NAME" in *-beta.*) ;; *) exit 1 ;; esac
+              ;;
+          esac
 
       - name: Configure release signing
         env:
@@ -101,7 +107,7 @@ jobs:
           RELEASE_NOTES: ${{ inputs.release_notes }}
         run: |
           TAG_NAME="v${VERSION_NAME}"
-          if [ "$CHANNEL" = "beta" ]; then
+          if [ "$CHANNEL" = "alpha" ] || [ "$CHANNEL" = "beta" ]; then
             gh release create "$TAG_NAME" release-assets/* \
               --target "$GITHUB_SHA" \
               --title "Relay Home ${VERSION_NAME}" \

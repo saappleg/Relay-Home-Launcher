@@ -93,9 +93,40 @@ internal object SmartTubePlaybackStore {
             .apply()
     }
 
+    /**
+     * A failed RelayTube request must not fall back to the previous profile's disk cache. Public
+     * SmartTube media-session data can still arrive independently and will repopulate nowPlaying.
+     */
+    fun clearUnavailableRelayTubeData(context: Context, profileId: String? = activeProfileId) {
+        if (profileId == activeProfileId) {
+            subscriptionVideos = emptyList()
+            continueWatchingVideos = emptyList()
+            profiles = emptyList()
+            nowPlaying = null
+        }
+        preferences(context).edit()
+            .remove(cacheKey(RELAY_TUBE_CACHE_SUBSCRIPTIONS, profileId))
+            .remove(cacheKey(RELAY_TUBE_CACHE_CONTINUE_WATCHING, profileId))
+            .apply()
+    }
+
     fun updateProfiles(context: Context, selectedId: String?, next: List<RelayTubeProfile>) {
-        profiles = next
-        selectedId?.takeIf { it.isNotBlank() }?.let { activateProfile(context, it) }
+        val validProfiles = next
+            .filter { it.id.isNotBlank() && it.name.isNotBlank() }
+            .distinctBy { it.id }
+        profiles = validProfiles
+        val nextActiveProfile = selectedId?.takeIf { selected -> validProfiles.any { it.id == selected } }
+            ?: validProfiles.firstOrNull { it.selected }?.id
+            ?: activeProfileId?.takeIf { active -> validProfiles.any { it.id == active } }
+        if (nextActiveProfile != null) {
+            activateProfile(context, nextActiveProfile)
+        } else {
+            activeProfileId = null
+            subscriptionVideos = emptyList()
+            continueWatchingVideos = emptyList()
+            nowPlaying = null
+            preferences(context).edit().remove(RELAY_TUBE_ACTIVE_PROFILE).apply()
+        }
     }
 
     fun activateProfile(context: Context, profileId: String) {
@@ -153,6 +184,13 @@ class RelayTubePlaybackReceiver : BroadcastReceiver() {
         val title = intent.getStringExtra(RELAY_TUBE_EXTRA_TITLE).orEmpty().trim()
         val videoId = intent.getStringExtra(RELAY_TUBE_EXTRA_VIDEO_ID).orEmpty().trim()
         if (title.isBlank() || videoId.isBlank()) return
+        val profileId = intent.getStringExtra(RELAY_TUBE_EXTRA_PROFILE_ID).orEmpty().trim()
+        if (profileId.isNotBlank() && SmartTubePlaybackStore.activeProfileId != null &&
+            profileId != SmartTubePlaybackStore.activeProfileId
+        ) return
+        if (profileId.isNotBlank() && SmartTubePlaybackStore.activeProfileId == null) {
+            SmartTubePlaybackStore.activateProfile(context, profileId)
+        }
         SmartTubePlaybackStore.updateNowPlaying(SmartTubeNowPlaying(
             videoId = videoId,
             title = title,
@@ -240,8 +278,11 @@ internal object RelayTubeProfileBridge {
     private val mainHandler = Handler(Looper.getMainLooper())
 
     fun requestProfiles(context: Context) {
+        // Treat each request as a fresh public snapshot. If RelayTube is absent, stopped, or a
+        // stock SmartTube build is installed, the launcher should settle on an empty state.
+        SmartTubePlaybackStore.clearUnavailableRelayTubeData(context)
         if (!readProvider(context, "profiles", null)) {
-            context.sendBroadcast(Intent(requestAction).setPackage(relayTubePackage))
+            runCatching { context.sendBroadcast(Intent(requestAction).setPackage(relayTubePackage)) }
         } else {
             SmartTubePlaybackStore.activeProfileId?.let { profileId ->
                 readFeeds(context, profileId)
@@ -252,8 +293,11 @@ internal object RelayTubeProfileBridge {
 
     fun selectProfile(context: Context, profileId: String) {
         SmartTubePlaybackStore.activateProfile(context, profileId)
+        SmartTubePlaybackStore.clearUnavailableRelayTubeData(context, profileId)
         if (!readProvider(context, "select", profileId)) {
-            context.sendBroadcast(Intent(selectAction).setPackage(relayTubePackage).putExtra(RELAY_TUBE_EXTRA_PROFILE_ID, profileId))
+            runCatching {
+                context.sendBroadcast(Intent(selectAction).setPackage(relayTubePackage).putExtra(RELAY_TUBE_EXTRA_PROFILE_ID, profileId))
+            }
         }
         readFeeds(context, profileId)
         mainHandler.postDelayed({ readFeeds(context.applicationContext, profileId) }, 1_500L)
@@ -333,73 +377,90 @@ class SmartTubeNowPlayingService : NotificationListenerService() {
             manager.getActiveSessions(component)
         }.onSuccess(::observe).onFailure {
             sessionManager = null
-            markLastPlaybackPaused()
+            SmartTubePlaybackStore.updateNowPlaying(null)
         }
     }
 
     override fun onListenerDisconnected() {
         sessionManager?.let { manager -> runCatching { manager.removeOnActiveSessionsChangedListener(activeSessionsListener) } }
         sessionManager = null
-        controller?.unregisterCallback(callback)
+        runCatching { controller?.unregisterCallback(callback) }
         controller = null
         SmartTubePlaybackStore.updateNowPlaying(null)
         super.onListenerDisconnected()
+    }
+
+    override fun onDestroy() {
+        sessionManager?.let { manager -> runCatching { manager.removeOnActiveSessionsChangedListener(activeSessionsListener) } }
+        runCatching { controller?.unregisterCallback(callback) }
+        controller = null
+        sessionManager = null
+        SmartTubePlaybackStore.updateNowPlaying(null)
+        super.onDestroy()
     }
 
     // Some SmartTube versions release their MediaSession as soon as the user returns Home but
     // keep an ongoing playback notification. Its public metadata is a safe fallback for Relay.
     override fun onNotificationPosted(sbn: StatusBarNotification) {
         super.onNotificationPosted(sbn)
-        if (!sbn.packageName.isSmartTubePackage()) return
-        val extras = sbn.notification.extras
-        val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
-        if (title.isBlank()) return
-        SmartTubePlaybackStore.updateNowPlaying(SmartTubeNowPlaying(
-            videoId = null,
-            title = title,
-            channel = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString()?.trim()
-                ?.takeIf { it.isNotBlank() }
-                ?: extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim()?.takeIf { it.isNotBlank() },
-            artworkUrl = null,
-            description = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.trim()?.takeIf { it.isNotBlank() },
-            positionMs = 0L,
-            durationMs = 0L,
-            playing = true
-        ))
+        if (!ProviderHandoff.isSmartTubePackage(sbn.packageName) || controller != null) return
+        runCatching {
+            val extras = sbn.notification.extras
+            val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
+            if (title.isBlank()) return@runCatching
+            // Notification metadata is public but has no reliable playback state; do not label it
+            // as active playback and clear it when the notification disappears.
+            SmartTubePlaybackStore.updateNowPlaying(SmartTubeNowPlaying(
+                videoId = null,
+                title = title,
+                channel = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString()?.trim()
+                    ?.takeIf { it.isNotBlank() }
+                    ?: extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim()?.takeIf { it.isNotBlank() },
+                artworkUrl = null,
+                description = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.trim()?.takeIf { it.isNotBlank() },
+                positionMs = 0L,
+                durationMs = 0L,
+                playing = false
+            ))
+        }.onFailure {
+            if (controller == null) SmartTubePlaybackStore.updateNowPlaying(null)
+        }
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
         super.onNotificationRemoved(sbn)
-        if (sbn.packageName.isSmartTubePackage() && controller == null) markLastPlaybackPaused()
+        if (ProviderHandoff.isSmartTubePackage(sbn.packageName) && controller == null) {
+            SmartTubePlaybackStore.updateNowPlaying(null)
+        }
     }
 
     private fun observe(sessions: List<MediaController>) {
         runCatching {
-            val next = sessions.firstOrNull { it.packageName.isSmartTubePackage() }
+            val next = sessions.firstOrNull { ProviderHandoff.isSmartTubePackage(it.packageName) }
             if (next?.sessionToken == controller?.sessionToken) {
                 publish()
                 return
             }
-            controller?.unregisterCallback(callback)
+            runCatching { controller?.unregisterCallback(callback) }
             controller = next
             next?.registerCallback(callback)
             publish()
         }.onFailure {
             controller = null
-            markLastPlaybackPaused()
+            SmartTubePlaybackStore.updateNowPlaying(null)
         }
     }
 
     private fun publish() {
         runCatching {
             val active = controller ?: run {
-                markLastPlaybackPaused()
+                SmartTubePlaybackStore.updateNowPlaying(null)
                 return
             }
             val metadata = active.metadata
             val state = active.playbackState
             val title = metadata?.getString(MediaMetadata.METADATA_KEY_TITLE)?.takeIf { it.isNotBlank() } ?: run {
-                markLastPlaybackPaused()
+                SmartTubePlaybackStore.updateNowPlaying(null)
                 return
             }
             // RelayTube publishes its exact YouTube id through the package-targeted bridge.
@@ -410,7 +471,7 @@ class SmartTubeNowPlayingService : NotificationListenerService() {
             SmartTubePlaybackStore.updateNowPlaying(SmartTubeNowPlaying(
                 videoId = relayTubeSnapshot?.videoId,
                 title = title,
-                channel = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST),
+                channel = metadata.getString(MediaMetadata.METADATA_KEY_ARTIST)?.trim()?.takeIf { it.isNotBlank() },
                 // SmartTube supplies its card thumbnail as ALBUM_ART_URI (not ART_URI).
                 artworkUrl = metadata.getString(MediaMetadata.METADATA_KEY_ALBUM_ART_URI)
                     ?: metadata.getString(MediaMetadata.METADATA_KEY_ART_URI)
@@ -419,17 +480,10 @@ class SmartTubeNowPlayingService : NotificationListenerService() {
                     ?: relayTubeSnapshot?.description,
                 metadata = metadata.getString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE)
                     ?: relayTubeSnapshot?.metadata,
-                positionMs = state?.position ?: 0L,
-                durationMs = metadata.getLong(MediaMetadata.METADATA_KEY_DURATION),
+                positionMs = (state?.position ?: 0L).coerceAtLeast(0L),
+                durationMs = metadata.getLong(MediaMetadata.METADATA_KEY_DURATION).coerceAtLeast(0L),
                 playing = state?.state == android.media.session.PlaybackState.STATE_PLAYING
             ))
-        }.onFailure { markLastPlaybackPaused() }
+        }.onFailure { SmartTubePlaybackStore.updateNowPlaying(null) }
     }
-
-    private fun markLastPlaybackPaused() {
-        SmartTubePlaybackStore.updateNowPlaying(SmartTubePlaybackStore.nowPlaying?.copy(playing = false))
-    }
-
-    private fun String.isSmartTubePackage(): Boolean =
-        startsWith("org.smarttube") || startsWith("app.smarttube") || startsWith("com.relaytube")
 }

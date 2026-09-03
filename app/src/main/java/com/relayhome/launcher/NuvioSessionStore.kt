@@ -9,6 +9,7 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
+import org.json.JSONObject
 
 /** Keeps the Nuvio bearer token encrypted with an Android Keystore key.
  * The ciphertext survives normal app upgrades; the key never leaves the device.
@@ -25,15 +26,34 @@ internal object NuvioSessionStore {
         require(parts.size == 2)
         val plaintext = cipher(Cipher.DECRYPT_MODE, Base64.decode(parts[0], Base64.NO_WRAP))
             .doFinal(Base64.decode(parts[1], Base64.NO_WRAP))
-        NuvioSession(plaintext.decodeToString())
+        val stored = plaintext.decodeToString().trim()
+        require(stored.isNotBlank())
+        if (stored.startsWith("{")) {
+            val session = JSONObject(stored)
+            NuvioSession(
+                accessToken = session.getString("access_token"),
+                refreshToken = session.optString("refresh_token").takeUnless { it.isBlank() || it == "null" },
+                expiresAtEpochSeconds = session.optLong("expires_at", 0L).takeIf { it > 0L }
+            )
+        } else {
+            // Migrate the original token-only payload without treating it as an expired session.
+            NuvioSession(stored)
+        }
     }.getOrElse {
         clear(context)
         null
     }
 
     fun save(context: Context, session: NuvioSession) {
+        require(session.accessToken.isNotBlank()) { "Nuvio session token cannot be blank." }
         val encryptor = cipher(Cipher.ENCRYPT_MODE)
-        val ciphertext = encryptor.doFinal(session.accessToken.encodeToByteArray())
+        val plaintext = JSONObject()
+            .put("access_token", session.accessToken)
+            .put("refresh_token", session.refreshToken)
+            .put("expires_at", session.expiresAtEpochSeconds)
+            .toString()
+            .encodeToByteArray()
+        val ciphertext = encryptor.doFinal(plaintext)
         val payload = "${Base64.encodeToString(encryptor.iv, Base64.NO_WRAP)}:${Base64.encodeToString(ciphertext, Base64.NO_WRAP)}"
         preferences(context).edit().putString(tokenKey, payload).apply()
     }

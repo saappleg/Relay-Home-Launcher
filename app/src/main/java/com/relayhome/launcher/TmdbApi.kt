@@ -34,9 +34,12 @@ internal object TmdbApi {
         ?.takeIf { it.isNotEmpty() && !it.equals("null", ignoreCase = true) }
         ?.let { "https://image.tmdb.org/t/p/$size$it" }
 
-    /** Searches TMDB for real movie and TV metadata; playback still hands off to the chosen provider. */
+    /** Searches TMDB metadata for Nuvio, whose public handoff accepts these title identifiers. */
     suspend fun search(query: String, provider: Provider): List<MediaItem> = withContext(Dispatchers.IO) {
-        if (apiKey.isBlank() || query.isBlank()) return@withContext emptyList()
+        // TMDB results are metadata only. Relay has no supported Stremio catalog bridge and no
+        // YouTube id resolver, so presenting them as provider-owned cards would create invalid
+        // handoff targets. Those providers are searched through their own public handoff below.
+        if (apiKey.isBlank() || query.isBlank() || provider != Provider.NUVIO) return@withContext emptyList()
         runCatching {
             val movies = JSONObject(get("/search/movie", mapOf("query" to query))).optJSONArray("results") ?: JSONArray()
             val shows = JSONObject(get("/search/tv", mapOf("query" to query))).optJSONArray("results") ?: JSONArray()
@@ -51,14 +54,14 @@ internal object TmdbApi {
                         artworkUrl = result.optString("poster_path").takeIf { it.isNotBlank() }?.let { "https://image.tmdb.org/t/p/w780$it" }.orEmpty(),
                         providerContentId = "tmdb:${result.optInt("id")}",
                         contentType = type,
-                        showTitle = if (type == "tv") title else null,
+                        showTitle = if (type == "series") title else null,
                         description = result.optString("overview").ifBlank { null },
                         releaseInfo = result.optString(if (type == "movie") "release_date" else "first_air_date").ifBlank { null },
                         rating = result.optDouble("vote_average", 0.0).takeIf { it > 0 }
                     )
                 }
             }
-            (map(shows, "tv") + map(movies, "movie")).distinctBy { "${it.contentType}:${it.title}" }.take(20)
+            (map(shows, "series") + map(movies, "movie")).distinctBy { "${it.contentType}:${it.title}" }.take(20)
         }.getOrDefault(emptyList())
     }
 
@@ -88,7 +91,7 @@ internal object TmdbApi {
                     colors = listOf(source.provider.accent.copy(alpha = .45f), Color(0xFF080A10)),
                     artworkUrl = show.optString("poster_path").takeIf { it.isNotBlank() }?.let { "https://image.tmdb.org/t/p/w780$it" }.orEmpty(),
                     providerContentId = "tmdb:${show.optInt("id")}",
-                    contentType = "tv",
+                    contentType = "series",
                     showTitle = title,
                     description = show.optString("overview").ifBlank { null },
                     releaseInfo = show.optString("first_air_date").ifBlank { null },

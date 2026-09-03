@@ -15,6 +15,10 @@
             <category android:name="android.intent.category.LAUNCHER" />
         </intent>
         <package android:name="com.nuvio.tv" />
+        <package android:name="com.stremio.one" />
+        <package android:name="com.relaytube.stable" />
+        <package android:name="com.relaytube.beta" />
+        <package android:name="com.relaytube.fdroid" />
         <package android:name="app.smarttube.stable" />
         <package android:name="org.smarttube.stable" />
         <package android:name="org.smarttube.beta" />

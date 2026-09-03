@@ -1,16 +1,47 @@
 package com.relayhome.launcher
 
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import androidx.compose.ui.graphics.Color
-import org.json.JSONObject
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import org.json.JSONArray
+import org.json.JSONObject
+import kotlinx.coroutines.withContext
+import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URL
 import java.time.Instant
 
-internal data class NuvioSession(val accessToken: String)
+internal data class NuvioSession(
+    val accessToken: String,
+    val refreshToken: String? = null,
+    val expiresAtEpochSeconds: Long? = null
+) {
+    fun isExpired(nowEpochSeconds: Long = Instant.now().epochSecond): Boolean =
+        expiresAtEpochSeconds?.let { nowEpochSeconds >= it } == true
+}
+
 internal data class NuvioProfile(val index: Int, val name: String, val color: String, val imageUrl: String? = null)
+
+internal open class NuvioApiException(message: String, cause: Throwable? = null) : IOException(message, cause)
+
+/** A typed auth failure lets the existing UI show re-auth guidance without deleting live cards. */
+internal class NuvioSessionExpiredException(val statusCode: Int? = null) : NuvioApiException(
+    "Nuvio session expired. Sign in again from Provider settings to reconnect your account. Your last successful data is still available."
+)
+
+private class NuvioSignInException(statusCode: Int, detail: String?) : NuvioApiException(
+    detail?.takeIf { it.isNotBlank() }?.let { "Nuvio sign-in failed: $it" }
+        ?: "Nuvio sign-in failed (HTTP $statusCode). Check your email and password."
+)
+
+private class NuvioSyncException(statusCode: Int) : NuvioApiException(
+    "Nuvio sync failed (HTTP $statusCode). Your last successful Home data was kept; try again."
+)
+
+private class NuvioNetworkException(cause: Throwable) : NuvioApiException(
+    "Nuvio is temporarily unavailable. Your last successful Home data was kept; try again when connected.",
+    cause
+)
 
 /** Client for Nuvio's documented public API. The session itself is device-encrypted by NuvioSessionStore. */
 internal object NuvioApi {
@@ -18,7 +49,7 @@ internal object NuvioApi {
     private const val publishableKey = "sb_publishable_1Clq8rlTVACkdcZuqr6_AD__xUUC_EN"
 
     suspend fun signIn(email: String, password: String): Result<NuvioSession> = withContext(Dispatchers.IO) {
-        runCatching {
+        apiCall {
             val connection = (URL("$baseUrl/auth/v1/token?grant_type=password").openConnection() as HttpURLConnection).apply {
                 requestMethod = "POST"
                 doOutput = true
@@ -29,21 +60,32 @@ internal object NuvioApi {
                 connectTimeout = 12_000
                 readTimeout = 12_000
             }
-            connection.outputStream.bufferedWriter().use { it.write(JSONObject().put("email", email).put("password", password).toString()) }
-            val body = (if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream).bufferedReader().use { it.readText() }
-            check(connection.responseCode in 200..299) {
-                val error = JSONObject(body)
-                error.optString("error_description")
-                    .ifBlank { error.optString("message") }
-                    .ifBlank { error.optString("msg") }
-                    .ifBlank { "Nuvio sign-in failed (HTTP ${connection.responseCode})" }
+            try {
+                connection.outputStream.bufferedWriter().use {
+                    it.write(JSONObject().put("email", email).put("password", password).toString())
+                }
+                val response = connection.readResponse()
+                if (response.status !in 200..299) {
+                    throw NuvioSignInException(response.status, response.body.nuvioErrorDetail())
+                }
+                val body = JSONObject(response.body)
+                val token = body.firstString("access_token")
+                    ?: throw NuvioSignInException(response.status, "Nuvio did not return a session token.")
+                val expiresIn = body.optLong("expires_in", 0L).takeIf { it > 0L }
+                NuvioSession(
+                    accessToken = token,
+                    refreshToken = body.firstString("refresh_token"),
+                    expiresAtEpochSeconds = expiresIn?.let { Instant.now().epochSecond + it }
+                )
+            } finally {
+                connection.disconnect()
             }
-            NuvioSession(JSONObject(body).getString("access_token"))
         }
     }
 
     suspend fun pullRelayMedia(session: NuvioSession, profileId: Int): Result<List<MediaItem>> = withContext(Dispatchers.IO) {
-        runCatching {
+        apiCall {
+            requireUsableSession(session)
             val library = JSONArray(rpc(session, "sync_pull_library", JSONObject().put("p_profile_id", profileId).put("p_limit", 200).put("p_offset", 0)))
             val progress = JSONArray(rpc(session, "sync_pull_watch_progress", JSONObject().put("p_profile_id", profileId).put("p_limit", 200)))
             val libraryByContent = buildMap {
@@ -108,7 +150,8 @@ internal object NuvioApi {
     }
 
     suspend fun pullProfiles(session: NuvioSession): Result<List<NuvioProfile>> = withContext(Dispatchers.IO) {
-        runCatching {
+        apiCall {
+            requireUsableSession(session)
             val profiles = JSONArray(rpc(session, "sync_pull_profiles", JSONObject()))
             (0 until profiles.length()).map { index ->
                 val profile = profiles.getJSONObject(index)
@@ -124,7 +167,8 @@ internal object NuvioApi {
 
     /** Adds a Relay detail item to the active Nuvio profile using Nuvio's own sync mutation. */
     suspend fun addToLibrary(session: NuvioSession, profileId: Int, item: MediaItem): Result<Unit> = withContext(Dispatchers.IO) {
-        runCatching {
+        apiCall {
+            requireUsableSession(session)
             val contentId = item.providerContentId?.takeIf { it.isNotBlank() }
                 ?: throw IllegalArgumentException("This title needs a Nuvio or TMDB identifier before it can be added.")
             val contentType = when (item.contentType.lowercase()) {
@@ -158,16 +202,60 @@ internal object NuvioApi {
             setRequestProperty("apikey", publishableKey)
             setRequestProperty("Authorization", "Bearer ${session.accessToken}")
             setRequestProperty("Content-Type", "application/json")
+            connectTimeout = 12_000
+            readTimeout = 12_000
         }
-        connection.outputStream.bufferedWriter().use { it.write(body.toString()) }
-        val response = (if (connection.responseCode in 200..299) connection.inputStream else connection.errorStream).bufferedReader().use { it.readText() }
-        check(connection.responseCode in 200..299) { "Nuvio sync failed" }
-        return response
+        try {
+            connection.outputStream.bufferedWriter().use { it.write(body.toString()) }
+            val response = connection.readResponse()
+            if (response.status == HttpURLConnection.HTTP_UNAUTHORIZED || response.status == HttpURLConnection.HTTP_FORBIDDEN) {
+                throw NuvioSessionExpiredException(response.status)
+            }
+            if (response.status !in 200..299) {
+                throw NuvioSyncException(response.status)
+            }
+            return response.body
+        } finally {
+            connection.disconnect()
+        }
     }
+
+    private fun requireUsableSession(session: NuvioSession) {
+        if (session.accessToken.isBlank() || session.isExpired()) throw NuvioSessionExpiredException()
+    }
+
+    private inline fun <T> apiCall(block: () -> T): Result<T> = try {
+        Result.success(block())
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (invalidRequest: IllegalArgumentException) {
+        Result.failure(invalidRequest)
+    } catch (known: NuvioApiException) {
+        Result.failure(known)
+    } catch (unexpected: Exception) {
+        Result.failure(NuvioNetworkException(unexpected))
+    }
+
+    private data class HttpResponse(val status: Int, val body: String)
+
+    private fun HttpURLConnection.readResponse(): HttpResponse {
+        val status = responseCode
+        val stream = if (status in 200..299) inputStream else errorStream
+        val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+        return HttpResponse(status, body)
+    }
+
+    private fun String.nuvioErrorDetail(): String? = runCatching {
+        JSONObject(this).firstString("error_description", "message", "msg")
+    }.getOrNull()
+        ?.takeUnless { it.equals("null", ignoreCase = true) }
+        ?.trim()
+        ?.takeIf { it.isNotBlank() }
 
     private fun JSONObject.firstString(vararg names: String): String? = names
         .asSequence()
         .map { optString(it).trim() }
+        .filterNot { it.equals("null", ignoreCase = true) }
         .firstOrNull { it.isNotBlank() }
 
     private fun JSONObject.firstInt(vararg names: String): Int? = names

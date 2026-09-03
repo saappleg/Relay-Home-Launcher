@@ -3,6 +3,8 @@
 .idea/
 build/
 local.properties
+keystore.properties
+RelaySigning/
 *.iml
 **/build/
 *.apk

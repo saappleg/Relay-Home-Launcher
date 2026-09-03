@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
+import java.util.Locale
 
 /**
  * The only boundary allowed to hand a viewer from Relay into a provider.
@@ -15,13 +16,21 @@ internal object ProviderHandoff {
     private const val stremioPackage = "com.stremio.one"
     private val smartTubePackages = listOf(
         "com.relaytube.stable",
+        "com.relaytube.beta",
+        "com.relaytube.fdroid",
         "app.smarttube.stable",
         "org.smarttube.stable",
         "org.smarttube.beta"
     )
 
     fun isSmartTubeInstalled(context: Context): Boolean =
-        smartTubePackages.any { context.packageManager.getLaunchIntentForPackage(it) != null }
+        installedSmartTubePackage(context) != null
+
+    internal fun installedSmartTubePackage(context: Context): String? = runCatching {
+        smartTubePackages.firstOrNull { context.packageManager.getLaunchIntentForPackage(it) != null }
+    }.getOrNull()
+
+    internal fun isSmartTubePackage(packageName: String): Boolean = packageName in smartTubePackages
 
     fun isProviderPackage(packageName: String): Boolean =
         packageName == nuvioPackage || packageName == stremioPackage || packageName in smartTubePackages
@@ -44,15 +53,12 @@ internal object ProviderHandoff {
 
     /** Opens Nuvio's title detail page so the viewer can choose a stream in Nuvio. */
     fun openNuvioEpisode(context: Context, item: MediaItem) {
-        val contentId = item.providerContentId
-        if (contentId.isNullOrBlank()) {
-            openNuvio(context)
+        val uri = buildNuvioMetaUri(item)
+        if (uri == null) {
+            if (item.providerContentId.isNullOrBlank()) openNuvio(context)
+            else notice(context, "Nuvio cannot open this item type from Relay.")
             return
         }
-        val uri = Uri.parse("nuvio://meta").buildUpon()
-            .appendQueryParameter("type", item.contentType)
-            .appendQueryParameter("id", contentId)
-            .build()
         val intent = Intent(Intent.ACTION_VIEW, uri)
             .setPackage(nuvioPackage)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
@@ -78,15 +84,18 @@ internal object ProviderHandoff {
 
     /** Opens a specific YouTube video in the installed SmartTube / RelayTube variant. */
     fun openSmartTubeVideo(context: Context, videoId: String, resumePositionMs: Long = 0L) {
-        val packageName = smartTubePackages.firstOrNull {
-            context.packageManager.getLaunchIntentForPackage(it) != null
-        }
+        val cleanVideoId = cleanProviderId(videoId)
+        val packageName = installedSmartTubePackage(context)
         if (packageName == null) {
             notice(context, "RelayTube is not installed. Install RelayTube first.")
             return
         }
+        if (cleanVideoId == null) {
+            notice(context, "RelayTube cannot open a video without a valid YouTube id.")
+            return
+        }
         val uri = Uri.parse("https://www.youtube.com/watch").buildUpon()
-            .appendQueryParameter("v", videoId)
+            .appendQueryParameter("v", cleanVideoId)
             .apply {
                 if (resumePositionMs > 0L) appendQueryParameter("t", "${resumePositionMs / 1_000}s")
             }
@@ -116,14 +125,15 @@ internal object ProviderHandoff {
     fun openStremioBoard(context: Context) = launch(
         context,
         Uri.parse("stremio:///board"),
-        "Stremio is not installed or does not support this link yet."
+        "Stremio is not installed or does not support this link yet.",
+        stremioPackage
     )
 
     fun searchStremio(context: Context, query: String) {
         val uri = Uri.parse("stremio:///search").buildUpon()
             .appendQueryParameter("search", query)
             .build()
-        launch(context, uri, "Stremio is not installed or does not support search links yet.")
+        launch(context, uri, "Stremio is not installed or does not support search links yet.", stremioPackage)
     }
 
     fun search(context: Context, provider: Provider, query: String) {
@@ -143,9 +153,7 @@ internal object ProviderHandoff {
                 }
             }
             Provider.SMARTTUBE -> {
-                val packageName = smartTubePackages.firstOrNull {
-                    context.packageManager.getLaunchIntentForPackage(it) != null
-                }
+                val packageName = installedSmartTubePackage(context)
                 if (packageName == null) {
                     notice(context, "RelayTube is not installed on this device.")
                     return
@@ -169,14 +177,12 @@ internal object ProviderHandoff {
     fun play(context: Context, item: MediaItem) {
         when (item.provider) {
             Provider.STREMIO -> {
-                val id = item.providerContentId
-                if (id == null) {
-                    notice(context, "This is visual demo content. Connect a Stremio catalog before playback handoff.")
+                val uri = buildStremioDetailUri(item)
+                if (uri == null) {
+                    notice(context, "Stremio cannot open this item without a supported id and content type.")
                     return
                 }
-                val videoId = if (item.contentType == "movie") id else id
-                val uri = Uri.parse("stremio:///detail/${item.contentType}/$id/$videoId?autoPlay=false")
-                launch(context, uri, "Stremio is not installed or does not support playback links yet.")
+                launch(context, uri, "Stremio is not installed or does not support playback links yet.", stremioPackage)
             }
             Provider.NUVIO -> openNuvioEpisode(context, item)
             Provider.SMARTTUBE -> item.providerContentId?.let { openSmartTubeVideo(context, it, item.resumePositionMs) } ?: openSmartTube(context)
@@ -191,8 +197,60 @@ internal object ProviderHandoff {
         }
     }
 
-    private fun launch(context: Context, uri: Uri, unavailableMessage: String) {
-        val intent = Intent(Intent.ACTION_VIEW, uri).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    /** Builds Nuvio's title handoff only for the types its public URI accepts. */
+    internal fun buildNuvioMetaUri(item: MediaItem): Uri? {
+        val contentId = cleanProviderId(item.providerContentId) ?: return null
+        val type = when (item.contentType.trim().lowercase(Locale.ROOT)) {
+            "movie" -> "movie"
+            "tv", "show", "series", "episode" -> "tv"
+            else -> return null
+        }
+        return Uri.parse("nuvio://meta").buildUpon()
+            .appendQueryParameter("type", type)
+            .appendQueryParameter("id", contentId)
+            .build()
+    }
+
+    /** Builds Stremio's documented detail link without inventing an episode id. */
+    internal fun buildStremioDetailUri(item: MediaItem): Uri? {
+        val id = cleanProviderId(item.providerContentId) ?: return null
+        val type = when (item.contentType.trim().lowercase(Locale.ROOT)) {
+            "movie" -> "movie"
+            "tv" -> "tv"
+            "show", "series", "episode" -> "series"
+            "channel" -> "channel"
+            else -> return null
+        }
+        val episodeVideoId = if (type == "series") {
+            val match = Regex("(?i)S\\s*(\\d+)\\D{0,8}E\\s*(\\d+)").find(item.episodeInfo.orEmpty())
+            val season = match?.groupValues?.getOrNull(1)?.toIntOrNull()?.takeIf { it > 0 }
+            val episode = match?.groupValues?.getOrNull(2)?.toIntOrNull()?.takeIf { it > 0 }
+            if (season != null && episode != null) "$id:$season:$episode" else null
+        } else {
+            null
+        }
+        return Uri.parse("stremio:///detail").buildUpon()
+            .appendPath(type)
+            .appendPath(id)
+            .apply {
+                when {
+                    type == "movie" || type == "tv" -> appendPath(id)
+                    episodeVideoId != null -> appendPath(episodeVideoId)
+                }
+            }
+            .appendQueryParameter("autoPlay", "false")
+            .build()
+    }
+
+    private fun cleanProviderId(value: String?): String? = value
+        ?.trim()
+        ?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+        ?.takeIf { it.none(Char::isWhitespace) && '/' !in it && '?' !in it && '#' !in it }
+
+    private fun launch(context: Context, uri: Uri, unavailableMessage: String, packageName: String? = null) {
+        val intent = Intent(Intent.ACTION_VIEW, uri)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            .apply { packageName?.let { setPackage(it) } }
         if (intent.resolveActivity(context.packageManager) == null) {
             notice(context, unavailableMessage)
             return
