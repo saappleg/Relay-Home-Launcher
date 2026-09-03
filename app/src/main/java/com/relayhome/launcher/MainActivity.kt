@@ -44,10 +44,13 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -74,6 +77,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -82,6 +86,7 @@ import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -97,6 +102,9 @@ import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -378,8 +386,9 @@ private val relayNuvioIcon = relayNavigationIcon("RelayNuvio") {
 }
 
 private val relaySmartTubeIcon = relayNavigationIcon("RelayTube") {
-    moveTo(4f, 6f); lineTo(20f, 6f); lineTo(20f, 18f); lineTo(4f, 18f); close()
-    moveTo(10f, 9f); lineTo(16f, 12f); lineTo(10f, 15f); close()
+    moveTo(8f, 4f); lineTo(12f, 8f); lineTo(16f, 4f)
+    moveTo(5f, 8f); lineTo(19f, 8f); lineTo(19f, 18f); lineTo(5f, 18f); close()
+    moveTo(10f, 11f); lineTo(15f, 13f); lineTo(10f, 15f); close()
 }
 
 private val relayCalendarIcon = relayNavigationIcon("RelayCalendar") {
@@ -396,7 +405,9 @@ private val relayAppsIcon = relayNavigationIcon("RelayApps") {
 }
 
 private val relaySearchIcon = relayNavigationIcon("RelaySearch") {
-    moveTo(10.5f, 4.5f); arcTo(6f, 6f, 0f, true, true, 10.5f, 16.5f)
+    moveTo(10.5f, 4.5f)
+    arcTo(6f, 6f, 0f, true, true, 10.5f, 16.5f)
+    arcTo(6f, 6f, 0f, true, true, 10.5f, 4.5f)
     moveTo(15f, 15f); lineTo(20f, 20f)
 }
 
@@ -1778,6 +1789,8 @@ private fun ActionButton(
     focusRequester: FocusRequester? = null,
     upFocusRequester: FocusRequester? = null,
     downFocusRequester: FocusRequester? = null,
+    leftFocusRequester: FocusRequester? = null,
+    rightFocusRequester: FocusRequester? = null,
     onFocused: (Boolean) -> Unit = {},
     onClick: () -> Unit
 ) {
@@ -1794,9 +1807,11 @@ private fun ActionButton(
         fontWeight = FontWeight.SemiBold,
         modifier = (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .then(
-                if (upFocusRequester != null || downFocusRequester != null) Modifier.focusProperties {
+                if (upFocusRequester != null || downFocusRequester != null || leftFocusRequester != null || rightFocusRequester != null) Modifier.focusProperties {
                     if (upFocusRequester != null) up = upFocusRequester
                     if (downFocusRequester != null) down = downFocusRequester
+                    if (leftFocusRequester != null) left = leftFocusRequester
+                    if (rightFocusRequester != null) right = rightFocusRequester
                 } else Modifier
             )
             .scale(scale).clip(RoundedCornerShape(24.dp))
@@ -1920,7 +1935,9 @@ private fun MediaCard(
     dateFormat: RelayDateFormat = RelayDateFormat.LOCAL,
     showEpisodeInfo: Boolean = false,
     showPremiereDate: Boolean = false,
+    focusRequester: FocusRequester? = null,
     upFocusRequester: FocusRequester? = null,
+    downFocusRequester: FocusRequester? = null,
     onClick: () -> Unit,
     onFocused: (Color?) -> Unit
 ) {
@@ -1940,12 +1957,16 @@ private fun MediaCard(
             .build()
     }
     Box(
-        modifier = Modifier.requiredWidth(width).aspectRatio(if (poster) .69f else 1.78f)
+        modifier = (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .requiredWidth(width).aspectRatio(if (poster) .69f else 1.78f)
             .scale(scale).clip(shape)
             .background(Color(0xFF141519))
             .border(if (focused) 2.dp else 1.dp, if (focused) ivory.copy(alpha = .78f) else Color.White.copy(alpha = .12f), shape)
             .clickable(interactionSource = source, indication = null, onClick = onClick)
-            .then(if (upFocusRequester != null) Modifier.focusProperties { up = upFocusRequester } else Modifier)
+            .then(if (upFocusRequester != null || downFocusRequester != null) Modifier.focusProperties {
+                if (upFocusRequester != null) up = upFocusRequester
+                if (downFocusRequester != null) down = downFocusRequester
+            } else Modifier)
     ) {
         AsyncImage(
             // A fresh ImageRequest on every focus recomposition can make Coil re-evaluate an
@@ -2067,9 +2088,8 @@ private fun FavoriteAppCard(
     val source = remember { MutableInteractionSource() }
     val focused by source.collectIsFocusedAsState()
     val scale = if (focused) 1.07f else 1f
-    val icon = remember(app.packageName, app.hasRoundIcon) {
-        if (app.hasRoundIcon) app.icon.toBitmap(144, 144).asImageBitmap()
-        else app.icon.toRoundLauncherBitmap(144).asImageBitmap()
+    val icon = remember(app.packageName, app.hasRoundIcon, app.useCircularMask) {
+        app.icon.toBitmap(192, 192).asImageBitmap()
     }
     Column(
         Modifier.width(104.dp)
@@ -2077,21 +2097,24 @@ private fun FavoriteAppCard(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Box(
-            Modifier.size(76.dp).graphicsLayer {
+            Modifier.size(76.dp).clip(CircleShape).background(Color(0xFF242730)).graphicsLayer {
                 scaleX = scale
                 scaleY = scale
                 shape = CircleShape
                 clip = true
             }
-                .background(if (focused) palette.accent.copy(alpha = .30f) else Color(0xFF242730))
+                .background(if (focused) palette.accent.copy(alpha = .30f) else Color.Transparent)
                 .border(if (focused) 2.dp else 0.dp, if (focused) palette.accent else Color.Transparent, CircleShape),
             contentAlignment = Alignment.Center
         ) {
             Image(
                 painter = BitmapPainter(icon),
                 contentDescription = app.label,
-                contentScale = ContentScale.FillBounds,
-                modifier = Modifier.fillMaxSize()
+                contentScale = if (app.useCircularMask) ContentScale.FillBounds else ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(if (app.useCircularMask) 0.dp else if (app.hasRoundIcon) 2.dp else 7.dp)
+                    .then(if (app.useCircularMask) Modifier.clip(CircleShape) else Modifier)
             )
             if (focused) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = .08f)))
         }
@@ -2362,6 +2385,8 @@ private fun CalendarScreen(
     var weekView by remember { mutableStateOf(false) }
     var weekStart by remember { mutableStateOf(LocalDate.now().with(DayOfWeek.MONDAY)) }
     var selectedDay by remember { mutableStateOf<LocalDate?>(null) }
+    val backFocusRequester = remember { FocusRequester() }
+    val firstFocusRequester = remember { FocusRequester() }
     var tmdbEntries by remember(providers, nuvioItems) { mutableStateOf(emptyList<TmdbCalendarEntry>()) }
     var scheduleLoading by remember(providers, nuvioItems) { mutableStateOf(false) }
     val providerItems = remember(providers, nuvioItems) { nuvioItems.filter { it.provider in providers } }
@@ -2385,17 +2410,34 @@ private fun CalendarScreen(
     val visibleDays = if (weekView) (0..6).map { weekStart.plusDays(it.toLong()) } else monthDays
     val visibleEntries = if (weekView) entries.filter { it.date in weekStart..weekStart.plusDays(6) } else entries.filter { YearMonth.from(it.date) == month }
     BackHandler(onBack = onBackHome)
+    LaunchedEffect(Unit) {
+        withFrameNanos { }
+        firstFocusRequester.requestFocus()
+    }
     Column(Modifier.fillMaxSize().padding(horizontal = 76.dp, vertical = 42.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Calendar", color = ivory, fontSize = 38.sp, fontWeight = FontWeight.Light)
             Spacer(Modifier.width(16.dp))
             Text("Premieres & episodes from your connected libraries", color = muted, fontSize = 16.sp)
             Spacer(Modifier.weight(1f))
-            ActionButton("‹  Back", palette, primary = false, onClick = onBackHome)
+            ActionButton(
+                "‹  Back",
+                palette,
+                primary = false,
+                focusRequester = backFocusRequester,
+                downFocusRequester = firstFocusRequester,
+                onClick = onBackHome
+            )
         }
         Spacer(Modifier.height(25.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            ActionButton("‹", palette, primary = false) {
+            ActionButton(
+                "‹",
+                palette,
+                primary = false,
+                focusRequester = firstFocusRequester,
+                upFocusRequester = backFocusRequester
+            ) {
                 if (weekView) weekStart = weekStart.minusWeeks(1) else month = month.minusMonths(1)
             }
             Spacer(Modifier.width(14.dp))
@@ -2484,20 +2526,36 @@ private fun CalendarDayOverlay(
     onItemSelected: (MediaItem) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val firstFocusRequester = remember(date, entries) { FocusRequester() }
+    LaunchedEffect(date, entries) {
+        withFrameNanos { }
+        firstFocusRequester.requestFocus()
+    }
     Box(Modifier.fillMaxSize().background(midnight.copy(alpha = .84f)), contentAlignment = Alignment.Center) {
         Column(Modifier.width(720.dp).clip(RoundedCornerShape(22.dp)).background(Color(0xFF15121C)).border(1.dp, palette.accent.copy(alpha = .65f), RoundedCornerShape(22.dp)).padding(30.dp)) {
             Text(formatRelayDate(date, dateFormat), color = ivory, fontSize = 27.sp, fontWeight = FontWeight.Light)
             Spacer(Modifier.height(8.dp))
             Text(if (entries.size == 1) "New episode or premiere" else "${entries.size} shows to watch", color = muted, fontSize = 15.sp)
             Spacer(Modifier.height(24.dp))
-            entries.forEach { entry ->
-                ActionButton("${entry.item.showTitle ?: entry.item.title}  ·  ${entry.item.episodeInfo ?: "Premiere"}", palette, primary = false) {
+            entries.forEachIndexed { index, entry ->
+                ActionButton(
+                    "${entry.item.showTitle ?: entry.item.title}  ·  ${entry.item.episodeInfo ?: "Premiere"}",
+                    palette,
+                    primary = false,
+                    focusRequester = if (index == 0) firstFocusRequester else null
+                ) {
                     onItemSelected(entry.item)
                 }
                 Spacer(Modifier.height(10.dp))
             }
             Spacer(Modifier.height(6.dp))
-            ActionButton("Close", palette, primary = true, onClick = onDismiss)
+            ActionButton(
+                "Close",
+                palette,
+                primary = true,
+                focusRequester = if (entries.isEmpty()) firstFocusRequester else null,
+                onClick = onDismiss
+            )
         }
     }
 }
@@ -2510,10 +2568,35 @@ private fun SearchScreen(
     onItemSelected: (MediaItem) -> Unit
 ) {
     val context = LocalContext.current
+    val keyboardController = LocalSoftwareKeyboardController.current
     var query by remember { mutableStateOf("") }
     var results by remember { mutableStateOf(emptyList<MediaItem>()) }
     var loading by remember { mutableStateOf(false) }
     var searchProvider by remember { mutableStateOf(providers.firstOrNull { it == Provider.STREMIO } ?: providers.firstOrNull() ?: Provider.NUVIO) }
+    val backFocusRequester = remember { FocusRequester() }
+    val providerFocusRequester = remember { FocusRequester() }
+    val searchFocusRequester = remember { FocusRequester() }
+    val resultFocusRequester = remember { FocusRequester() }
+    val handoffFocusRequester = remember { FocusRequester() }
+    val appFocusRequester = remember { FocusRequester() }
+    val providerSelectorState = rememberScrollState()
+    val searchScreenState = rememberScrollState()
+    val sortedProviders = remember(providers) { providers.sortedBy { it.label } }
+    val hasProviders = sortedProviders.isNotEmpty()
+    val installedApps = remember { InstalledApps.discover(context).filterNot { ProviderHandoff.isProviderPackage(it.packageName) }.take(6) }
+    val hasResults = searchProvider == Provider.NUVIO && results.isNotEmpty()
+    val hasHandoff = query.isNotBlank()
+    val hasApps = installedApps.isNotEmpty()
+    val searchDownRequester = when {
+        hasResults -> resultFocusRequester
+        hasHandoff -> handoffFocusRequester
+        hasApps -> appFocusRequester
+        else -> null
+    }
+    LaunchedEffect(Unit) {
+        withFrameNanos { }
+        searchFocusRequester.requestFocus()
+    }
     LaunchedEffect(query, searchProvider) {
         if (query.trim().length < 2) {
             results = emptyList()
@@ -2526,43 +2609,86 @@ private fun SearchScreen(
         loading = false
     }
     BackHandler(onBack = onBackHome)
-    Column(Modifier.fillMaxSize().padding(horizontal = 76.dp, vertical = 42.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(searchScreenState).padding(horizontal = 76.dp, vertical = 42.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Search", color = ivory, fontSize = 38.sp, fontWeight = FontWeight.Light)
             Spacer(Modifier.width(18.dp))
             Text("Across your connected media", color = muted, fontSize = 16.sp)
             Spacer(Modifier.weight(1f))
-            ActionButton("‹  Back", palette, primary = false, onClick = onBackHome)
+            ActionButton(
+                "‹  Back",
+                palette,
+                primary = false,
+                focusRequester = backFocusRequester,
+                downFocusRequester = if (hasProviders) providerFocusRequester else searchFocusRequester,
+                onClick = onBackHome
+            )
         }
         Spacer(Modifier.height(20.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(
+            Modifier.fillMaxWidth().horizontalScroll(providerSelectorState),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
             Text("Search in:", color = muted, fontSize = 15.sp)
-            providers.sortedBy { it.label }.forEach { provider ->
+            sortedProviders.forEach { provider ->
                 ActionButton(
                     provider.label,
                     palette.copy(accent = provider.accent),
-                    primary = searchProvider == provider
+                    primary = searchProvider == provider,
+                    focusRequester = if (provider == sortedProviders.firstOrNull()) providerFocusRequester else null,
+                    upFocusRequester = backFocusRequester,
+                    downFocusRequester = searchFocusRequester
                 ) {
                     searchProvider = provider
                 }
             }
         }
         Spacer(Modifier.height(18.dp))
-        OutlinedTextField(
-            value = query,
-            onValueChange = { query = it },
-            singleLine = true,
-            label = { Text("Search movies, series, and videos in ${searchProvider.label}") },
-            textStyle = androidx.compose.ui.text.TextStyle(color = ivory, fontSize = 20.sp),
-            modifier = Modifier.fillMaxWidth().height(70.dp),
-            colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = searchProvider.accent,
-                unfocusedBorderColor = Color(0xFF3C4049),
-                focusedLabelColor = searchProvider.accent,
-                unfocusedLabelColor = muted,
-                cursorColor = searchProvider.accent
+        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterStart) {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                singleLine = true,
+                label = { Text("Search ${searchProvider.label}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                textStyle = androidx.compose.ui.text.TextStyle(color = ivory, fontSize = 20.sp),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                keyboardActions = KeyboardActions(onSearch = {
+                    keyboardController?.hide()
+                    searchDownRequester?.requestFocus()
+                }),
+                modifier = Modifier
+                    .widthIn(max = 960.dp)
+                    .fillMaxWidth()
+                    .heightIn(min = 74.dp)
+                    .focusRequester(searchFocusRequester)
+                    .then(
+                        if (searchDownRequester != null) Modifier.focusProperties {
+                            up = if (hasProviders) providerFocusRequester else backFocusRequester
+                            down = searchDownRequester
+                        } else Modifier.focusProperties { up = if (hasProviders) providerFocusRequester else backFocusRequester }
+                    )
+                    .onPreviewKeyEvent { event ->
+                        val keyCode = event.nativeKeyEvent.keyCode
+                        if (event.nativeKeyEvent.action == KeyEvent.ACTION_DOWN && keyCode == KeyEvent.KEYCODE_DPAD_DOWN && searchDownRequester != null) {
+                            searchDownRequester.requestFocus()
+                            true
+                        } else if (event.nativeKeyEvent.action == KeyEvent.ACTION_DOWN && keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                            (if (hasProviders) providerFocusRequester else backFocusRequester).requestFocus()
+                            true
+                        } else {
+                            false
+                        }
+                    },
+                colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = searchProvider.accent,
+                    unfocusedBorderColor = Color(0xFF3C4049),
+                    focusedLabelColor = searchProvider.accent,
+                    unfocusedLabelColor = muted,
+                    cursorColor = searchProvider.accent
+                )
             )
-        )
+        }
         Spacer(Modifier.height(24.dp))
         Text(if (query.isBlank()) "Start typing to search ${searchProvider.label}" else "Results for “$query”", color = ivory, fontSize = 21.sp, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(13.dp))
@@ -2582,7 +2708,13 @@ private fun SearchScreen(
         } else {
             LazyRow(horizontalArrangement = Arrangement.spacedBy(15.dp)) {
                 items(results.size) { index ->
-                    MediaCard(results[index], palette, poster = true, onClick = { onItemSelected(results[index]) }) { }
+                    MediaCard(
+                        results[index], palette, poster = true,
+                        focusRequester = if (index == 0) resultFocusRequester else null,
+                        upFocusRequester = searchFocusRequester,
+                        downFocusRequester = if (hasHandoff) handoffFocusRequester else if (hasApps) appFocusRequester else null,
+                        onClick = { onItemSelected(results[index]) }
+                    ) { }
                 }
             }
         }
@@ -2591,17 +2723,28 @@ private fun SearchScreen(
             ActionButton(
                 "Search “$query” in ${searchProvider.label}",
                 palette.copy(accent = searchProvider.accent),
-                primary = false
+                primary = false,
+                focusRequester = handoffFocusRequester,
+                upFocusRequester = if (hasResults) resultFocusRequester else searchFocusRequester,
+                downFocusRequester = if (hasApps) appFocusRequester else null
             ) { ProviderHandoff.search(context, searchProvider, query) }
         }
         Spacer(Modifier.height(30.dp))
         Text("Apps", color = ivory, fontSize = 21.sp, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(13.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(13.dp)) {
-            InstalledApps.discover(context)
-                .filterNot { ProviderHandoff.isProviderPackage(it.packageName) }
-                .take(6)
-                .forEach { app -> AppTile(app.label, palette) { InstalledApps.launch(context, app) } }
+        LazyRow(
+            horizontalArrangement = Arrangement.spacedBy(13.dp),
+            contentPadding = PaddingValues(end = 16.dp)
+        ) {
+            items(installedApps.size) { index ->
+                val app = installedApps[index]
+                AppTile(
+                    app.label,
+                    palette,
+                    focusRequester = if (index == 0) appFocusRequester else null,
+                    upFocusRequester = if (hasHandoff) handoffFocusRequester else if (hasResults) resultFocusRequester else searchFocusRequester
+                ) { InstalledApps.launch(context, app) }
+            }
         }
     }
 }
@@ -2611,12 +2754,14 @@ private fun AppTile(
     label: String,
     palette: RelayPalette,
     focusRequester: FocusRequester? = null,
+    upFocusRequester: FocusRequester? = null,
     onClick: () -> Unit = {}
 ) {
     val source = remember { MutableInteractionSource() }
     val focused by source.collectIsFocusedAsState()
     Box(
         modifier = (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .then(if (upFocusRequester != null) Modifier.focusProperties { up = upFocusRequester } else Modifier)
             .size(132.dp, 86.dp).clip(RoundedCornerShape(13.dp))
             .background(Color(0xFF171A20))
             .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color(0xFF333740), RoundedCornerShape(13.dp))
@@ -2712,15 +2857,29 @@ private fun SettingsScreen(
     // A selected Settings category can reuse this screen while its old list offset is still
     // remembered. Reset it before handing focus to the newly-selected content so its heading
     // is never left above the rounded panel.
+    val backHomeFocusRequester = remember { FocusRequester() }
+    val pageNavigationFocusRequesters = remember {
+        SettingsPage.entries.associateWith { FocusRequester() }
+    }
+    val pageContentFocusRequester = remember(page) { FocusRequester() }
     LaunchedEffect(page) {
         settingsContentState.scrollTo(0)
+        withFrameNanos { }
+        pageContentFocusRequester.requestFocus()
     }
     BackHandler(onBack = onBackHome)
     Column(Modifier.fillMaxSize().padding(horizontal = 58.dp, vertical = 42.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Settings", color = ivory, fontSize = 34.sp, fontWeight = FontWeight.Light)
             Spacer(Modifier.weight(1f))
-            ActionButton("Back to Home", palette, primary = false, onClick = onBackHome)
+            ActionButton(
+                "Back to Home",
+                palette,
+                primary = false,
+                focusRequester = backHomeFocusRequester,
+                downFocusRequester = pageNavigationFocusRequesters[page],
+                onClick = onBackHome
+            )
         }
         Spacer(Modifier.height(24.dp))
         Row(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
@@ -2730,7 +2889,14 @@ private fun SettingsScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 SettingsPage.entries.forEach { destination ->
-                    SettingsNavigationItem(destination.label, page == destination, palette) { page = destination }
+                    SettingsNavigationItem(
+                        label = destination.label,
+                        selected = page == destination,
+                        palette = palette,
+                        focusRequester = pageNavigationFocusRequesters[destination],
+                        upFocusRequester = if (destination == SettingsPage.entries.first()) backHomeFocusRequester else null,
+                        rightFocusRequester = if (destination == page) pageContentFocusRequester else null
+                    ) { page = destination }
                 }
             }
             Column(
@@ -2751,7 +2917,10 @@ private fun SettingsScreen(
                                     else -> "Connected · $nuvioItemCount Continue Watching item${if (nuvioItemCount == 1) "" else "s"} available"
                                 },
                                 healthy = nuvioConnected && nuvioSyncError == null,
-                                palette = palette.copy(accent = Provider.NUVIO.accent)
+                                palette = palette.copy(accent = Provider.NUVIO.accent),
+                                focusRequester = pageContentFocusRequester,
+                                upFocusRequester = backHomeFocusRequester,
+                                leftFocusRequester = pageNavigationFocusRequesters[page]
                             ) {
                                 if (nuvioConnected) onRefreshNuvio() else onManageProvider(Provider.NUVIO)
                             }
@@ -2782,7 +2951,7 @@ private fun SettingsScreen(
                             Text("Orbital and Violet keep Relay’s built-in palettes. Automatic follows the TV wallpaper when Material You is available.", color = muted, fontSize = 15.sp, lineHeight = 21.sp)
                             Spacer(Modifier.height(14.dp))
                             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                RelayAppearance.entries.forEach { option ->
+                                RelayAppearance.entries.forEachIndexed { index, option ->
                                     ActionButton(
                                         option.label,
                                         palette.copy(accent = if (option == RelayAppearance.AUTOMATIC) palette.accent else when (option) {
@@ -2790,7 +2959,10 @@ private fun SettingsScreen(
                                             RelayAppearance.VIOLET -> violetPalette.accent
                                             RelayAppearance.AUTOMATIC -> palette.accent
                                         }),
-                                        primary = appearance == option
+                                        primary = appearance == option,
+                                        focusRequester = if (index == 0) pageContentFocusRequester else null,
+                                        upFocusRequester = if (index == 0) backHomeFocusRequester else null,
+                                        leftFocusRequester = if (index == 0) pageNavigationFocusRequesters[page] else null
                                     ) { onAppearanceChanged(option) }
                                 }
                             }
@@ -2808,7 +2980,7 @@ private fun SettingsScreen(
                         SettingsPage.PROVIDERS -> {
                             SettingsSectionTitle("Media providers", "Connect services here, then choose which ones appear in Relay's Home navigation.")
                             Spacer(Modifier.height(22.dp))
-                            Provider.values().forEach { provider ->
+                            Provider.values().forEachIndexed { providerIndex, provider ->
                                 val connected = provider in providers
                                 Column(
                                     Modifier.fillMaxWidth().clip(RoundedCornerShape(15.dp)).background(Color(0xFF171A20))
@@ -2823,7 +2995,14 @@ private fun SettingsScreen(
                                     }
                                     Spacer(Modifier.height(15.dp))
                                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                        ActionButton(if (connected) "Hide from Home" else "Show on Home", palette.copy(accent = provider.accent), primary = connected) { onProviderToggle(provider) }
+                                        ActionButton(
+                                            if (connected) "Hide from Home" else "Show on Home",
+                                            palette.copy(accent = provider.accent),
+                                            primary = connected,
+                                            focusRequester = if (providerIndex == 0) pageContentFocusRequester else null,
+                                            upFocusRequester = if (providerIndex == 0) backHomeFocusRequester else null,
+                                            leftFocusRequester = if (providerIndex == 0) pageNavigationFocusRequesters[page] else null
+                                        ) { onProviderToggle(provider) }
                                         ActionButton(if (provider == Provider.NUVIO && nuvioConnected) "Manage connection" else "Connect", palette.copy(accent = provider.accent), primary = false) { onManageProvider(provider) }
                                     }
                                     Spacer(Modifier.height(18.dp))
@@ -2871,7 +3050,14 @@ private fun SettingsScreen(
                             }
                             Spacer(Modifier.height(20.dp))
                             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                ActionButton("Choose picture", palette, primary = true) { profileImagePicker.launch(arrayOf("image/*")) }
+                                ActionButton(
+                                    "Choose picture",
+                                    palette,
+                                    primary = true,
+                                    focusRequester = pageContentFocusRequester,
+                                    upFocusRequester = backHomeFocusRequester,
+                                    leftFocusRequester = pageNavigationFocusRequesters[page]
+                                ) { profileImagePicker.launch(arrayOf("image/*")) }
                                 if (profileImageUri != null) {
                                     ActionButton("Remove picture", palette, primary = false) { onProfileImageChanged(null) }
                                 }
@@ -2916,7 +3102,7 @@ private fun SettingsScreen(
                                 Spacer(Modifier.height(8.dp))
                                 Text("Choose which subscribed creators appear in Relay. This never changes your YouTube subscriptions.", color = muted, fontSize = 15.sp, lineHeight = 21.sp)
                                 Spacer(Modifier.height(14.dp))
-                                smartTubeChannels.forEach { (channelId, channelName) ->
+                                smartTubeChannels.forEachIndexed { channelIndex, (channelId, channelName) ->
                                     val visible = channelId !in hiddenSmartTubeChannels
                                     Row(
                                         Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFF171A20))
@@ -2925,7 +3111,14 @@ private fun SettingsScreen(
                                     ) {
                                         Text(channelName, color = ivory, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                                         Spacer(Modifier.width(12.dp))
-                                        ActionButton(if (visible) "Showing" else "Hidden", palette.copy(accent = Provider.SMARTTUBE.accent), primary = visible) {
+                                        ActionButton(
+                                            if (visible) "Showing" else "Hidden",
+                                            palette.copy(accent = Provider.SMARTTUBE.accent),
+                                            primary = visible,
+                                            focusRequester = if (channelIndex == 0) pageContentFocusRequester else null,
+                                            upFocusRequester = if (channelIndex == 0) backHomeFocusRequester else null,
+                                            leftFocusRequester = if (channelIndex == 0) pageNavigationFocusRequesters[page] else null
+                                        ) {
                                             onSmartTubeChannelVisible(channelId, !visible)
                                         }
                                     }
@@ -2934,6 +3127,16 @@ private fun SettingsScreen(
                             } else {
                                 Spacer(Modifier.height(24.dp))
                                 Text("No RelayTube subscriptions found yet. Subscriptions from RelayTube will appear here automatically.", color = muted, fontSize = 15.sp, lineHeight = 22.sp)
+                                Spacer(Modifier.height(16.dp))
+                                ActionButton(
+                                    "Open RelayTube settings",
+                                    palette.copy(accent = Provider.SMARTTUBE.accent),
+                                    primary = false,
+                                    focusRequester = pageContentFocusRequester,
+                                    upFocusRequester = backHomeFocusRequester,
+                                    leftFocusRequester = pageNavigationFocusRequesters[page],
+                                    onClick = { onManageProvider(Provider.SMARTTUBE) }
+                                )
                             }
                         }
                         SettingsPage.UPDATES -> {
@@ -2948,7 +3151,14 @@ private fun SettingsScreen(
                             Text("Beta builds receive newer Relay features first. Stable builds update only on tagged production releases.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
                             Spacer(Modifier.height(12.dp))
                             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                ActionButton("Stable", palette, primary = !includeBetaUpdates) {
+                                ActionButton(
+                                    "Stable",
+                                    palette,
+                                    primary = !includeBetaUpdates,
+                                    focusRequester = pageContentFocusRequester,
+                                    upFocusRequester = backHomeFocusRequester,
+                                    leftFocusRequester = pageNavigationFocusRequesters[page]
+                                ) {
                                     includeBetaUpdates = false
                                     RelayUpdateSettings.setIncludesBetas(context, false)
                                     availableRelease = null
@@ -3003,8 +3213,7 @@ private fun SettingsScreen(
                                             updateScope.launch {
                                                 RelayUpdater.download(context, release)
                                                     .onSuccess { apkFile ->
-                                                        updateMessage = "Starting installation…"
-                                                        RelayUpdater.install(context, apkFile)
+                                                        updateMessage = RelayUpdater.install(context, apkFile)
                                                     }
                                                     .onFailure { error -> updateMessage = error.message ?: "Download failed." }
                                                 updateWorking = false
@@ -3021,7 +3230,15 @@ private fun SettingsScreen(
                             Spacer(Modifier.height(7.dp))
                             Text("Works on TVs that honor Android's Home role. Some Google TV builds keep their stock launcher in control even after Relay is selected.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
                             Spacer(Modifier.height(12.dp))
-                            ActionButton("Open Android Home chooser", palette, primary = true, onClick = onRequestHome)
+                            ActionButton(
+                                "Open Android Home chooser",
+                                palette,
+                                primary = true,
+                                focusRequester = pageContentFocusRequester,
+                                upFocusRequester = backHomeFocusRequester,
+                                leftFocusRequester = pageNavigationFocusRequesters[page],
+                                onClick = onRequestHome
+                            )
                             Spacer(Modifier.height(24.dp))
                             Text("Simple auto-start", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
                             Spacer(Modifier.height(7.dp))
@@ -3129,11 +3346,16 @@ private fun SettingsScreen(
                         SettingsPage.SYSTEM -> {
                             SettingsSectionTitle("Android TV settings", "Open the device settings Android TV exposes to Relay. OEM-specific pages fall back to the main Settings screen.")
                             Spacer(Modifier.height(24.dp))
-                            systemSettingsEntries.chunked(3).forEach { row ->
+                            systemSettingsEntries.chunked(3).forEachIndexed { rowIndex, row ->
                                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                                     row.forEach { entry ->
                                         Box(Modifier.weight(1f)) {
-                                            SystemSettingsTile(entry, palette) { openSystemSettings(context, entry.action) }
+                                            SystemSettingsTile(
+                                                entry,
+                                                palette,
+                                                focusRequester = if (rowIndex == 0 && row.indexOf(entry) == 0) pageContentFocusRequester else null,
+                                                leftFocusRequester = if (rowIndex == 0 && row.indexOf(entry) == 0) pageNavigationFocusRequesters[page] else null
+                                            ) { openSystemSettings(context, entry.action) }
                                         }
                                     }
                                     repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
@@ -3148,12 +3370,20 @@ private fun SettingsScreen(
 }
 
 @Composable
-private fun SystemSettingsTile(entry: SystemSettingsEntry, palette: RelayPalette, onClick: () -> Unit) {
+private fun SystemSettingsTile(
+    entry: SystemSettingsEntry,
+    palette: RelayPalette,
+    focusRequester: FocusRequester? = null,
+    leftFocusRequester: FocusRequester? = null,
+    onClick: () -> Unit
+) {
     val source = remember { MutableInteractionSource() }
     val focused by source.collectIsFocusedAsState()
     val scale by animateFloatAsState(if (focused) 1.035f else 1f, label = "system settings tile")
     Column(
-        Modifier.fillMaxWidth().aspectRatio(1.38f).scale(scale).clip(RoundedCornerShape(16.dp))
+        (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .then(if (leftFocusRequester != null) Modifier.focusProperties { left = leftFocusRequester } else Modifier)
+            .fillMaxWidth().aspectRatio(1.38f).scale(scale).clip(RoundedCornerShape(16.dp))
             .background(if (focused) palette.accent.copy(alpha = .20f) else Color(0xFF171A20))
             .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .09f), RoundedCornerShape(16.dp))
             .clickable(interactionSource = source, indication = null, onClick = onClick)
@@ -3171,11 +3401,24 @@ private fun SystemSettingsTile(entry: SystemSettingsEntry, palette: RelayPalette
 }
 
 @Composable
-private fun SettingsNavigationItem(label: String, selected: Boolean, palette: RelayPalette, onClick: () -> Unit) {
+private fun SettingsNavigationItem(
+    label: String,
+    selected: Boolean,
+    palette: RelayPalette,
+    focusRequester: FocusRequester? = null,
+    upFocusRequester: FocusRequester? = null,
+    rightFocusRequester: FocusRequester? = null,
+    onClick: () -> Unit
+) {
     val source = remember { MutableInteractionSource() }
     val focused by source.collectIsFocusedAsState()
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+        (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .then(if (upFocusRequester != null || rightFocusRequester != null) Modifier.focusProperties {
+                if (upFocusRequester != null) up = upFocusRequester
+                if (rightFocusRequester != null) right = rightFocusRequester
+            } else Modifier)
+            .fillMaxWidth().clip(RoundedCornerShape(12.dp))
             .background(if (selected || focused) palette.accent.copy(alpha = .20f) else Color.Transparent)
             .border(if (focused) 2.dp else 0.dp, if (focused) palette.accent else Color.Transparent, RoundedCornerShape(12.dp))
             .clickable(interactionSource = source, indication = null, onClick = onClick)
@@ -3201,6 +3444,9 @@ private fun StatusCard(
     detail: String,
     healthy: Boolean,
     palette: RelayPalette,
+    focusRequester: FocusRequester? = null,
+    upFocusRequester: FocusRequester? = null,
+    leftFocusRequester: FocusRequester? = null,
     onClick: () -> Unit
 ) {
     Column(
@@ -3215,7 +3461,15 @@ private fun StatusCard(
         Spacer(Modifier.height(8.dp))
         Text(detail, color = muted, fontSize = 14.sp, lineHeight = 20.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
         Spacer(Modifier.height(14.dp))
-        ActionButton(if (title == "Nuvio" && healthy) "Refresh" else "Open", palette, primary = false, onClick = onClick)
+        ActionButton(
+            if (title == "Nuvio" && healthy) "Refresh" else "Open",
+            palette,
+            primary = false,
+            focusRequester = focusRequester,
+            upFocusRequester = upFocusRequester,
+            leftFocusRequester = leftFocusRequester,
+            onClick = onClick
+        )
     }
 }
 
@@ -3247,8 +3501,11 @@ private fun ProviderHubScreen(
     onDisconnectNuvio: () -> Unit
 ) {
     val context = LocalContext.current
-    val primaryActionFocusRequester = remember { FocusRequester() }
-    LaunchedEffect(provider) { primaryActionFocusRequester.requestFocus() }
+    val firstActionFocusRequester = remember(provider, nuvioConnected, nuvioProfiles.size) { FocusRequester() }
+    LaunchedEffect(provider, nuvioConnected, nuvioProfiles.size) {
+        withFrameNanos { }
+        firstActionFocusRequester.requestFocus()
+    }
     Column(Modifier.fillMaxSize().padding(64.dp), verticalArrangement = Arrangement.Center) {
         Text(provider.label, color = ivory, fontSize = 42.sp, fontWeight = FontWeight.Light)
         Spacer(Modifier.height(12.dp))
@@ -3271,13 +3528,13 @@ private fun ProviderHubScreen(
         )
         Spacer(Modifier.height(30.dp))
         if (provider == Provider.STREMIO) {
-            ActionButton("Open Stremio", palette.copy(accent = provider.accent), primary = true, focusRequester = primaryActionFocusRequester) {
+            ActionButton("Open Stremio", palette.copy(accent = provider.accent), primary = true, focusRequester = firstActionFocusRequester) {
                 ProviderHandoff.openStremioBoard(context)
             }
             Spacer(Modifier.height(12.dp))
         }
         if (provider == Provider.SMARTTUBE) {
-            ActionButton("Open SmartTube", palette.copy(accent = provider.accent), primary = true, focusRequester = primaryActionFocusRequester) {
+            ActionButton("Open SmartTube", palette.copy(accent = provider.accent), primary = true, focusRequester = firstActionFocusRequester) {
                 ProviderHandoff.openSmartTube(context)
             }
             Spacer(Modifier.height(12.dp))
@@ -3288,22 +3545,39 @@ private fun ProviderHubScreen(
                 Text("Relay profile", color = ivory, fontSize = 15.sp)
                 Spacer(Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    nuvioProfiles.forEach { profile ->
-                        ActionButton(profile.name, palette, primary = profile.index == activeNuvioProfile) { onNuvioProfileSelected(profile.index) }
+                    nuvioProfiles.forEachIndexed { index, profile ->
+                        ActionButton(
+                            profile.name,
+                            palette,
+                            primary = profile.index == activeNuvioProfile,
+                            focusRequester = if (index == 0) firstActionFocusRequester else null
+                        ) { onNuvioProfileSelected(profile.index) }
                     }
                 }
                 Spacer(Modifier.height(14.dp))
             }
             if (!nuvioConnected) {
-                ActionButton("Connect Nuvio data", palette.copy(accent = provider.accent), primary = true, onClick = onConnectNuvio)
+                ActionButton(
+                    "Connect Nuvio data",
+                    palette.copy(accent = provider.accent),
+                    primary = true,
+                    focusRequester = if (nuvioProfiles.isEmpty()) firstActionFocusRequester else null,
+                    onClick = onConnectNuvio
+                )
                 Spacer(Modifier.height(12.dp))
             } else {
-                ActionButton(if (nuvioSyncing) "Refreshing Nuvio…" else "Refresh Nuvio", palette.copy(accent = provider.accent), primary = false, onClick = onRefreshNuvio)
+                ActionButton(
+                    if (nuvioSyncing) "Refreshing Nuvio…" else "Refresh Nuvio",
+                    palette.copy(accent = provider.accent),
+                    primary = false,
+                    focusRequester = if (nuvioProfiles.isEmpty()) firstActionFocusRequester else null,
+                    onClick = onRefreshNuvio
+                )
                 Spacer(Modifier.height(12.dp))
                 ActionButton("Disconnect Nuvio", palette, primary = false, onClick = onDisconnectNuvio)
                 Spacer(Modifier.height(12.dp))
             }
-            ActionButton("Open Nuvio", palette.copy(accent = provider.accent), primary = true, focusRequester = primaryActionFocusRequester) {
+            ActionButton("Open Nuvio", palette.copy(accent = provider.accent), primary = true) {
                 ProviderHandoff.openNuvio(context)
             }
             Spacer(Modifier.height(12.dp))
@@ -3320,6 +3594,10 @@ private fun NuvioConnectScreen(
     onConnected: (NuvioSession) -> Unit,
     onBack: () -> Unit
 ) {
+    val emailFocusRequester = remember { FocusRequester() }
+    val passwordFocusRequester = remember { FocusRequester() }
+    val connectFocusRequester = remember { FocusRequester() }
+    val backFocusRequester = remember { FocusRequester() }
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var status by remember { mutableStateOf<String?>(null) }
@@ -3340,6 +3618,10 @@ private fun NuvioConnectScreen(
         }
     }
     BackHandler(onBack = onBack)
+    LaunchedEffect(reauthRequired) {
+        withFrameNanos { }
+        emailFocusRequester.requestFocus()
+    }
     Column(Modifier.fillMaxSize().padding(76.dp), verticalArrangement = Arrangement.Center) {
         Text("Connect Nuvio", color = ivory, fontSize = 42.sp, fontWeight = FontWeight.Light)
         Spacer(Modifier.height(12.dp))
@@ -3353,7 +3635,14 @@ private fun NuvioConnectScreen(
             fontSize = 18.sp
         )
         Spacer(Modifier.height(28.dp))
-        OutlinedTextField(email, { email = it }, label = { Text("Nuvio email") }, singleLine = true, modifier = Modifier.width(520.dp), textStyle = androidx.compose.ui.text.TextStyle(color = ivory))
+        OutlinedTextField(
+            email,
+            { email = it },
+            label = { Text("Nuvio email") },
+            singleLine = true,
+            modifier = Modifier.width(520.dp).focusRequester(emailFocusRequester).focusProperties { down = passwordFocusRequester },
+            textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
+        )
         Spacer(Modifier.height(12.dp))
         OutlinedTextField(
             value = password,
@@ -3361,11 +3650,21 @@ private fun NuvioConnectScreen(
             label = { Text("Nuvio password") },
             singleLine = true,
             visualTransformation = PasswordVisualTransformation(),
-            modifier = Modifier.width(520.dp),
+            modifier = Modifier.width(520.dp).focusRequester(passwordFocusRequester).focusProperties {
+                up = emailFocusRequester
+                down = connectFocusRequester
+            },
             textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
         )
         Spacer(Modifier.height(18.dp))
-        ActionButton(if (working) "Connecting…" else if (reauthRequired) "Sign in again" else "Connect securely", palette, primary = true) {
+        ActionButton(
+            if (working) "Connecting…" else if (reauthRequired) "Sign in again" else "Connect securely",
+            palette,
+            primary = true,
+            focusRequester = connectFocusRequester,
+            upFocusRequester = passwordFocusRequester,
+            downFocusRequester = backFocusRequester
+        ) {
             if (!working && email.isNotBlank() && password.isNotBlank()) {
                 working = true
                 status = null
@@ -3374,7 +3673,14 @@ private fun NuvioConnectScreen(
         }
         status?.let { Text(it, color = muted, modifier = Modifier.padding(top = 12.dp)) }
         Spacer(Modifier.height(12.dp))
-        ActionButton("Back", palette, primary = false, onClick = onBack)
+        ActionButton(
+            "Back",
+            palette,
+            primary = false,
+            focusRequester = backFocusRequester,
+            upFocusRequester = connectFocusRequester,
+            onClick = onBack
+        )
     }
 }
 

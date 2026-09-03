@@ -50,18 +50,57 @@ jobs:
           VERSION_CODE: ${{ inputs.version_code }}
           VERSION_NAME: ${{ inputs.version_name }}
         run: |
-          test "$VERSION_CODE" -gt 2
-          case "$VERSION_NAME" in
-            *[!0-9A-Za-z._-]*) exit 1 ;;
-          esac
+          set -euo pipefail
+          [[ "$VERSION_CODE" =~ ^[1-9][0-9]{0,9}$ ]]
+          (( VERSION_CODE <= 2100000000 ))
           case "$CHANNEL" in
             alpha)
-              case "$VERSION_NAME" in *-alpha.*) ;; *) exit 1 ;; esac
+              [[ "$VERSION_NAME" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-alpha\.([1-9][0-9]*)$ ]]
               ;;
             beta)
-              case "$VERSION_NAME" in *-beta.*) ;; *) exit 1 ;; esac
+              [[ "$VERSION_NAME" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-beta\.([1-9][0-9]*)$ ]]
+              ;;
+            stable)
+              [[ "$VERSION_NAME" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+              ;;
+            *)
+              echo "Unsupported release channel: $CHANNEL" >&2
+              exit 1
               ;;
           esac
+
+      - name: Validate version code against published APKs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_CODE: ${{ inputs.version_code }}
+        run: |
+          set -euo pipefail
+          AAPT2="$(find "$ANDROID_HOME/build-tools" -name aapt2 -type f -perm -111 | sort -V | tail -1)"
+          test -x "$AAPT2"
+          URLS_FILE="$RUNNER_TEMP/relay-published-apk-urls.txt"
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | select(.draft == false) | .assets[]? | select((.name // "" | ascii_downcase | endswith(".apk")) and ((.browser_download_url // "") | startswith("https://"))) | .browser_download_url' \
+            > "$URLS_FILE"
+          highest_code=0
+          while IFS= read -r asset_url; do
+            [[ -n "$asset_url" ]] || continue
+            asset_file="$RUNNER_TEMP/relay-published-$RANDOM.apk"
+            if ! curl --fail --location --silent --show-error --connect-timeout 15 --max-time 120 \
+              --max-filesize 209715200 --output "$asset_file" "$asset_url"; then
+              echo "Warning: could not inspect published asset $asset_url; skipping it." >&2
+              continue
+            fi
+            badging="$("$AAPT2" dump badging "$asset_file" 2>/dev/null || true)"
+            code="$(printf '%s\n' "$badging" | sed -n "s/.*versionCode:'\\([0-9][0-9]*\\)'.*/\\1/p" | head -1)"
+            if [[ "$code" =~ ^[0-9]+$ ]] && (( code > highest_code )); then
+              highest_code="$code"
+            fi
+            rm -f "$asset_file"
+          done < "$URLS_FILE"
+          (( VERSION_CODE > highest_code )) || {
+            echo "Version code $VERSION_CODE must be greater than published APK version code $highest_code." >&2
+            exit 1
+          }
 
       - name: Configure release signing
         env:
@@ -71,12 +110,18 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
         run: |
+          set -euo pipefail
           test -n "$SIGNING_KEY"
           test -n "$STORE_PASSWORD"
           test -n "$KEY_ALIAS"
           test -n "$KEY_PASSWORD"
           test -n "$TMDB_API_KEY"
           printf '%s' "$SIGNING_KEY" | base64 --decode > "$GITHUB_WORKSPACE/relay-home-release.p12"
+          chmod 600 "$GITHUB_WORKSPACE/relay-home-release.p12"
+          test -s "$GITHUB_WORKSPACE/relay-home-release.p12"
+          keytool -list -noprompt -storetype PKCS12 \
+            -keystore "$GITHUB_WORKSPACE/relay-home-release.p12" \
+            -storepass "$STORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null
           {
             echo "sdk.dir=$ANDROID_HOME"
             echo "relay.signing.storeFile=relay-home-release.p12"
@@ -91,13 +136,20 @@ jobs:
           RELAY_VERSION_CODE: ${{ inputs.version_code }}
           RELAY_VERSION_NAME: ${{ inputs.version_name }}
         run: |
+          set -euo pipefail
           chmod +x gradlew
           ./gradlew :app:lintRelease :app:testReleaseUnitTest :app:assembleRelease
           mkdir -p release-assets
-          cp app/build/outputs/apk/release/app-release.apk "release-assets/relay-home-${RELAY_VERSION_NAME}.apk"
+          APK="app/build/outputs/apk/release/app-release.apk"
+          test -s "$APK"
+          cp "$APK" "release-assets/relay-home-${RELAY_VERSION_NAME}.apk"
           APKSIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)"
+          AAPT2="$(find "$ANDROID_HOME/build-tools" -name aapt2 -type f -perm -111 | sort -V | tail -1)"
           test -x "$APKSIGNER"
+          test -x "$AAPT2"
           "$APKSIGNER" verify --verbose --print-certs "release-assets/relay-home-${RELAY_VERSION_NAME}.apk"
+          badging="$("$AAPT2" dump badging "$APK" 2>/dev/null || true)"
+          printf '%s\n' "$badging" | grep -F "package: name='com.relayhome.launcher' versionCode='$RELAY_VERSION_CODE' versionName='$RELAY_VERSION_NAME'"
 
       - name: Publish GitHub release
         env:
@@ -106,7 +158,17 @@ jobs:
           VERSION_NAME: ${{ inputs.version_name }}
           RELEASE_NOTES: ${{ inputs.release_notes }}
         run: |
+          set -euo pipefail
+          [[ -n "${RELEASE_NOTES//[[:space:]]/}" ]]
           TAG_NAME="v${VERSION_NAME}"
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            echo "A GitHub release already exists for $TAG_NAME." >&2
+            exit 1
+          fi
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG_NAME}" >/dev/null 2>&1; then
+            echo "A Git tag already exists for $TAG_NAME." >&2
+            exit 1
+          fi
           if [ "$CHANNEL" = "alpha" ] || [ "$CHANNEL" = "beta" ]; then
             gh release create "$TAG_NAME" release-assets/* \
               --target "$GITHUB_SHA" \
@@ -121,3 +183,20 @@ jobs:
               --notes "$RELEASE_NOTES" \
               --latest
           fi
+
+      - name: Verify published release metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ inputs.channel }}
+          VERSION_NAME: ${{ inputs.version_name }}
+        run: |
+          set -euo pipefail
+          TAG_NAME="v${VERSION_NAME}"
+          release_json="$(gh release view "$TAG_NAME" --json tagName,isPrerelease,assets)"
+          printf '%s' "$release_json" | jq -e --arg tag "$TAG_NAME" '.tagName == $tag' >/dev/null
+          if [ "$CHANNEL" = "stable" ]; then
+            printf '%s' "$release_json" | jq -e '.isPrerelease == false' >/dev/null
+          else
+            printf '%s' "$release_json" | jq -e '.isPrerelease == true' >/dev/null
+          fi
+          printf '%s' "$release_json" | jq -e --arg asset "relay-home-${VERSION_NAME}.apk" '.assets | any(.[]; .name == $asset)' >/dev/null

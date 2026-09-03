@@ -32,6 +32,13 @@ Full RelayTube feeds still require the maintained RelayTube bridge and a
 compatible signing permission; stock SmartTube is limited to public media
 session/notification data.
 
+## v0.1.0-alpha.2 release notes
+
+Version code 8 fixes the TV search layout at narrow widths, adds deterministic
+first focus and scroll-to-top behavior across settings and provider pages, uses
+Google TV-style circular treatment for opaque legacy app artwork, and hardens
+GitHub alpha, beta, and stable update discovery and installation.
+
 Before publishing:
 
 1. Build and smoke-test both 1080p and 4K layouts.
