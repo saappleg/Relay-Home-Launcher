@@ -6,12 +6,38 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+val localProperties = Properties().apply {
+    val localFile = rootProject.file("local.properties")
+    if (localFile.exists()) localFile.inputStream().use { input -> load(input) }
+}
+
+fun configuredValue(propertyName: String, environmentName: String): String =
+    localProperties.getProperty(propertyName)?.takeIf { it.isNotBlank() }
+        ?: providers.environmentVariable(environmentName).orNull?.takeIf { it.isNotBlank() }.orEmpty()
+
+val releaseStoreFile = configuredValue("relay.signing.storeFile", "RELAY_SIGNING_STORE_FILE")
+val releaseStorePassword = configuredValue("relay.signing.storePassword", "RELAY_SIGNING_STORE_PASSWORD")
+val releaseKeyAlias = configuredValue("relay.signing.keyAlias", "RELAY_SIGNING_KEY_ALIAS")
+val releaseKeyPassword = configuredValue("relay.signing.keyPassword", "RELAY_SIGNING_KEY_PASSWORD")
+val releaseStoreType = configuredValue("relay.signing.storeType", "RELAY_SIGNING_STORE_TYPE")
+    .ifBlank { if (releaseStoreFile.endsWith(".p12", ignoreCase = true) || releaseStoreFile.endsWith(".pfx", ignoreCase = true)) "PKCS12" else "JKS" }
+val releaseSigningConfigured = listOf(
+    releaseStoreFile,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword
+).all { it.isNotBlank() }
+val relayTmdbApiKey = configuredValue("tmdb.apiKey", "RELAY_TMDB_API_KEY")
+val relayVersionCode = providers.environmentVariable("RELAY_VERSION_CODE").orNull?.toIntOrNull() ?: 11
+val relayVersionName = providers.environmentVariable("RELAY_VERSION_NAME").orNull?.takeIf { it.isNotBlank() }
+    ?: "0.1.0-alpha.5"
+
 // Never accidentally publish an unsigned (or debug-signed) release APK.
 tasks.configureEach {
     if (name.contains("Release", ignoreCase = true)) {
         doFirst {
             check(releaseSigningConfigured) {
-                "Release signing is not configured. Add relay.signing.* values to local.properties."
+                "Release signing is not configured. Add relay.signing.* values to local.properties or RELAY_SIGNING_* environment variables."
             }
             check(rootProject.file(releaseStoreFile).isFile) {
                 "Release keystore was not found at: $releaseStoreFile"
@@ -19,25 +45,6 @@ tasks.configureEach {
         }
     }
 }
-
-val localProperties = Properties().apply {
-    val localFile = rootProject.file("local.properties")
-    if (localFile.exists()) localFile.inputStream().use { input -> load(input) }
-}
-
-val releaseStoreFile = localProperties.getProperty("relay.signing.storeFile").orEmpty()
-val releaseStorePassword = localProperties.getProperty("relay.signing.storePassword").orEmpty()
-val releaseKeyAlias = localProperties.getProperty("relay.signing.keyAlias").orEmpty()
-val releaseKeyPassword = localProperties.getProperty("relay.signing.keyPassword").orEmpty()
-val releaseSigningConfigured = listOf(
-    releaseStoreFile,
-    releaseStorePassword,
-    releaseKeyAlias,
-    releaseKeyPassword
-).all { it.isNotBlank() }
-val relayVersionCode = providers.environmentVariable("RELAY_VERSION_CODE").orNull?.toIntOrNull() ?: 11
-val relayVersionName = providers.environmentVariable("RELAY_VERSION_NAME").orNull?.takeIf { it.isNotBlank() }
-    ?: "0.1.0-alpha.5"
 
 android {
     namespace = "com.relayhome.launcher"
@@ -49,7 +56,7 @@ android {
         targetSdk = 34
         versionCode = relayVersionCode
         versionName = relayVersionName
-        buildConfigField("String", "TMDB_API_KEY", "\"${localProperties.getProperty("tmdb.apiKey", "")}\"")
+        buildConfigField("String", "TMDB_API_KEY", "\"$relayTmdbApiKey\"")
     }
 
     buildFeatures { compose = true; buildConfig = true; aidl = true }
@@ -58,6 +65,7 @@ android {
         if (releaseSigningConfigured) {
             create("release") {
                 storeFile = rootProject.file(releaseStoreFile)
+                storeType = releaseStoreType
                 storePassword = releaseStorePassword
                 keyAlias = releaseKeyAlias
                 keyPassword = releaseKeyPassword

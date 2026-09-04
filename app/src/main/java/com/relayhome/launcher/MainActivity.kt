@@ -560,6 +560,7 @@ private fun RelayHomeApp() {
         tmdbRecommendations = emptyList()
         nuvioAuthRequired = true
         nuvioSyncError = "Your Nuvio session expired. Sign in again to reconnect your account."
+        activeProvider = Provider.NUVIO
         destination = Destination.NUVIO_CONNECT
     }
 
@@ -848,7 +849,10 @@ private fun RelayHomeApp() {
                     palette,
                     onBack = ::returnHome,
                     onOpenRelayTube = ::openRelayTube,
-                    onConnectNuvio = { destination = Destination.NUVIO_CONNECT },
+                    onConnectNuvio = {
+                        activeProvider = Provider.NUVIO
+                        destination = Destination.NUVIO_CONNECT
+                    },
                     nuvioConnected = nuvioSession != null,
                     nuvioSyncing = nuvioSyncing,
                     nuvioItemCount = nuvioMedia.size,
@@ -877,13 +881,17 @@ private fun RelayHomeApp() {
                         nuvioSession = it
                         nuvioAuthRequired = false
                         nuvioSyncError = null
+                        activeProvider = Provider.NUVIO
                         if (Provider.NUVIO !in enabledProviders) {
                             enabledProviders += Provider.NUVIO
                             ProviderSettingsStore.save(context, enabledProviders)
                         }
                         destination = Destination.PROVIDER
                     },
-                    onBack = { destination = Destination.PROVIDER }
+                    onBack = {
+                        activeProvider = Provider.NUVIO
+                        destination = Destination.PROVIDER
+                    }
                 )
             }
         }

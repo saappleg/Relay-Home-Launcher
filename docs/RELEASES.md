@@ -15,6 +15,12 @@ The **Publish Relay Home release** workflow requires these repository secrets:
 Use a version code larger than every prior APK. Never replace the signing key
 after the first signed beta.
 
+The workflow validates the requested alpha, beta, or stable name, refuses to
+continue when any previously published APK cannot be inspected, and checks
+that the built APK's SHA-256 signing certificate matches the configured
+keystore. It passes signing values to Gradle through ephemeral job environment
+variables; they are not written into `local.properties`.
+
 The initial `v0.1.0-beta.1` asset was debug-signed. Testers must uninstall that
 one build before installing the first permanently signed beta. Future in-app
 updates will then preserve app data normally.

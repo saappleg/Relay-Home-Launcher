@@ -3,6 +3,8 @@ package com.relayhome.launcher
 import android.content.ClipData
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
@@ -68,6 +70,11 @@ internal object RelayUpdater {
                     val tag = (release.opt("tag_name") as? String)?.trim().orEmpty()
                     if (tag.isBlank()) return@mapNotNull null
                     val version = parsedVersion(tag) ?: return@mapNotNull null
+                    // Do not trust GitHub's prerelease flag by itself. A malformed or
+                    // manually edited release must not make a prerelease visible in the
+                    // Stable channel, or hide a stable release from it.
+                    if (prerelease != (version.stage < STABLE_STAGE)) return@mapNotNull null
+                    if (!includePrereleases && version.stage < STABLE_STAGE) return@mapNotNull null
                     if (version <= current) return@mapNotNull null
 
                     val assets = release.optJSONArray("assets") ?: return@mapNotNull null
@@ -159,10 +166,19 @@ internal object RelayUpdater {
             check(candidate.length() in minimumApkBytes..maxApkBytes && isValidApk(candidate)) {
                 "The downloaded file is not a valid APK."
             }
-            val archive = context.packageManager.getPackageArchiveInfo(candidate.path, 0)
+            val packageInfoFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                PackageManager.GET_SIGNING_CERTIFICATES
+            } else {
+                @Suppress("DEPRECATION")
+                PackageManager.GET_SIGNATURES
+            }
+            val archive = context.packageManager.getPackageArchiveInfo(candidate.path, packageInfoFlags)
                 ?: error("The downloaded APK metadata could not be read.")
             check(archive.packageName == context.packageName) { "The downloaded APK is not a Relay Home update." }
-            val installed = context.packageManager.getPackageInfo(context.packageName, 0)
+            val installed = context.packageManager.getPackageInfo(context.packageName, packageInfoFlags)
+            check(hasMatchingSigner(installed, archive)) {
+                "The downloaded APK is signed with a different Relay Home certificate."
+            }
             val candidateVersionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) archive.longVersionCode else archive.versionCode.toLong()
             val installedVersionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) installed.longVersionCode else installed.versionCode.toLong()
             check(candidateVersionCode > installedVersionCode) { "The downloaded APK is not newer than this installation." }
@@ -215,6 +231,27 @@ internal object RelayUpdater {
             normalized.endsWith(".githubusercontent.com")
     }
 
+    private fun hasMatchingSigner(installed: PackageInfo, candidate: PackageInfo): Boolean {
+        val installedSignatures: Set<String>
+        val candidateSignatures: Set<String>
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            val installedSigningInfo = installed.signingInfo ?: return false
+            val candidateSigningInfo = candidate.signingInfo ?: return false
+            installedSignatures = installedSigningInfo.apkContentsSigners
+                .map { it.toCharsString() }.toSet()
+            candidateSignatures = candidateSigningInfo.apkContentsSigners
+                .map { it.toCharsString() }.toSet()
+        } else {
+            @Suppress("DEPRECATION")
+            val installedLegacySignatures = installed.signatures ?: return false
+            @Suppress("DEPRECATION")
+            val candidateLegacySignatures = candidate.signatures ?: return false
+            installedSignatures = installedLegacySignatures.map { it.toCharsString() }.toSet()
+            candidateSignatures = candidateLegacySignatures.map { it.toCharsString() }.toSet()
+        }
+        return installedSignatures.isNotEmpty() && installedSignatures == candidateSignatures
+    }
+
     private fun checkTrustedFinalUrl(connection: HttpURLConnection, apiOnly: Boolean = false) {
         val finalUrl = connection.url
         check(finalUrl.protocol.equals("https", ignoreCase = true)) { "The update redirect is not HTTPS." }
@@ -246,6 +283,8 @@ internal object RelayUpdater {
     private data class Version(val major: Int, val minor: Int, val patch: Int, val stage: Int, val stageNumber: Int) : Comparable<Version> {
         override fun compareTo(other: Version): Int = compareValuesBy(this, other, Version::major, Version::minor, Version::patch, Version::stage, Version::stageNumber)
     }
+
+    private const val STABLE_STAGE = 3
 
     private fun parsedVersion(value: String): Version? {
         val match = versionPattern.matchEntire(value.trim()) ?: return null

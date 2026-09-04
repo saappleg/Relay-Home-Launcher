@@ -14,7 +14,7 @@ Relay Home is an Android TV / Google TV media launcher. It is the discovery and 
 - Stremio board and search handoff through its public URI scheme.
 - TMDB-backed artwork, recommendations, episode metadata, and calendar data.
 - Weekly/monthly calendar, installed-app launcher, profile image overrides, provider limits, and paginated settings.
-- In-app GitHub Releases updater with Stable-only and Include-betas channels, signed APK download, and Android's standard install confirmation.
+- In-app GitHub Releases updater with Stable-only and Include-betas channels, trusted signed APK download, signer/package/version checks, and Android's standard install confirmation.
 
 ## Known beta limits
 
