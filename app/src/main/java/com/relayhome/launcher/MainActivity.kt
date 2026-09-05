@@ -2302,6 +2302,8 @@ private fun FavoriteAppCard(
     focusRequester: FocusRequester? = null,
     upFocusRequester: FocusRequester? = null,
     downFocusRequester: FocusRequester? = null,
+    leftFocusRequester: FocusRequester? = null,
+    rightFocusRequester: FocusRequester? = null,
     onClick: () -> Unit
 ) {
     val source = remember { MutableInteractionSource() }
@@ -2309,9 +2311,11 @@ private fun FavoriteAppCard(
     val scale = if (focused) 1.07f else 1f
     Column(
         (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-            .then(if (upFocusRequester != null || downFocusRequester != null) Modifier.focusProperties {
+            .then(if (upFocusRequester != null || downFocusRequester != null || leftFocusRequester != null || rightFocusRequester != null) Modifier.focusProperties {
                 if (upFocusRequester != null) up = upFocusRequester
                 if (downFocusRequester != null) down = downFocusRequester
+                if (leftFocusRequester != null) left = leftFocusRequester
+                if (rightFocusRequester != null) right = rightFocusRequester
             } else Modifier)
             .width(104.dp)
             .clickable(interactionSource = source, indication = null, onClick = onClick),
@@ -2384,12 +2388,21 @@ private fun AppsScreen(
     onBackHome: () -> Unit
 ) {
     val context = LocalContext.current
-    val apps = remember { InstalledApps.discover(context).sortedBy { it.label.lowercase() } }
+    val apps = remember { InstalledApps.discover(context) }
     val favoriteInstalledApps = remember(apps, favoriteApps) {
         apps.filter { it.packageName in favoriteApps }
     }
-    val firstAppFocusRequester = remember { FocusRequester() }
-    val firstFavoriteFocusRequester = remember { FocusRequester() }
+    // Keep a requester for every visible destination so D-pad moves follow the grid rather
+    // than relying on focus search, which is easily confused by the labels below each tile.
+    val appColumns = 5
+    val appFocusRequesters = remember(apps) {
+        apps.associate { it.packageName to FocusRequester() }
+    }
+    val favoriteFocusRequesters = remember(favoriteInstalledApps) {
+        favoriteInstalledApps.associate { it.packageName to FocusRequester() }
+    }
+    val firstAppFocusRequester = apps.firstOrNull()?.let { appFocusRequesters[it.packageName] }
+    val firstFavoriteFocusRequester = favoriteInstalledApps.firstOrNull()?.let { favoriteFocusRequesters[it.packageName] }
     val backFocusRequester = remember { FocusRequester() }
     val appsGridState = rememberLazyGridState()
     var activeMenuApp by remember { mutableStateOf<InstalledApp?>(null) }
@@ -2397,9 +2410,9 @@ private fun AppsScreen(
         appsGridState.scrollToItem(0)
         withFrameNanos { }
         if (favoriteInstalledApps.isNotEmpty()) {
-            firstFavoriteFocusRequester.requestFocus()
+            firstFavoriteFocusRequester?.requestFocus()
         } else if (apps.isNotEmpty()) {
-            firstAppFocusRequester.requestFocus()
+            firstAppFocusRequester?.requestFocus()
         }
     }
     BackHandler(enabled = activeMenuApp == null, onBack = onBackHome)
@@ -2429,12 +2442,17 @@ private fun AppsScreen(
                 horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 items(favoriteInstalledApps, key = { it.packageName }) { app ->
+                    val favoriteIndex = favoriteInstalledApps.indexOf(app)
+                    val appIndex = apps.indexOfFirst { it.packageName == app.packageName }
+                    val matchingAppRequester = appIndex.takeIf { it >= 0 }?.let { appFocusRequesters[apps[it].packageName] }
                     FavoriteAppCard(
                         app = app,
                         palette = palette,
-                        focusRequester = if (app == favoriteInstalledApps.first()) firstFavoriteFocusRequester else null,
+                        focusRequester = favoriteFocusRequesters[app.packageName],
                         upFocusRequester = backFocusRequester,
-                        downFocusRequester = firstAppFocusRequester
+                        downFocusRequester = matchingAppRequester ?: firstAppFocusRequester,
+                        leftFocusRequester = favoriteInstalledApps.getOrNull(favoriteIndex - 1)?.let { favoriteFocusRequesters[it.packageName] },
+                        rightFocusRequester = favoriteInstalledApps.getOrNull(favoriteIndex + 1)?.let { favoriteFocusRequesters[it.packageName] }
                     ) { InstalledApps.launch(context, app) }
                 }
             }
@@ -2450,20 +2468,49 @@ private fun AppsScreen(
             Text("No launchable apps were found yet.", color = muted, fontSize = 17.sp)
         } else {
             LazyVerticalGrid(
-                columns = GridCells.Fixed(6),
+                columns = GridCells.Fixed(appColumns),
                 state = appsGridState,
                 contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(14.dp),
-                verticalArrangement = Arrangement.spacedBy(18.dp),
+                horizontalArrangement = Arrangement.spacedBy(18.dp),
+                verticalArrangement = Arrangement.spacedBy(24.dp),
                 modifier = Modifier.weight(1f)
             ) {
                 items(apps.size) { index ->
                     val app = apps[index]
+                    val rowStart = (index / appColumns) * appColumns
+                    val rowEnd = minOf(rowStart + appColumns, apps.size)
+                    val column = index - rowStart
+                    val row = index / appColumns
+                    val lastRow = (apps.lastIndex / appColumns)
+                    val leftIndex = (index - 1).takeIf { column > 0 }
+                    val rightIndex = (index + 1).takeIf { index + 1 < rowEnd }
+                    val upIndex = if (row > 0) {
+                        minOf((row - 1) * appColumns + column, minOf(row * appColumns, apps.size) - 1)
+                    } else {
+                        null
+                    }
+                    val downIndex = if (row < lastRow) {
+                        minOf((row + 1) * appColumns + column, apps.size - 1)
+                    } else {
+                        null
+                    }
+                    val requesterFor: (Int?) -> FocusRequester? = { targetIndex ->
+                        targetIndex?.let { appFocusRequesters[apps[it].packageName] }
+                    }
                     InstalledAppTile(
                         app = app,
                         palette = palette,
-                        focusRequester = if (index == 0) firstAppFocusRequester else null,
-                        upFocusRequester = if (favoriteInstalledApps.isNotEmpty()) firstFavoriteFocusRequester else backFocusRequester,
+                        focusRequester = appFocusRequesters[app.packageName],
+                        upFocusRequester = requesterFor(upIndex)
+                            ?: if (favoriteInstalledApps.isNotEmpty()) {
+                                favoriteInstalledApps.getOrNull(column)?.let { favoriteFocusRequesters[it.packageName] }
+                                    ?: firstFavoriteFocusRequester
+                            } else {
+                                backFocusRequester
+                            },
+                        downFocusRequester = requesterFor(downIndex),
+                        leftFocusRequester = requesterFor(leftIndex),
+                        rightFocusRequester = requesterFor(rightIndex),
                         menuOpen = activeMenuApp != null,
                         onLongClick = { activeMenuApp = app },
                         onClick = { InstalledApps.launch(context, app) }
@@ -2505,6 +2552,9 @@ private fun InstalledAppTile(
     palette: RelayPalette,
     focusRequester: FocusRequester? = null,
     upFocusRequester: FocusRequester? = null,
+    downFocusRequester: FocusRequester? = null,
+    leftFocusRequester: FocusRequester? = null,
+    rightFocusRequester: FocusRequester? = null,
     menuOpen: Boolean,
     onLongClick: () -> Unit,
     onClick: () -> Unit
@@ -2529,7 +2579,12 @@ private fun InstalledAppTile(
     }
     Column(
         modifier = (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-            .then(if (upFocusRequester != null) Modifier.focusProperties { up = upFocusRequester } else Modifier)
+            .then(if (upFocusRequester != null || downFocusRequester != null || leftFocusRequester != null || rightFocusRequester != null) Modifier.focusProperties {
+                if (upFocusRequester != null) up = upFocusRequester
+                if (downFocusRequester != null) down = downFocusRequester
+                if (leftFocusRequester != null) left = leftFocusRequester
+                if (rightFocusRequester != null) right = rightFocusRequester
+            } else Modifier)
             .fillMaxWidth()
             .scale(scale)
             .onPreviewKeyEvent { event ->

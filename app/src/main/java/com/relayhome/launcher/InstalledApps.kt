@@ -13,6 +13,7 @@ import androidx.core.graphics.drawable.toBitmap
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import java.util.Locale
 
 internal data class InstalledApp(
     val label: String,
@@ -97,7 +98,7 @@ internal object InstalledApps {
                 )
             }
             .distinctBy { it.packageName }
-            .sortedBy { it.label.lowercase() }
+            .sortedWith(compareBy<InstalledApp> { it.label.lowercase(Locale.ROOT) }.thenBy { it.packageName })
             .toList()
     }
 
