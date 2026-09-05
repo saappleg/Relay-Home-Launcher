@@ -18,6 +18,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import org.json.JSONArray
 import org.json.JSONObject
+import java.util.concurrent.Executors
 
 internal data class RelayTubeProfile(
     val id: String,
@@ -170,21 +171,40 @@ internal data class SmartTubeSubscriptionVideo(
 /** Receives RelayTube's package-targeted, opt-in playback handoff with the exact video id. */
 class RelayTubePlaybackReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        runCatching { dispatchRelayTubeBroadcast(context, intent) }
+        dispatchRelayTubeBroadcastAsync(this, context, intent)
     }
 }
 
 /** Beta/alpha permission alias for RelayTube's package-specific protected broadcast contract. */
 class RelayTubePlaybackReceiverBeta : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        runCatching { dispatchRelayTubeBroadcast(context, intent) }
+        dispatchRelayTubeBroadcastAsync(this, context, intent)
     }
 }
 
 /** F-Droid permission alias for RelayTube's package-specific protected broadcast contract. */
 class RelayTubePlaybackReceiverFdroid : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        runCatching { dispatchRelayTubeBroadcast(context, intent) }
+        dispatchRelayTubeBroadcastAsync(this, context, intent)
+    }
+}
+
+private val relayTubeBroadcastExecutor = Executors.newSingleThreadExecutor { runnable ->
+    Thread(runnable, "RelayTube-broadcast").apply { isDaemon = true }
+}
+
+private fun dispatchRelayTubeBroadcastAsync(
+    receiver: BroadcastReceiver,
+    context: Context,
+    intent: Intent
+) {
+    val pendingResult = receiver.goAsync()
+    relayTubeBroadcastExecutor.execute {
+        try {
+            runCatching { dispatchRelayTubeBroadcast(context.applicationContext, intent) }
+        } finally {
+            pendingResult.finish()
+        }
     }
 }
 

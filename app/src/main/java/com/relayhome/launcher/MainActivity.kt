@@ -1,6 +1,7 @@
 package com.relayhome.launcher
 
 import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.os.Bundle
 import android.app.role.RoleManager
 import android.content.ClipData
@@ -97,11 +98,16 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.painter.BitmapPainter
+import androidx.compose.ui.graphics.painter.Painter
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -109,6 +115,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -438,14 +445,66 @@ private fun rememberInstalledApps(context: Context): List<InstalledApp> {
     return apps
 }
 
+private fun android.graphics.drawable.Drawable.toAspectBitmap(width: Int, height: Int): Bitmap {
+    val sourceWidth = intrinsicWidth.takeIf { it > 0 } ?: width
+    val sourceHeight = intrinsicHeight.takeIf { it > 0 } ?: height
+    val scale = minOf(width.toFloat() / sourceWidth, height.toFloat() / sourceHeight)
+    val drawWidth = (sourceWidth * scale).toInt().coerceAtLeast(1)
+    val drawHeight = (sourceHeight * scale).toInt().coerceAtLeast(1)
+    val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bitmap)
+    val originalBounds = bounds
+    setBounds(
+        (width - drawWidth) / 2,
+        (height - drawHeight) / 2,
+        (width + drawWidth) / 2,
+        (height + drawHeight) / 2
+    )
+    draw(canvas)
+    bounds = originalBounds
+    return bitmap
+}
+
 @Composable
-private fun rememberDrawableBitmap(drawable: android.graphics.drawable.Drawable, cacheKey: Any, width: Int, height: Int): ImageBitmap? {
-    val bitmap by produceState<ImageBitmap?>(initialValue = null, cacheKey, drawable, width, height) {
+private fun rememberDrawableBitmap(
+    drawable: android.graphics.drawable.Drawable,
+    cacheKey: Any,
+    width: Int,
+    height: Int,
+    preserveAspect: Boolean = false
+): ImageBitmap? {
+    val bitmap by produceState<ImageBitmap?>(initialValue = null, cacheKey, drawable, width, height, preserveAspect) {
         value = withContext(Dispatchers.Default) {
-            runCatching { drawable.toBitmap(width, height).asImageBitmap() }.getOrNull()
+            runCatching {
+                if (preserveAspect) drawable.toAspectBitmap(width, height)
+                else drawable.toBitmap(width, height)
+            }.getOrNull()?.asImageBitmap()
         }
     }
     return bitmap
+}
+
+@Composable
+private fun rememberNativeIconPainter(drawable: android.graphics.drawable.Drawable): Painter {
+    return remember(drawable) { NativeIconPainter(drawable) }
+}
+
+private class NativeIconPainter(
+    private val drawable: android.graphics.drawable.Drawable
+) : Painter() {
+    override val intrinsicSize: Size = Size.Unspecified
+
+    override fun DrawScope.onDraw() {
+        val width = size.width.toInt().coerceAtLeast(1)
+        val height = size.height.toInt().coerceAtLeast(1)
+        val originalBounds = drawable.bounds
+        drawable.setBounds(0, 0, width, height)
+        try {
+            drawIntoCanvas { canvas -> drawable.draw(canvas.nativeCanvas) }
+        } finally {
+            drawable.bounds = originalBounds
+        }
+    }
 }
 
 private fun relayNavigationIcon(name: String, pathData: PathBuilder.() -> Unit): ImageVector =
@@ -527,9 +586,13 @@ private fun providerNavigationIcon(provider: Provider): ImageVector = when (prov
 private fun RelayHomeApp() {
     val context = LocalContext.current
     val launcherStateRevision = (context as? MainActivity)?.launcherStateRevision ?: 0
-    val launcherState = remember(context, launcherStateRevision) {
-        LauncherOverride.inspect(context)
+    var launcherState by remember(context, launcherStateRevision) { mutableStateOf<LauncherState?>(null) }
+    LaunchedEffect(context, launcherStateRevision) {
+        launcherState = withContext(Dispatchers.IO) {
+            LauncherOverride.inspect(context)
+        }
     }
+    val inspectedLauncherState = launcherState ?: LauncherState(null, null, null)
     var dateFormat by remember { mutableStateOf(DateFormatSettings.load(context)) }
     var appearance by remember { mutableStateOf(loadRelayAppearance(context)) }
     var homeRowOrder by remember { mutableStateOf(HomeRowOrderStore.load(context)) }
@@ -601,14 +664,19 @@ private fun RelayHomeApp() {
     val smartTubeSubscriptions = SmartTubePlaybackStore.subscriptionVideos
     val smartTubeContinueWatching = SmartTubePlaybackStore.continueWatchingVideos
     val hiddenSmartTubeChannels = SmartTubeChannelFilter.hiddenChannelIds
+    val relayTubeScope = rememberCoroutineScope()
     LaunchedEffect(Unit) {
-        SmartTubeChannelFilter.load(context)
-        SmartTubePlaybackStore.initialize(context)
+        withContext(Dispatchers.IO) {
+            SmartTubeChannelFilter.load(context)
+            SmartTubePlaybackStore.initialize(context)
+        }
         val hasCachedSmartTubeData = SmartTubePlaybackStore.nowPlaying != null ||
             SmartTubePlaybackStore.subscriptionVideos.isNotEmpty() ||
             SmartTubePlaybackStore.continueWatchingVideos.isNotEmpty()
         smartTubeFeedLoading = !hasCachedSmartTubeData
-        RelayTubeProfileBridge.requestProfiles(context)
+        withContext(Dispatchers.IO) {
+            RelayTubeProfileBridge.requestProfiles(context)
+        }
         if (!hasCachedSmartTubeData) delay(650)
         smartTubeFeedLoading = false
     }
@@ -659,14 +727,18 @@ private fun RelayHomeApp() {
     LaunchedEffect(nuvioProfiles, relayTubeProfiles, activeNuvioProfile) {
         val nuvioProfile = nuvioProfiles.firstOrNull { it.index == activeNuvioProfile }
         if (nuvioProfile != null && relayTubeProfiles.isNotEmpty()) {
-            val pairedId = RelayProfileMappingStore.resolve(
-                context,
-                nuvioProfile,
-                relayTubeProfiles,
-                allowSelectedFallback = true
-            )
+            val pairedId = withContext(Dispatchers.IO) {
+                RelayProfileMappingStore.resolve(
+                    context,
+                    nuvioProfile,
+                    relayTubeProfiles,
+                    allowSelectedFallback = true
+                )
+            }
             if (pairedId != null && pairedId != SmartTubePlaybackStore.activeProfileId) {
-                RelayTubeProfileBridge.selectProfile(context, pairedId)
+                relayTubeScope.launch(Dispatchers.IO) {
+                    RelayTubeProfileBridge.selectProfile(context, pairedId)
+                }
             }
         }
     }
@@ -684,7 +756,11 @@ private fun RelayHomeApp() {
             nuvioProfile,
             relayTubeProfiles,
             allowSelectedFallback = false
-        )?.let { RelayTubeProfileBridge.selectProfile(context, it) }
+        )?.let { profileId ->
+            relayTubeScope.launch(Dispatchers.IO) {
+                RelayTubeProfileBridge.selectProfile(context, profileId)
+            }
+        }
     }
     LaunchedEffect(nuvioMedia) {
         upcomingEpisodes = TmdbApi.upcomingEpisodes(nuvioMedia)
@@ -893,8 +969,8 @@ private fun RelayHomeApp() {
                         profileImageUri = uri
                         if (uri == null) ProfileImageSettings.clear(context) else ProfileImageSettings.save(context, uri)
                     },
-                    relayIsDefault = launcherState.relayIsDefault,
-                    stockLauncherOverride = launcherState.stockLauncherOverride,
+                    relayIsDefault = inspectedLauncherState.relayIsDefault,
+                    stockLauncherOverride = inspectedLauncherState.stockLauncherOverride,
                     onLauncherChanged = { (context as? MainActivity)?.refreshLauncherState() }
                 )
                 Destination.SEARCH -> SearchScreen(
@@ -1714,6 +1790,7 @@ private fun AppPeekPanel(
     onPlayRelayTube: (MediaItem) -> Unit,
     onArtworkColor: (Color?) -> Unit
 ) {
+    val context = LocalContext.current
     val paletteScope = rememberCoroutineScope()
     val usableItems = remember(provider, items) {
         items.filter { item -> item.isUsableForPeek() }
@@ -1724,13 +1801,20 @@ private fun AppPeekPanel(
     val selectedIndex = usableItems.indexOfFirst { it.contentKey() == selectedKey }
         .takeIf { it >= 0 } ?: 0
     val lead = usableItems.getOrNull(selectedIndex) ?: usableItems.firstOrNull()
+    val peekImageRequest = remember(lead?.artworkUrl) {
+        ImageRequest.Builder(context)
+            .data(lead?.artworkUrl)
+            .size(1920, 1080)
+            .crossfade(false)
+            .build()
+    }
     LaunchedEffect(provider, itemKeys) {
         if (selectedKey?.let { it !in itemKeys } != false) selectedKey = itemKeys.firstOrNull()
     }
     Box(Modifier.fillMaxWidth().height(580.dp).background(midnight)) {
         lead?.let { item ->
             AsyncImage(
-                model = item.artworkUrl,
+                model = peekImageRequest,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize().alpha(.82f),
@@ -1802,6 +1886,10 @@ private fun AppPeekPanel(
                     val selected = index == selectedIndex
                     LaunchedEffect(focused) {
                         if (focused) {
+                            // Let the remote settle before replacing the large Peek artwork.
+                            // Moving across thumbnails should not start a full-screen image load
+                            // for every intermediate focus target.
+                            delay(180)
                             selectedKey = item.contentKey()
                             onPreviewFocused()
                         }
@@ -1820,7 +1908,12 @@ private fun AppPeekPanel(
                                 }
                             }
                     ) {
-                        AsyncImage(model = item.artworkUrl, contentDescription = item.title, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxSize())
+                        AsyncImage(
+                            model = ImageRequest.Builder(context).data(item.artworkUrl).size(360, 240).crossfade(false).build(),
+                            contentDescription = item.title,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
                         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, midnight.copy(alpha = .84f)))))
                         Text(
                             if (provider == Provider.SMARTTUBE) item.title else item.episodeInfo ?: item.title,
@@ -1952,6 +2045,7 @@ private fun HeroPanel(
         ImageRequest.Builder(context)
             .data(hero.artworkUrl)
             .size(1920, 1080)
+            .crossfade(false)
             .build()
     }
     Box(
@@ -2362,7 +2456,7 @@ private fun FavoriteAppCard(
             .clickable(interactionSource = source, indication = null, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        CircularAppIcon(
+        LauncherAppIcon(
             app = app,
             palette = palette,
             focused = focused,
@@ -2387,18 +2481,24 @@ private fun FavoriteAppCard(
 /**
  * A single TV-friendly icon treatment shared by the Home favorites rail and the Apps page.
  * Always using the app icon (never a banner) keeps mixed launcher metadata from producing
- * stretched or visually mashed tiles. Native round/adaptive icons retain their own artwork;
- * legacy square icons receive the same circular slot Google TV uses for consistency.
+ * stretched or visually mashed tiles. Favorites intentionally use one consistent circular
+ * slot; the drawable itself is never bitmap-cropped before that presentation mask is applied.
  */
 @Composable
-private fun CircularAppIcon(
+private fun LauncherAppIcon(
     app: InstalledApp,
     palette: RelayPalette,
     focused: Boolean,
     iconSize: Dp,
     modifier: Modifier = Modifier
 ) {
-    val icon = rememberDrawableBitmap(app.icon, app.packageName, 192, 192)
+    val iconPainter = rememberNativeIconPainter(app.icon)
+    val iconInset = when {
+        app.hasRoundIcon -> 0.dp
+        app.useCircularMask -> iconSize * (18f / 108f)
+        else -> 4.dp
+    }
+    val slotShape = RoundedCornerShape(18.dp)
     Box(
         modifier
             .size(iconSize)
@@ -2407,17 +2507,17 @@ private fun CircularAppIcon(
             .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .10f), CircleShape),
         contentAlignment = Alignment.Center
     ) {
-        icon?.let {
-            Image(
-                painter = BitmapPainter(it),
-                contentDescription = app.label,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(if (app.hasRoundIcon) 2.dp else 7.dp)
-            )
-        }
-        if (focused) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = .08f)))
+        Image(
+            painter = iconPainter,
+            contentDescription = app.label,
+            contentScale = if (app.useCircularMask) ContentScale.FillBounds else ContentScale.Fit,
+            modifier = Modifier
+                .fillMaxSize()
+                // The outer slot is the one deliberate Relay favorite mask. Keep the native
+                // drawable un-cropped inside it so adaptive foreground artwork stays intact.
+                .padding(iconInset)
+        )
+        if (focused) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = .08f), slotShape))
     }
 }
 
@@ -2431,7 +2531,17 @@ private fun AppsScreen(
 ) {
     val context = LocalContext.current
     val apps = rememberInstalledApps(context)
-    val appColumns = 5
+    // Base the grid on Android's logical TV width so 720p, 1080p, and 4K density
+    // configurations stay inside the viewport while retaining three predictable rows.
+    val screenWidthDp = LocalConfiguration.current.screenWidthDp
+    val compactHeight = LocalConfiguration.current.screenHeightDp < 500
+    val appColumns = when {
+        compactHeight -> 7
+        screenWidthDp >= 2200 -> 8
+        screenWidthDp >= 1500 -> 7
+        screenWidthDp >= 1050 -> 6
+        else -> 5
+    }
     val rowsPerPage = 3
     val appsPerPage = appColumns * rowsPerPage
     val pageCount = if (apps.isEmpty()) 0 else (apps.size + appsPerPage - 1) / appsPerPage
@@ -2447,6 +2557,8 @@ private fun AppsScreen(
             appPage = 0
             pageFocusIndex = 0
             activeMenuApp = null
+            withFrameNanos { }
+            runCatching { backFocusRequester.requestFocus() }
         } else {
             appPage = appPage.coerceIn(0, pageCount - 1)
             val currentPageCount = minOf(appsPerPage, apps.size - appPage * appsPerPage)
@@ -2485,7 +2597,12 @@ private fun AppsScreen(
     BackHandler {
         if (activeMenuApp != null) activeMenuApp = null else onBackHome()
     }
-    Column(Modifier.fillMaxSize().padding(horizontal = 56.dp, vertical = 48.dp)) {
+    Column(
+        Modifier.fillMaxSize().padding(
+            horizontal = 56.dp,
+            vertical = if (compactHeight) 24.dp else 36.dp
+        )
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Apps", color = ivory, fontSize = 34.sp, fontWeight = FontWeight.Light)
             Spacer(Modifier.weight(1f))
@@ -2498,7 +2615,7 @@ private fun AppsScreen(
                 onClick = onBackHome
             )
         }
-        Spacer(Modifier.height(28.dp))
+        Spacer(Modifier.height(if (compactHeight) 12.dp else 20.dp))
         Row(verticalAlignment = Alignment.Bottom) {
             Text("All apps", color = ivory, fontSize = 23.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.width(12.dp))
@@ -2508,19 +2625,19 @@ private fun AppsScreen(
                 fontSize = 14.sp
             )
         }
-        Spacer(Modifier.height(18.dp))
+        Spacer(Modifier.height(if (compactHeight) 8.dp else 12.dp))
         if (apps.isEmpty()) {
             Text("No launchable apps were found yet.", color = muted, fontSize = 17.sp)
         } else {
             Box(Modifier.weight(1f).fillMaxWidth().focusGroup()) {
                 Column(
-                    Modifier.fillMaxWidth(),
-                    verticalArrangement = Arrangement.spacedBy(24.dp)
+                    Modifier.fillMaxWidth().padding(bottom = if (compactHeight) 0.dp else 12.dp),
+                    verticalArrangement = Arrangement.spacedBy(if (compactHeight) 8.dp else 14.dp)
                 ) {
                     pageRows.forEachIndexed { rowIndex, rowApps ->
                         Row(
                             Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(18.dp)
+                            horizontalArrangement = Arrangement.spacedBy(if (compactHeight) 10.dp else 18.dp)
                         ) {
                             rowApps.forEachIndexed { column, app ->
                                 val localIndex = rowIndex * appColumns + column
@@ -2623,10 +2740,17 @@ private fun InstalledAppTile(
     var selectHoldJob by remember { mutableStateOf<Job?>(null) }
     var longPressHandled by remember { mutableStateOf(false) }
     val showFocus = focused && !menuOpen
-    val scale by animateFloatAsState(if (showFocus) 1.07f else 1f, label = "app tile focus")
+    val scale by animateFloatAsState(if (showFocus) 1.04f else 1f, label = "app tile focus")
+    val compactHeight = LocalConfiguration.current.screenHeightDp < 500
     val shape = RoundedCornerShape(16.dp)
-    val artwork = if (app.hasLeanbackBanner) {
-        rememberDrawableBitmap(app.artwork, "banner:${app.packageName}", 640, 360)
+    val artwork = if (app.hasLeanbackBanner || app.hasLeanbackLogo) {
+        rememberDrawableBitmap(
+            app.artwork,
+            if (app.hasLeanbackBanner) "banner:${app.packageName}" else "logo:${app.packageName}",
+            640,
+            360,
+            preserveAspect = app.hasLeanbackLogo
+        )
     } else {
         null
     }
@@ -2714,19 +2838,27 @@ private fun InstalledAppTile(
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()
                 )
+            } else if (app.hasLeanbackLogo && artwork != null) {
+                Image(
+                    painter = BitmapPainter(artwork),
+                    contentDescription = app.label,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize().padding(18.dp)
+                )
             } else {
-                CircularAppIcon(app = app, palette = palette, focused = showFocus, iconSize = 76.dp)
+                LauncherAppIcon(app = app, palette = palette, focused = showFocus, iconSize = 76.dp)
             }
             if (showFocus) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = .08f)))
         }
-        Spacer(Modifier.height(7.dp))
+        Spacer(Modifier.height(if (compactHeight) 4.dp else 7.dp))
         Text(
             app.label,
             color = if (showFocus) ivory else muted,
-            fontSize = 13.sp,
+            fontSize = if (compactHeight) 12.sp else 13.sp,
             fontWeight = if (showFocus) FontWeight.SemiBold else FontWeight.Normal,
             maxLines = 1,
-            overflow = TextOverflow.Ellipsis
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.fillMaxWidth().heightIn(min = 18.dp)
         )
     }
 }
@@ -3201,7 +3333,7 @@ private fun AppTile(
             .clickable(interactionSource = source, indication = null, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        CircularAppIcon(app = app, palette = palette, focused = focused, iconSize = 70.dp)
+        LauncherAppIcon(app = app, palette = palette, focused = focused, iconSize = 70.dp)
         Spacer(Modifier.height(7.dp))
         Text(app.label, color = if (focused) ivory else muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }

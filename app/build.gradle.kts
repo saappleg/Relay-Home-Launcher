@@ -28,9 +28,9 @@ val releaseSigningConfigured = listOf(
     releaseKeyPassword
 ).all { it.isNotBlank() }
 val relayTmdbApiKey = configuredValue("tmdb.apiKey", "RELAY_TMDB_API_KEY")
-val relayVersionCode = providers.environmentVariable("RELAY_VERSION_CODE").orNull?.toIntOrNull() ?: 13
+val relayVersionCode = providers.environmentVariable("RELAY_VERSION_CODE").orNull?.toIntOrNull() ?: 24
 val relayVersionName = providers.environmentVariable("RELAY_VERSION_NAME").orNull?.takeIf { it.isNotBlank() }
-    ?: "0.1.0-alpha.7"
+    ?: "0.1.0-beta.1"
 
 // Never accidentally publish an unsigned (or debug-signed) release APK.
 tasks.configureEach {

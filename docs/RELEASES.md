@@ -108,6 +108,20 @@ verification cause when the OEM still rejects the launcher change.
 Version code 18 avoids protected Google TV component-state changes and uses the
 package-level stock launcher override supported by Shizuku on affected TVs.
 
+## v0.1.0-beta.1 release notes
+
+Version code 24 brings the Google TV-inspired Home rails and larger Continue
+Watching, subscription, and Coming Up cards together with configurable Home row
+ordering. All Apps is a paged three-row Leanback grid that adapts its columns to
+the available TV width, keeps labels in view, refreshes after app changes, and
+preserves reliable D-pad page focus. Favorite icons use a consistent circular
+mask, while real Leanback banners and logo-only apps retain their proper shape.
+
+This release also moves app discovery, launcher inspection, RelayTube provider
+IPC, large broadcast parsing, and artwork conversion away from the UI thread to
+reduce cold-start and navigation jank. Popup Back handling and empty-state focus
+recovery are hardened as well.
+
 Before publishing:
 
 1. Build and smoke-test both 1080p and 4K layouts.
