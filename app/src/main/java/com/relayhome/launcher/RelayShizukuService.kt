@@ -14,35 +14,35 @@ class RelayShizukuService : IRelayHomeShell.Stub() {
         stockActivityName: String?,
         disableStockLauncher: Boolean
     ): String {
-        val stockPackageToDisable = if (disableStockLauncher) {
+        val stockTarget = if (disableStockLauncher) {
             require(
                 stockPackageName != null && stockPackageName.matches(packagePattern) &&
                     stockPackageName != RELAY_PACKAGE &&
                     stockActivityName != null && stockActivityName.matches(activityPattern)
             ) { "Invalid stock launcher component." }
-            stockPackageName
+            LauncherTarget(stockPackageName, stockActivityName)
         } else {
             null
         }
 
-        if (stockPackageToDisable != null) {
-            // Some Google TV builds report success from the HOME role command but continue
-            // resolving their system launcher while it remains enabled (usually because its
-            // HOME filter has a higher priority). Disable that package before selecting Relay;
-            // Relay is already the only remaining HOME candidate during this short transition.
-            runCommand("/system/bin/pm", "disable-user", "--user", USER_ID, stockPackageToDisable)
-        }
         try {
+            stockTarget?.let {
+                // Some Google TV builds report success from a package-level disable while the
+                // privileged HomeActivity remains resolvable. Disable the exact component first,
+                // then fall back to the package if the OEM still returns it for Home.
+                disableLauncher(it)
+            }
             setHome(RELAY_PACKAGE, RELAY_ACTIVITY)
         } catch (error: Throwable) {
-            if (stockPackageToDisable != null) {
+            stockTarget?.let {
                 runCatching {
-                    runCommand("/system/bin/pm", "enable", "--user", USER_ID, stockPackageToDisable)
+                    enableLauncher(it)
+                    setHome(it.packageName, it.activityName)
                 }
             }
             throw IllegalStateException(
                 "Relay Home could not be verified after applying the launcher override. " +
-                    if (stockPackageToDisable != null) "The stock launcher was restored." else "",
+                    if (stockTarget != null) "The stock launcher was restored." else "",
                 error
             )
         }
@@ -52,9 +52,27 @@ class RelayShizukuService : IRelayHomeShell.Stub() {
     override fun restoreStockLauncher(packageName: String, activityName: String): String {
         require(packageName.matches(packagePattern) && packageName != RELAY_PACKAGE) { "Invalid launcher package." }
         require(activityName.matches(activityPattern)) { "Invalid launcher activity." }
-        runCommand("/system/bin/pm", "enable", "--user", USER_ID, packageName)
-        setHome(packageName, activityName)
+        val target = LauncherTarget(packageName, activityName)
+        enableLauncher(target)
+        setHome(target.packageName, target.activityName)
         return "Stock launcher restored and verified: ${resolveHome()}"
+    }
+
+    private fun disableLauncher(target: LauncherTarget) {
+        runCommand("/system/bin/pm", "disable-user", "--user", USER_ID, target.componentName)
+        var resolved = runCatching { resolveHome() }.getOrNull()
+        if (resolved != null && resolvedPackage(resolved) == target.packageName) {
+            runCommand("/system/bin/pm", "disable-user", "--user", USER_ID, target.packageName)
+            resolved = runCatching { resolveHome() }.getOrNull()
+        }
+        check(resolved == null || resolvedPackage(resolved) != target.packageName) {
+            "Android still resolves Home to $resolved after disabling ${target.componentName}."
+        }
+    }
+
+    private fun enableLauncher(target: LauncherTarget) {
+        runCommand("/system/bin/pm", "enable", "--user", USER_ID, target.packageName)
+        runCommand("/system/bin/pm", "enable", "--user", USER_ID, target.componentName)
     }
 
     private fun setHome(packageName: String, activityName: String) {
@@ -115,4 +133,11 @@ class RelayShizukuService : IRelayHomeShell.Stub() {
         val packagePattern = Regex("[A-Za-z0-9_.]+")
         val activityPattern = Regex("[A-Za-z0-9_.$]+")
     }
+}
+
+private data class LauncherTarget(
+    val packageName: String,
+    val activityName: String
+) {
+    val componentName: String get() = "$packageName/$activityName"
 }

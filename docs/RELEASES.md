@@ -78,6 +78,19 @@ Android TV, and gives installed apps consistent circular icon treatment.
 RelayTube bridge payloads, profile isolation, YouTube handoff validation, and
 TMDB metadata normalization are also hardened for safer provider fallbacks.
 
+## v0.1.0-alpha.8 release notes
+
+Version code 14 fixes the Shizuku launcher override on Google TV by disabling
+the higher-priority stock Home app before selecting and verifying Relay, and
+restoring it if verification fails.
+
+## v0.1.0-alpha.9 release notes
+
+Version code 15 hardens the Google TV launcher override by disabling the exact
+resolved stock Home activity, verifying that it disappears from Home
+resolution, and falling back to the package when the OEM keeps the activity
+available.
+
 Before publishing:
 
 1. Build and smoke-test both 1080p and 4K layouts.
