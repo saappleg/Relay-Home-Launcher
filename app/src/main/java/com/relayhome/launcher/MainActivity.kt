@@ -2664,9 +2664,9 @@ private fun InstalledAppTile(
                 if (pageMoveHandled) {
                     true
                 } else {
-                val isSelectKey = nativeEvent.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
-                    nativeEvent.keyCode == KeyEvent.KEYCODE_ENTER ||
-                    nativeEvent.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
+                    val isSelectKey = nativeEvent.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+                        nativeEvent.keyCode == KeyEvent.KEYCODE_ENTER ||
+                        nativeEvent.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
                     if (!isSelectKey) {
                         false
                     } else when (nativeEvent.action) {
