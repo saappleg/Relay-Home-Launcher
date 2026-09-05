@@ -15,7 +15,6 @@ import java.util.concurrent.atomic.AtomicBoolean
 /** User-authorized, narrowly scoped bridge for the launcher role override. */
 internal object RelayShizuku {
     private const val permissionRequestCode = 7412
-    private const val userServiceVersion = 2
     private val mainHandler = Handler(Looper.getMainLooper())
 
     private var readinessRevision by mutableIntStateOf(0)
@@ -77,7 +76,9 @@ internal object RelayShizuku {
         )
             .processNameSuffix("relay-home-shell")
             .tag("relay-home-launcher-v2")
-            .version(userServiceVersion)
+            // Shizuku reuses a user service when its tag and version match. Tie the version to
+            // the APK so launcher-service changes cannot leave an older implementation running.
+            .version(BuildConfig.VERSION_CODE)
             .daemon(false)
         val finished = AtomicBoolean(false)
         lateinit var connection: ServiceConnection

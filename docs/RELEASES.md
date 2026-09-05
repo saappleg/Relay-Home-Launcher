@@ -91,6 +91,12 @@ resolved stock Home activity, verifying that it disappears from Home
 resolution, and falling back to the package when the OEM keeps the activity
 available.
 
+## v0.1.0-alpha.10 release notes
+
+Version code 16 makes Shizuku recreate Relay's privileged launcher service when
+the APK changes, preventing an older cached service implementation from being
+reused after an update.
+
 Before publishing:
 
 1. Build and smoke-test both 1080p and 4K layouts.
