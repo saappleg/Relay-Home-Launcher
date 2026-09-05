@@ -103,6 +103,11 @@ Version code 17 adds a minimal Home intent-priority fallback for Google TV
 firmware that ignores the selected HOME role, and includes the underlying
 verification cause when the OEM still rejects the launcher change.
 
+## v0.1.0-alpha.12 release notes
+
+Version code 18 avoids protected Google TV component-state changes and uses the
+package-level stock launcher override supported by Shizuku on affected TVs.
+
 Before publishing:
 
 1. Build and smoke-test both 1080p and 4K layouts.

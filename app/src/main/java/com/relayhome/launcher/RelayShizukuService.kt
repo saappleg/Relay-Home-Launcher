@@ -60,20 +60,14 @@ class RelayShizukuService : IRelayHomeShell.Stub() {
     }
 
     private fun disableLauncher(target: LauncherTarget) {
-        runCommand("/system/bin/pm", "disable-user", "--user", USER_ID, target.componentName)
-        var resolved = runCatching { resolveHome() }.getOrNull()
-        if (resolved != null && resolvedPackage(resolved) == target.packageName) {
-            runCommand("/system/bin/pm", "disable-user", "--user", USER_ID, target.packageName)
-            resolved = runCatching { resolveHome() }.getOrNull()
-        }
-        // A few Google TV builds keep reporting the stock component even after a successful
-        // disable command. Leave the result for setHome() to verify; Relay's HOME filter has a
-        // minimal priority fallback for those builds.
+        // Google TV's launcher HomeActivity is protected from shell component-state changes.
+        // Disable the package instead; setHome() performs the final resolver verification and
+        // the HOME intent priority remains a fallback for firmware that ignores this command.
+        runCommand("/system/bin/pm", "disable-user", "--user", USER_ID, target.packageName)
     }
 
     private fun enableLauncher(target: LauncherTarget) {
         runCommand("/system/bin/pm", "enable", "--user", USER_ID, target.packageName)
-        runCommand("/system/bin/pm", "enable", "--user", USER_ID, target.componentName)
     }
 
     private fun failureMessage(error: Throwable): String = generateSequence(error) { it.cause }
@@ -144,6 +138,4 @@ class RelayShizukuService : IRelayHomeShell.Stub() {
 private data class LauncherTarget(
     val packageName: String,
     val activityName: String
-) {
-    val componentName: String get() = "$packageName/$activityName"
-}
+)

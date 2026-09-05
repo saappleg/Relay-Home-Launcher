@@ -18,9 +18,8 @@ internal data class StockLauncherOverride(
     val activityName: String,
     val label: String
 ) {
-    val componentName: String get() = "$packageName/$activityName"
-    val disableCommand: String get() = "adb shell pm disable-user --user 0 $componentName"
-    val restoreCommand: String get() = "adb shell pm enable --user 0 $componentName"
+    val disableCommand: String get() = "adb shell pm disable-user --user 0 $packageName"
+    val restoreCommand: String get() = "adb shell pm enable --user 0 $packageName"
 }
 
 internal object LauncherOverride {
