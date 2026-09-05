@@ -25,21 +25,26 @@ class RelayShizukuService : IRelayHomeShell.Stub() {
             null
         }
 
-        // Establish Relay as Home before touching the stock package. That keeps a device from
-        // briefly having no valid Home activity if the OEM reacts to package state changes.
-        setHome(RELAY_PACKAGE, RELAY_ACTIVITY)
         if (stockPackageToDisable != null) {
+            // Some Google TV builds report success from the HOME role command but continue
+            // resolving their system launcher while it remains enabled (usually because its
+            // HOME filter has a higher priority). Disable that package before selecting Relay;
+            // Relay is already the only remaining HOME candidate during this short transition.
             runCommand("/system/bin/pm", "disable-user", "--user", USER_ID, stockPackageToDisable)
-            try {
-                setHome(RELAY_PACKAGE, RELAY_ACTIVITY)
-            } catch (error: Throwable) {
-                runCatching { runCommand("/system/bin/pm", "enable", "--user", USER_ID, stockPackageToDisable) }
-                throw IllegalStateException(
-                    "Relay Home could not be verified after disabling the stock launcher. " +
-                        "The stock launcher was restored.",
-                    error
-                )
+        }
+        try {
+            setHome(RELAY_PACKAGE, RELAY_ACTIVITY)
+        } catch (error: Throwable) {
+            if (stockPackageToDisable != null) {
+                runCatching {
+                    runCommand("/system/bin/pm", "enable", "--user", USER_ID, stockPackageToDisable)
+                }
             }
+            throw IllegalStateException(
+                "Relay Home could not be verified after applying the launcher override. " +
+                    if (stockPackageToDisable != null) "The stock launcher was restored." else "",
+                error
+            )
         }
         return "Relay Home is the default launcher and was verified: ${resolveHome()}"
     }
