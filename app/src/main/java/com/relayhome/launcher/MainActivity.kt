@@ -75,11 +75,13 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
@@ -91,6 +93,7 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
@@ -391,6 +394,60 @@ private fun relayPaletteForAppearance(
     } ?: orbitalPalette
 }
 
+private enum class HomeRow(val label: String) {
+    CONTINUE_WATCHING("Continue Watching"),
+    FAVORITE_APPS("Favorite Apps"),
+    RECOMMENDATIONS("Recommended TV Shows"),
+    SUBSCRIPTIONS("New from subscriptions"),
+    UPCOMING("Coming Up")
+}
+
+private object HomeRowOrderStore {
+    private const val preferencesName = "relay_home_layout"
+    private const val orderKey = "row_order"
+
+    fun load(context: Context): List<HomeRow> {
+        val stored = context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
+            .getString(orderKey, null)
+            ?.split(',')
+            ?.mapNotNull { value -> runCatching { HomeRow.valueOf(value) }.getOrNull() }
+            .orEmpty()
+        return (stored + HomeRow.entries).distinct()
+    }
+
+    fun save(context: Context, order: List<HomeRow>) {
+        context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
+            .edit()
+            .putString(orderKey, order.distinct().joinToString(",") { it.name })
+            .apply()
+    }
+}
+
+@Composable
+private fun rememberInstalledApps(context: Context): List<InstalledApp> {
+    val appContext = remember(context) { context.applicationContext }
+    // MainActivity increments this whenever it resumes. That makes Apps reflect installs and
+    // uninstalls made in Android settings as soon as the user returns to the launcher.
+    val refreshRevision = (context as? MainActivity)?.launcherStateRevision ?: 0
+    var apps by remember(appContext) { mutableStateOf(emptyList<InstalledApp>()) }
+    LaunchedEffect(appContext, refreshRevision) {
+        apps = withContext(Dispatchers.IO) {
+            InstalledApps.discover(appContext)
+        }
+    }
+    return apps
+}
+
+@Composable
+private fun rememberDrawableBitmap(drawable: android.graphics.drawable.Drawable, cacheKey: Any, width: Int, height: Int): ImageBitmap? {
+    val bitmap by produceState<ImageBitmap?>(initialValue = null, cacheKey, drawable, width, height) {
+        value = withContext(Dispatchers.Default) {
+            runCatching { drawable.toBitmap(width, height).asImageBitmap() }.getOrNull()
+        }
+    }
+    return bitmap
+}
+
 private fun relayNavigationIcon(name: String, pathData: PathBuilder.() -> Unit): ImageVector =
     ImageVector.Builder(
         name = name,
@@ -475,6 +532,7 @@ private fun RelayHomeApp() {
     }
     var dateFormat by remember { mutableStateOf(DateFormatSettings.load(context)) }
     var appearance by remember { mutableStateOf(loadRelayAppearance(context)) }
+    var homeRowOrder by remember { mutableStateOf(HomeRowOrderStore.load(context)) }
     val dynamicColorScheme = remember(context) { dynamicRelayColorScheme(context) }
     var profileImageUri by remember { mutableStateOf(ProfileImageSettings.load(context)) }
     var favoriteApps by remember { mutableStateOf(FavoriteAppsStore.load(context)) }
@@ -541,15 +599,14 @@ private fun RelayHomeApp() {
     val smartTubeNowPlaying = SmartTubePlaybackStore.nowPlaying
     val relayTubeProfiles = SmartTubePlaybackStore.profiles
     val smartTubeSubscriptions = SmartTubePlaybackStore.subscriptionVideos
-        .ifEmpty { SmartTubePlaybackStore.loadSubscriptionVideos(context) }
     val smartTubeContinueWatching = SmartTubePlaybackStore.continueWatchingVideos
-        .ifEmpty { SmartTubePlaybackStore.loadContinueWatchingVideos(context) }
     val hiddenSmartTubeChannels = SmartTubeChannelFilter.hiddenChannelIds
     LaunchedEffect(Unit) {
         SmartTubeChannelFilter.load(context)
         SmartTubePlaybackStore.initialize(context)
-        val hasCachedSmartTubeData = smartTubeNowPlaying != null ||
-            smartTubeSubscriptions.isNotEmpty() || smartTubeContinueWatching.isNotEmpty()
+        val hasCachedSmartTubeData = SmartTubePlaybackStore.nowPlaying != null ||
+            SmartTubePlaybackStore.subscriptionVideos.isNotEmpty() ||
+            SmartTubePlaybackStore.continueWatchingVideos.isNotEmpty()
         smartTubeFeedLoading = !hasCachedSmartTubeData
         RelayTubeProfileBridge.requestProfiles(context)
         if (!hasCachedSmartTubeData) delay(650)
@@ -756,6 +813,7 @@ private fun RelayHomeApp() {
                     upcomingEpisodes = upcomingEpisodes,
                     recommendations = tmdbRecommendations,
                     dateFormat = dateFormat,
+                    homeRowOrder = homeRowOrder,
                     smartTubeNowPlaying = smartTubeNowPlaying,
                     smartTubeFeedLoading = smartTubeFeedLoading,
                     smartTubeSubscriptions = smartTubeSubscriptions,
@@ -824,6 +882,11 @@ private fun RelayHomeApp() {
                     onAppearanceChanged = {
                         appearance = it
                         it.save(context)
+                    },
+                    homeRowOrder = homeRowOrder,
+                    onHomeRowOrderChanged = { order ->
+                        homeRowOrder = order
+                        HomeRowOrderStore.save(context, order)
                     },
                     profileImageUri = profileImageUri,
                     onProfileImageChanged = { uri ->
@@ -922,6 +985,7 @@ private fun HomeScreen(
     upcomingEpisodes: List<TmdbCalendarEntry>,
     recommendations: List<MediaItem>,
     dateFormat: RelayDateFormat,
+    homeRowOrder: List<HomeRow>,
     smartTubeNowPlaying: SmartTubeNowPlaying?,
     smartTubeFeedLoading: Boolean,
     smartTubeSubscriptions: List<SmartTubeSubscriptionVideo>,
@@ -1005,8 +1069,9 @@ private fun HomeScreen(
             .groupBy { it.provider }
             .flatMap { (provider, items) -> items.take(continueWatchingLimits[provider] ?: ContinueWatchingLimits.defaultLimit) }
     }
-    val favoriteInstalledApps = remember(favoriteApps) {
-        InstalledApps.discover(context)
+    val installedApps = rememberInstalledApps(context)
+    val favoriteInstalledApps = remember(installedApps, favoriteApps) {
+        installedApps
             .filter { it.packageName in favoriteApps }
             .sortedBy { it.label.lowercase() }
     }
@@ -1016,33 +1081,34 @@ private fun HomeScreen(
     val subscriptionItems = remember(providers, visibleSmartTubeSubscriptionItems) {
         if (Provider.SMARTTUBE in providers) visibleSmartTubeSubscriptionItems else emptyList()
     }
-    val firstRowFocusRequester = when {
-        continueWatching.isNotEmpty() -> continueFocusRequester
-        favoriteInstalledApps.isNotEmpty() -> favoriteAppsFocusRequester
-        recommendationItems.isNotEmpty() -> recommendationFocusRequester
-        subscriptionItems.isNotEmpty() -> subscriptionFocusRequester
-        upcomingEpisodes.isNotEmpty() -> upcomingFocusRequester
-        else -> null
+    val availableHomeRows = homeRowOrder.filter { row ->
+        when (row) {
+            HomeRow.CONTINUE_WATCHING -> continueWatching.isNotEmpty()
+            HomeRow.FAVORITE_APPS -> favoriteInstalledApps.isNotEmpty()
+            HomeRow.RECOMMENDATIONS -> recommendationItems.isNotEmpty()
+            HomeRow.SUBSCRIPTIONS -> subscriptionItems.isNotEmpty()
+            HomeRow.UPCOMING -> upcomingEpisodes.isNotEmpty()
+        }
     }
-    val firstAfterContinue = when {
-        favoriteInstalledApps.isNotEmpty() -> favoriteAppsFocusRequester
-        recommendationItems.isNotEmpty() -> recommendationFocusRequester
-        subscriptionItems.isNotEmpty() -> subscriptionFocusRequester
-        upcomingEpisodes.isNotEmpty() -> upcomingFocusRequester
-        else -> null
-    }
-    val firstAfterFavorites = when {
-        recommendationItems.isNotEmpty() -> recommendationFocusRequester
-        subscriptionItems.isNotEmpty() -> subscriptionFocusRequester
-        upcomingEpisodes.isNotEmpty() -> upcomingFocusRequester
-        else -> null
-    }
-    val firstAfterRecommendations = when {
-        subscriptionItems.isNotEmpty() -> subscriptionFocusRequester
-        upcomingEpisodes.isNotEmpty() -> upcomingFocusRequester
-        else -> null
-    }
+    val rowFocusRequesters = mapOf(
+        HomeRow.CONTINUE_WATCHING to continueFocusRequester,
+        HomeRow.FAVORITE_APPS to favoriteAppsFocusRequester,
+        HomeRow.RECOMMENDATIONS to recommendationFocusRequester,
+        HomeRow.SUBSCRIPTIONS to subscriptionFocusRequester,
+        HomeRow.UPCOMING to upcomingFocusRequester
+    )
+    val firstRowFocusRequester = availableHomeRows.firstOrNull()?.let { rowFocusRequesters[it] }
+    val topContentFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester
+    fun previousRowFocusRequester(index: Int): FocusRequester =
+        if (index == 0) topContentFocusRequester else rowFocusRequesters[availableHomeRows[index - 1]]!!
+    fun nextRowFocusRequester(index: Int): FocusRequester? =
+        availableHomeRows.getOrNull(index + 1)?.let { rowFocusRequesters[it] }
     val homeScope = rememberCoroutineScope()
+    fun scrollHomeToTop() {
+        if (homeListState.firstVisibleItemIndex != 0 || homeListState.firstVisibleItemScrollOffset != 0) {
+            homeScope.launch { homeListState.scrollToItem(0) }
+        }
+    }
     // Do not restore a previous focus-scroll offset into the hero when returning to Home.
     LaunchedEffect(focusResetGeneration) {
         homeListState.scrollToItem(0)
@@ -1064,7 +1130,7 @@ private fun HomeScreen(
                         palette = palette,
                         loading = peekProvider == Provider.SMARTTUBE && smartTubeFeedLoading,
                         focusRequester = peekFocusRequester,
-                        onPreviewFocused = { homeScope.launch { homeListState.scrollToItem(0) } },
+                        onPreviewFocused = ::scrollHomeToTop,
                         onItemSelected = onItemSelected,
                         onOpenRelayTube = onOpenRelayTube,
                         onPlayRelayTube = onPlayRelayTube,
@@ -1075,7 +1141,7 @@ private fun HomeScreen(
                 } else HeroPanel(
                     hero, palette, homeFocusRequester, heroFocusRequester,
                     downFocusRequester = firstRowFocusRequester,
-                    onHeroFocused = { homeScope.launch { homeListState.scrollToItem(0) } },
+                    onHeroFocused = ::scrollHomeToTop,
                     onItemSelected = onItemSelected
                 ) { accent ->
                     if (accent != null) onHeroChanged(hero.copy(palette = hero.palette.copy(accent = accent, glow = accent.copy(alpha = .32f))))
@@ -1109,95 +1175,67 @@ private fun HomeScreen(
                     )
                 }
             } else {
-                if (continueWatching.isNotEmpty()) {
+                availableHomeRows.forEachIndexed { rowIndex, row ->
                     item {
-                        MediaRail(
-                            title = "Continue Watching",
-                            items = continueWatching,
-                            palette = palette,
-                            dateFormat = dateFormat,
-                            onHeroChanged = onHeroChanged,
-                            onItemSelected = onItemSelected,
-                            upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester,
-                            firstFocusRequester = continueFocusRequester,
-                            downFocusRequester = firstAfterContinue
-                        )
+                        when (row) {
+                            HomeRow.CONTINUE_WATCHING -> MediaRail(
+                                title = "Continue Watching",
+                                items = continueWatching,
+                                palette = palette,
+                                dateFormat = dateFormat,
+                                onHeroChanged = onHeroChanged,
+                                onItemSelected = onItemSelected,
+                                largeCards = true,
+                                upFocusRequester = previousRowFocusRequester(rowIndex),
+                                firstFocusRequester = continueFocusRequester,
+                                downFocusRequester = nextRowFocusRequester(rowIndex)
+                            )
+                            HomeRow.FAVORITE_APPS -> FavoriteAppsRail(
+                                apps = favoriteInstalledApps,
+                                palette = palette,
+                                focusRequester = favoriteAppsFocusRequester,
+                                upFocusRequester = previousRowFocusRequester(rowIndex),
+                                downFocusRequester = nextRowFocusRequester(rowIndex)
+                            ) { app -> InstalledApps.launch(context, app) }
+                            HomeRow.RECOMMENDATIONS -> MediaRail(
+                                title = "Recommended TV Shows",
+                                items = recommendationItems,
+                                palette = palette,
+                                dateFormat = dateFormat,
+                                onHeroChanged = onHeroChanged,
+                                onItemSelected = onItemSelected,
+                                posters = true,
+                                upFocusRequester = previousRowFocusRequester(rowIndex),
+                                firstFocusRequester = recommendationFocusRequester,
+                                downFocusRequester = nextRowFocusRequester(rowIndex)
+                            )
+                            HomeRow.SUBSCRIPTIONS -> MediaRail(
+                                title = "New from subscriptions",
+                                items = subscriptionItems,
+                                palette = palette,
+                                dateFormat = dateFormat,
+                                onHeroChanged = onHeroChanged,
+                                onItemSelected = onItemSelected,
+                                largeCards = true,
+                                upFocusRequester = previousRowFocusRequester(rowIndex),
+                                firstFocusRequester = subscriptionFocusRequester,
+                                downFocusRequester = nextRowFocusRequester(rowIndex)
+                            )
+                            HomeRow.UPCOMING -> MediaRail(
+                                title = "Coming Up",
+                                items = upcomingEpisodes.map { it.item },
+                                palette = palette,
+                                dateFormat = dateFormat,
+                                onHeroChanged = onHeroChanged,
+                                onItemSelected = onItemSelected,
+                                showPremiereDate = true,
+                                largeCards = true,
+                                upFocusRequester = previousRowFocusRequester(rowIndex),
+                                firstFocusRequester = upcomingFocusRequester,
+                                downFocusRequester = nextRowFocusRequester(rowIndex)
+                            )
+                        }
                         Spacer(Modifier.height(18.dp))
-                    }
-                }
-                if (favoriteInstalledApps.isNotEmpty()) {
-                    item {
-                        FavoriteAppsRail(
-                            apps = favoriteInstalledApps,
-                            palette = palette,
-                            focusRequester = favoriteAppsFocusRequester,
-                            upFocusRequester = if (continueWatching.isNotEmpty()) continueFocusRequester else heroFocusRequester,
-                            downFocusRequester = firstAfterFavorites
-                        ) { app -> InstalledApps.launch(context, app) }
-                        Spacer(Modifier.height(18.dp))
-                    }
-                }
-                if (recommendationItems.isNotEmpty()) {
-                    item {
-                        MediaRail(
-                            title = "Recommended TV Shows",
-                            items = recommendationItems,
-                            palette = palette,
-                            dateFormat = dateFormat,
-                            onHeroChanged = onHeroChanged,
-                            onItemSelected = onItemSelected,
-                            posters = true,
-                            upFocusRequester = when {
-                                favoriteInstalledApps.isNotEmpty() -> favoriteAppsFocusRequester
-                                continueWatching.isNotEmpty() -> continueFocusRequester
-                                else -> if (peekProvider != null) peekFocusRequester else heroFocusRequester
-                            },
-                            firstFocusRequester = recommendationFocusRequester,
-                            downFocusRequester = firstAfterRecommendations
-                        )
-                        Spacer(Modifier.height(18.dp))
-                    }
-                }
-                if (subscriptionItems.isNotEmpty()) {
-                    item {
-                        MediaRail(
-                            title = "New from subscriptions",
-                            items = subscriptionItems,
-                            palette = palette,
-                            dateFormat = dateFormat,
-                            onHeroChanged = onHeroChanged,
-                            onItemSelected = onItemSelected,
-                            upFocusRequester = when {
-                                recommendationItems.isNotEmpty() -> recommendationFocusRequester
-                                favoriteInstalledApps.isNotEmpty() -> favoriteAppsFocusRequester
-                                continueWatching.isNotEmpty() -> continueFocusRequester
-                                else -> if (peekProvider != null) peekFocusRequester else heroFocusRequester
-                            },
-                            firstFocusRequester = subscriptionFocusRequester,
-                            downFocusRequester = if (upcomingEpisodes.isNotEmpty()) upcomingFocusRequester else null
-                        )
-                        Spacer(Modifier.height(18.dp))
-                    }
-                }
-                if (upcomingEpisodes.isNotEmpty()) {
-                    item {
-                        MediaRail(
-                            title = "Coming Up",
-                            items = upcomingEpisodes.map { it.item },
-                            palette = palette,
-                            dateFormat = dateFormat,
-                            onHeroChanged = onHeroChanged,
-                            onItemSelected = onItemSelected,
-                            showPremiereDate = true,
-                            upFocusRequester = when {
-                                subscriptionItems.isNotEmpty() -> subscriptionFocusRequester
-                                recommendationItems.isNotEmpty() -> recommendationFocusRequester
-                                favoriteInstalledApps.isNotEmpty() -> favoriteAppsFocusRequester
-                                continueWatching.isNotEmpty() -> continueFocusRequester
-                                else -> if (peekProvider != null) peekFocusRequester else heroFocusRequester
-                            },
-                            firstFocusRequester = upcomingFocusRequester
-                        )
                     }
                 }
             }
@@ -1222,7 +1260,7 @@ private fun HomeScreen(
                 onSettings = onSettings,
                 onPeekProvider = ::activatePeek,
                 allowProviderPeek = !suppressProviderPeek,
-                onTopFocused = { homeScope.launch { homeListState.scrollToItem(0) } },
+                onTopFocused = ::scrollHomeToTop,
                 nuvioProfiles = nuvioProfiles,
                 activeNuvioProfile = activeNuvioProfile,
                 profileImageUri = profileImageUri
@@ -2036,6 +2074,7 @@ private fun MediaRail(
     onItemSelected: (MediaItem) -> Unit,
     posters: Boolean = false,
     showPremiereDate: Boolean = false,
+    largeCards: Boolean = false,
     upFocusRequester: FocusRequester,
     firstFocusRequester: FocusRequester? = null,
     downFocusRequester: FocusRequester? = null
@@ -2066,10 +2105,16 @@ private fun MediaRail(
         Text(title, color = ivory, fontSize = 19.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 76.dp, bottom = 10.dp))
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             // Match TopBar's logical-width split: on the narrower 1080p layout, size the
-            // cards from the available canvas so five browsing cards remain visible.
+            // cards from the available canvas. The primary content rails use fewer, larger
+            // cards to match Google TV's wide landscape treatment.
             val compact = maxWidth < 1150.dp
             val cardWidth = if (compact) {
-                ((maxWidth - 204.dp) / 5f).coerceAtLeast(140.dp)
+                val slotCount = if (largeCards) 4f else 5f
+                val horizontalReserve = if (largeCards) 176.dp else 204.dp
+                val minimumWidth = if (largeCards) 180.dp else 140.dp
+                ((maxWidth - horizontalReserve) / slotCount).coerceAtLeast(minimumWidth)
+            } else if (largeCards) {
+                360.dp
             } else {
                 null
             }
@@ -2353,9 +2398,7 @@ private fun CircularAppIcon(
     iconSize: Dp,
     modifier: Modifier = Modifier
 ) {
-    val icon = remember(app.packageName) {
-        app.icon.toBitmap(192, 192).asImageBitmap()
-    }
+    val icon = rememberDrawableBitmap(app.icon, app.packageName, 192, 192)
     Box(
         modifier
             .size(iconSize)
@@ -2364,19 +2407,22 @@ private fun CircularAppIcon(
             .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .10f), CircleShape),
         contentAlignment = Alignment.Center
     ) {
-        Image(
-            painter = BitmapPainter(icon),
-            contentDescription = app.label,
-            contentScale = ContentScale.Fit,
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(if (app.hasRoundIcon) 2.dp else 7.dp)
-        )
+        icon?.let {
+            Image(
+                painter = BitmapPainter(it),
+                contentDescription = app.label,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(if (app.hasRoundIcon) 2.dp else 7.dp)
+            )
+        }
         if (focused) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = .08f)))
     }
 }
 
 @Composable
+@OptIn(ExperimentalComposeUiApi::class)
 private fun AppsScreen(
     palette: RelayPalette,
     favoriteApps: Set<String>,
@@ -2384,7 +2430,7 @@ private fun AppsScreen(
     onBackHome: () -> Unit
 ) {
     val context = LocalContext.current
-    val apps = remember { InstalledApps.discover(context) }
+    val apps = rememberInstalledApps(context)
     val appColumns = 5
     val rowsPerPage = 3
     val appsPerPage = appColumns * rowsPerPage
@@ -2396,10 +2442,24 @@ private fun AppsScreen(
     }
     val backFocusRequester = remember { FocusRequester() }
     var activeMenuApp by remember { mutableStateOf<InstalledApp?>(null) }
+    LaunchedEffect(apps, pageCount) {
+        if (pageCount == 0) {
+            appPage = 0
+            pageFocusIndex = 0
+            activeMenuApp = null
+        } else {
+            appPage = appPage.coerceIn(0, pageCount - 1)
+            val currentPageCount = minOf(appsPerPage, apps.size - appPage * appsPerPage)
+            pageFocusIndex = pageFocusIndex.coerceIn(0, currentPageCount - 1)
+            activeMenuApp = activeMenuApp?.takeIf { menuApp -> apps.any { it.packageName == menuApp.packageName } }
+        }
+    }
     LaunchedEffect(apps, appPage, pageFocusIndex) {
         withFrameNanos { }
         val absoluteIndex = appPage * appsPerPage + pageFocusIndex
-        apps.getOrNull(absoluteIndex)?.let { appFocusRequesters[it.packageName]?.requestFocus() }
+        apps.getOrNull(absoluteIndex)?.let { appFocusRequesters[it.packageName]?.let { requester ->
+            runCatching { requester.requestFocus() }
+        } }
     }
     val pageApps = apps.drop(appPage * appsPerPage).take(appsPerPage)
     val pageRows = pageApps.chunked(appColumns)
@@ -2421,7 +2481,10 @@ private fun AppsScreen(
         pageFocusIndex = minOf(targetRowStart + targetColumn, targetRowEnd - 1)
         return true
     }
-    BackHandler(enabled = activeMenuApp == null, onBack = onBackHome)
+    // Back first closes the app action layer. Only a second Back leaves Apps.
+    BackHandler {
+        if (activeMenuApp != null) activeMenuApp = null else onBackHome()
+    }
     Column(Modifier.fillMaxSize().padding(horizontal = 56.dp, vertical = 48.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Apps", color = ivory, fontSize = 34.sp, fontWeight = FontWeight.Light)
@@ -2473,29 +2536,34 @@ private fun AppsScreen(
                                 } else {
                                     null
                                 }
-                                Box(Modifier.weight(1f)) {
-                                    InstalledAppTile(
-                                        app = app,
-                                        palette = palette,
-                                        focusRequester = appFocusRequesters[app.packageName],
-                                        upFocusRequester = requesterFor(upIndex) ?: backFocusRequester,
-                                        downFocusRequester = requesterFor(downIndex),
-                                        leftFocusRequester = requesterFor(localIndex - 1).takeIf { column > 0 },
-                                        rightFocusRequester = requesterFor(localIndex + 1).takeIf { localIndex + 1 < rowEnd },
-                                        onPageMoveLeft = if (column == 0 && appPage > 0) {
-                                            { movePage(-1, localIndex) }
-                                        } else {
-                                            null
-                                        },
-                                        onPageMoveRight = if (localIndex + 1 == rowEnd && appPage + 1 < pageCount) {
-                                            { movePage(1, localIndex) }
-                                        } else {
-                                            null
-                                        },
-                                        menuOpen = activeMenuApp != null,
-                                        onLongClick = { activeMenuApp = app },
-                                        onClick = { InstalledApps.launch(context, app) }
-                                    )
+                                key(app.packageName) {
+                                    Box(Modifier.weight(1f)) {
+                                        InstalledAppTile(
+                                            app = app,
+                                            palette = palette,
+                                            focusRequester = appFocusRequesters[app.packageName],
+                                            upFocusRequester = requesterFor(upIndex) ?: backFocusRequester,
+                                            downFocusRequester = requesterFor(downIndex)
+                                                ?: if (rowIndex + 1 == pageRows.size) FocusRequester.Cancel else null,
+                                            leftFocusRequester = if (column > 0) requesterFor(localIndex - 1)
+                                                else if (appPage == 0) FocusRequester.Cancel else null,
+                                            rightFocusRequester = if (localIndex + 1 < rowEnd) requesterFor(localIndex + 1)
+                                                else if (appPage + 1 >= pageCount) FocusRequester.Cancel else null,
+                                            onPageMoveLeft = if (column == 0 && appPage > 0) {
+                                                { movePage(-1, localIndex) }
+                                            } else {
+                                                null
+                                            },
+                                            onPageMoveRight = if (localIndex + 1 == rowEnd && appPage + 1 < pageCount) {
+                                                { movePage(1, localIndex) }
+                                            } else {
+                                                null
+                                            },
+                                            menuOpen = activeMenuApp != null,
+                                            onLongClick = { activeMenuApp = app },
+                                            onClick = { InstalledApps.launch(context, app) }
+                                        )
+                                    }
                                 }
                             }
                             repeat(appColumns - rowApps.size) {
@@ -2557,8 +2625,10 @@ private fun InstalledAppTile(
     val showFocus = focused && !menuOpen
     val scale by animateFloatAsState(if (showFocus) 1.07f else 1f, label = "app tile focus")
     val shape = RoundedCornerShape(16.dp)
-    val artwork = remember(app.packageName) {
-        app.artwork.toBitmap(640, 360).asImageBitmap()
+    val artwork = if (app.hasLeanbackBanner) {
+        rememberDrawableBitmap(app.artwork, "banner:${app.packageName}", 640, 360)
+    } else {
+        null
     }
     DisposableEffect(Unit) {
         onDispose { selectHoldJob?.cancel() }
@@ -2637,7 +2707,7 @@ private fun InstalledAppTile(
                 .border(if (showFocus) 2.dp else 1.dp, if (showFocus) palette.accent else Color.White.copy(alpha = .10f), shape),
             contentAlignment = Alignment.Center
         ) {
-            if (app.hasLeanbackBanner) {
+            if (app.hasLeanbackBanner && artwork != null) {
                 Image(
                     painter = BitmapPainter(artwork),
                     contentDescription = app.label,
@@ -2763,7 +2833,10 @@ private fun CalendarScreen(
     }
     val visibleDays = if (weekView) (0..6).map { weekStart.plusDays(it.toLong()) } else monthDays
     val visibleEntries = if (weekView) entries.filter { it.date in weekStart..weekStart.plusDays(6) } else entries.filter { YearMonth.from(it.date) == month }
-    BackHandler(onBack = onBackHome)
+    // Back first closes a selected calendar day. Only a second Back leaves Calendar.
+    BackHandler {
+        if (selectedDay != null) selectedDay = null else onBackHome()
+    }
     LaunchedEffect(Unit) {
         withFrameNanos { }
         firstFocusRequester.requestFocus()
@@ -2937,7 +3010,12 @@ private fun SearchScreen(
     val searchScreenState = rememberScrollState()
     val sortedProviders = remember(providers) { providers.sortedBy { it.label } }
     val hasProviders = sortedProviders.isNotEmpty()
-    val installedApps = remember { InstalledApps.discover(context).filterNot { ProviderHandoff.isProviderPackage(it.packageName) }.take(6) }
+    val allInstalledApps = rememberInstalledApps(context)
+    val installedApps = remember(allInstalledApps) {
+        allInstalledApps
+            .filterNot { ProviderHandoff.isProviderPackage(it.packageName) }
+            .take(6)
+    }
     val hasResults = searchProvider == Provider.NUVIO && results.isNotEmpty()
     val hasHandoff = query.isNotBlank()
     val hasApps = installedApps.isNotEmpty()
@@ -3181,6 +3259,8 @@ private fun SettingsScreen(
     dateFormat: RelayDateFormat,
     onDateFormatChanged: (RelayDateFormat) -> Unit,
     onAppearanceChanged: (RelayAppearance) -> Unit,
+    homeRowOrder: List<HomeRow>,
+    onHomeRowOrderChanged: (List<HomeRow>) -> Unit,
     profileImageUri: String?,
     onProfileImageChanged: (String?) -> Unit,
     relayIsDefault: Boolean,
@@ -3200,6 +3280,13 @@ private fun SettingsScreen(
     val updateScope = rememberCoroutineScope()
     var webProfileUrl by remember(profileImageUri) { mutableStateOf(profileImageUri?.takeIf { it.startsWith("http://") || it.startsWith("https://") }.orEmpty()) }
     var profileUrlError by remember { mutableStateOf<String?>(null) }
+    fun moveHomeRow(from: Int, to: Int) {
+        if (from !in homeRowOrder.indices || to !in homeRowOrder.indices) return
+        val reordered = homeRowOrder.toMutableList()
+        val moved = reordered.removeAt(from)
+        reordered.add(to, moved)
+        onHomeRowOrderChanged(reordered)
+    }
     // The previous one-item LazyColumn made focus treat an entire Settings page as a single
     // oversized target, causing it to jump when crossing between the left and right columns.
     // A regular scroll container lets focus reveal only the actual control being selected.
@@ -3383,6 +3470,44 @@ private fun SettingsScreen(
                                     ActionButton(format.label, palette, primary = dateFormat == format) { onDateFormatChanged(format) }
                                 }
                             }
+                            Spacer(Modifier.height(30.dp))
+                            Text("Home row order", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                            Spacer(Modifier.height(7.dp))
+                            Text("Choose the order of rows on Home. Rows with no content are skipped automatically.", color = muted, fontSize = 15.sp, lineHeight = 21.sp)
+                            Spacer(Modifier.height(15.dp))
+                            homeRowOrder.forEachIndexed { index, row ->
+                                key(row.name) {
+                                    Row(
+                                        Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp))
+                                            .background(Color(0xFF171A20))
+                                            .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(13.dp))
+                                            .padding(start = 16.dp, end = 10.dp, top = 9.dp, bottom = 9.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Text("${index + 1}. ${row.label}", color = ivory, fontSize = 16.sp, modifier = Modifier.weight(1f))
+                                        ActionButton(
+                                            "↑",
+                                            palette,
+                                            primary = false,
+                                            onClick = { moveHomeRow(index, index - 1) }
+                                        )
+                                        Spacer(Modifier.width(8.dp))
+                                        ActionButton(
+                                            "↓",
+                                            palette,
+                                            primary = false,
+                                            onClick = { moveHomeRow(index, index + 1) }
+                                        )
+                                    }
+                                }
+                                Spacer(Modifier.height(8.dp))
+                            }
+                            ActionButton(
+                                "Reset row order",
+                                palette,
+                                primary = false,
+                                onClick = { onHomeRowOrderChanged(HomeRow.entries) }
+                            )
                         }
                         SettingsPage.PROVIDERS -> {
                             SettingsSectionTitle("Media providers", "Connect services here, then choose which ones appear in Relay's Home navigation.")
@@ -4282,8 +4407,10 @@ private fun DetailsScreen(
     val selectedPlaybackItem = if (seasonEpisode != null && (selectedSeason != originalSeason || selectedEpisode != originalEpisode)) {
         item.copy(episodeInfo = "S${selectedSeason.toString().padStart(2, '0')} • E${selectedEpisode.toString().padStart(2, '0')}", progress = 0f)
     } else item
-    BackHandler(enabled = pickerVisible) { pickerVisible = false }
-    BackHandler(enabled = !pickerVisible, onBack = onBackHome)
+    // Back first closes the season/episode picker. Only a second Back leaves Details.
+    BackHandler {
+        if (pickerVisible) pickerVisible = false else onBackHome()
+    }
     LaunchedEffect(Unit) { resumeFocusRequester.requestFocus() }
     Box(
         modifier = Modifier.fillMaxSize().background(midnight)

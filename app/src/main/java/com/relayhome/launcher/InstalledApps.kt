@@ -74,18 +74,26 @@ internal object InstalledApps {
             .asSequence()
             .filter { it.activityInfo.packageName != context.packageName }
             .map { resolveInfo ->
+                val applicationInfo = resolveInfo.activityInfo.applicationInfo
+                // Several TV apps, including some Apple TV builds, publish a logo instead of
+                // android:banner. Use the application-level metadata as a second source because
+                // their launcher activity often has no drawable of its own.
                 val banner = runCatching { resolveInfo.activityInfo.loadBanner(packageManager) }.getOrNull()
-                    ?: runCatching { resolveInfo.activityInfo.applicationInfo.loadBanner(packageManager) }.getOrNull()
+                    ?: runCatching { applicationInfo.loadBanner(packageManager) }.getOrNull()
+                    ?: runCatching { resolveInfo.activityInfo.loadLogo(packageManager) }.getOrNull()
+                    ?: runCatching { applicationInfo.loadLogo(packageManager) }.getOrNull()
                 val component = ComponentName(resolveInfo.activityInfo.packageName, resolveInfo.activityInfo.name)
                 // LauncherApps is the TV launcher-facing source and preserves
                 // adaptive icons that PackageManager flattens into legacy art.
                 val launcherIcon = launcherIconByComponent[component]
-                val roundIcon = loadRoundIcon(packageManager, resolveInfo.activityInfo.applicationInfo)
+                val roundIcon = loadRoundIcon(packageManager, applicationInfo)
                 // Prefer the app's explicitly declared round resource. Some TV launchers
                 // expose an alternate adaptive drawable that is not the app's intended icon.
                 // Fall back to the system adaptive drawable only when no round resource exists.
                 val nativeRoundIcon = roundIcon ?: launcherIcon?.takeIf { it is AdaptiveIconDrawable }
-                val icon = nativeRoundIcon ?: launcherIcon ?: resolveInfo.loadIcon(packageManager)
+                val packageIcon = runCatching { applicationInfo.loadIcon(packageManager) }.getOrNull()
+                val activityIcon = runCatching { resolveInfo.loadIcon(packageManager) }.getOrNull()
+                val icon = nativeRoundIcon ?: launcherIcon ?: packageIcon ?: activityIcon ?: packageManager.defaultActivityIcon
                 InstalledApp(
                     label = resolveInfo.loadLabel(packageManager).toString(),
                     packageName = resolveInfo.activityInfo.packageName,
