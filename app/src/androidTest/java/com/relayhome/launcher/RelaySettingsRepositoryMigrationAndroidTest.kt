@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.relayhome.launcher.data.RelaySettingsRepository
+import com.relayhome.launcher.ui.shared.HomeRow
 import com.relayhome.launcher.ui.shared.Provider
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -51,6 +52,13 @@ class RelaySettingsRepositoryMigrationAndroidTest {
             .putString("candidate_nuvio_3", "candidate-profile-3")
             .putString("nuvio_4", "legacy-profile-4")
             .commit()
+        // Model the v1 central store before the hidden-row key was introduced. The schema bump
+        // must preserve this value while adding the new setting to the migrated DataStore.
+        context.getSharedPreferences("relay_settings_data", Context.MODE_PRIVATE)
+            .edit()
+            .putInt("_schema_version", 1)
+            .putStringSet("home.hidden_rows", setOf(HomeRow.SUBSCRIPTIONS.name))
+            .commit()
         runBlocking { RelaySettingsRepository.resetForTesting(context) }
     }
 
@@ -78,6 +86,7 @@ class RelaySettingsRepositoryMigrationAndroidTest {
         assertEquals(17, limits.getValue(Provider.NUVIO))
         assertEquals(ContinueWatchingLimits.defaultLimit, limits.getValue(Provider.SMARTTUBE))
         assertEquals("relay-profile-2", RelayProfileMappingStore.get(context, 2))
+        assertEquals(setOf(HomeRow.SUBSCRIPTIONS), RelaySettingsRepository.loadHiddenHomeRows(context))
 
         val destinationKeys = runBlocking {
             RelaySettingsRepository.awaitReady(context)
@@ -93,6 +102,7 @@ class RelaySettingsRepositoryMigrationAndroidTest {
         assertTrue("profile_mapping.resolved_nuvio_2" in destinationKeys)
         assertTrue("profile_mapping.candidate_nuvio_3" in destinationKeys)
         assertTrue("profile_mapping.nuvio_4" in destinationKeys)
+        assertTrue("home.hidden_rows" in destinationKeys)
 
         // Migration is non-destructive so a downgrade or audit can still see the old state.
         assertEquals(

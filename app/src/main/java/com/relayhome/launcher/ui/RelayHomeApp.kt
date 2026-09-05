@@ -48,6 +48,15 @@ internal fun RelayHomeApp() {
     var dateFormat by remember(context, settingsRevision) { mutableStateOf(DateFormatSettings.load(context)) }
     var appearance by remember { mutableStateOf(loadRelayAppearance(context)) }
     var homeRowOrder by remember { mutableStateOf(HomeRowOrderStore.load(context)) }
+    var hiddenHomeRows by remember(context, settingsRevision) {
+        mutableStateOf(HomeRowOrderStore.loadHiddenRows(context))
+    }
+    var minimalHomeEnabled by remember(context, settingsRevision) {
+        mutableStateOf(HomeRowOrderStore.loadMinimalHomeEnabled(context))
+    }
+    var weatherCity by remember(context, settingsRevision) {
+        mutableStateOf(WeatherCitySettings.load(context))
+    }
     val dynamicColorScheme = remember(context) { dynamicRelayColorScheme(context) }
     var profileImageUri by remember(context, settingsRevision) { mutableStateOf(ProfileImageSettings.load(context)) }
     remember(context) { FavoriteAppsStore.load(context) }
@@ -348,6 +357,9 @@ internal fun RelayHomeApp() {
                     recommendations = tmdbRecommendations,
                     dateFormat = dateFormat,
                     homeRowOrder = homeRowOrder,
+                    hiddenHomeRows = hiddenHomeRows,
+                    minimalHomeEnabled = minimalHomeEnabled,
+                    weatherCity = weatherCity,
                     smartTubeNowPlaying = smartTubeNowPlaying,
                     smartTubeFeedLoading = smartTubeFeedLoading,
                     smartTubeSubscriptions = smartTubeSubscriptions,
@@ -420,6 +432,21 @@ internal fun RelayHomeApp() {
                     onHomeRowOrderChanged = { order ->
                         homeRowOrder = order
                         HomeRowOrderStore.save(context, order)
+                    },
+                    hiddenHomeRows = hiddenHomeRows,
+                    onHomeRowVisibilityChanged = { row, visible ->
+                        hiddenHomeRows = if (visible) hiddenHomeRows - row else hiddenHomeRows + row
+                        HomeRowOrderStore.saveHiddenRows(context, hiddenHomeRows)
+                    },
+                    minimalHomeEnabled = minimalHomeEnabled,
+                    onMinimalHomeEnabledChanged = { enabled ->
+                        minimalHomeEnabled = enabled
+                        HomeRowOrderStore.saveMinimalHomeEnabled(context, enabled)
+                    },
+                    weatherCity = weatherCity,
+                    onWeatherCityChanged = { city ->
+                        weatherCity = WeatherApi.normalizeCity(city)
+                        WeatherCitySettings.save(context, weatherCity)
                     },
                     profileImageUri = profileImageUri,
                     onProfileImageChanged = { uri ->

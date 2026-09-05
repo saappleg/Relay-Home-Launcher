@@ -3,15 +3,18 @@ package com.relayhome.launcher
 import androidx.compose.foundation.background
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
@@ -31,6 +34,8 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.unit.dp
+import com.relayhome.launcher.ui.home.HomeFocusAnchorHost
+import com.relayhome.launcher.ui.shared.HomeRow
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -74,6 +79,72 @@ class DpadFocusTraversalTest {
         composeRule.onNodeWithTag("settings-top-left").performKeyInput { pressKey(Key.Back) }
 
         assertEquals(listOf("settings-top-left", "back"), events)
+    }
+
+    @Test
+    fun dynamicHomeGraph_survivesRapidRowRecomposition() {
+        val routeRequesters = HomeRow.entries.associateWith { FocusRequester() }
+        val entryRequesters = HomeRow.entries.associateWith { FocusRequester() }
+        val fallbackRequester = FocusRequester()
+        val visibleRows = mutableStateOf(listOf(HomeRow.CONTINUE_WATCHING, HomeRow.FAVORITE_APPS))
+
+        composeRule.setContent {
+            val rows = visibleRows.value
+            Box(Modifier.fillMaxSize()) {
+                HomeFocusAnchorHost(
+                    routeRequesters = routeRequesters,
+                    entryRequesters = entryRequesters,
+                    mountedRows = rows.toSet(),
+                    fallbackRequester = fallbackRequester
+                )
+                Box(
+                    Modifier
+                        .width(1.dp)
+                        .height(1.dp)
+                        .focusRequester(fallbackRequester)
+                        .focusable()
+                )
+                Column {
+                    rows.forEachIndexed { index, row ->
+                        Box(
+                            Modifier
+                                .width(240.dp)
+                                .height(80.dp)
+                                .testTag("dynamic-${row.name}")
+                                .focusRequester(entryRequesters.getValue(row))
+                                .focusProperties {
+                                    if (index > 0) up = routeRequesters.getValue(rows[index - 1])
+                                    down = if (index < rows.lastIndex) {
+                                        routeRequesters.getValue(rows[index + 1])
+                                    } else {
+                                        FocusRequester.Default
+                                    }
+                                }
+                                .focusable()
+                        )
+                    }
+                }
+                LaunchedEffect(Unit) {
+                    entryRequesters.getValue(HomeRow.CONTINUE_WATCHING).requestFocus()
+                }
+            }
+        }
+        composeRule.waitForIdle()
+
+        repeat(48) { step ->
+            // Alternate a row disappearing and returning immediately before the next key. The
+            // route endpoints stay mounted, while the production bridge selects a live entry or
+            // the fallback instead of dereferencing a recycled FocusRequester.
+            visibleRows.value = if (step % 3 == 0) {
+                listOf(HomeRow.CONTINUE_WATCHING)
+            } else {
+                listOf(HomeRow.CONTINUE_WATCHING, HomeRow.FAVORITE_APPS)
+            }
+            composeRule.onNodeWithTag("dynamic-${HomeRow.CONTINUE_WATCHING.name}")
+                .performKeyInput { pressKey(Key.DirectionDown) }
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("dynamic-${HomeRow.CONTINUE_WATCHING.name}").assertExists()
     }
 
     private fun assertTwoByTwoTraversal(screen: String) {

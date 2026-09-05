@@ -5,11 +5,13 @@ import android.content.SharedPreferences
 import androidx.datastore.core.DataMigration
 import androidx.datastore.preferences.core.MutablePreferences
 import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.relayhome.launcher.ui.shared.HomeRow
 import com.relayhome.launcher.ui.shared.Provider
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
@@ -29,12 +31,15 @@ import kotlinx.coroutines.sync.withLock
 
 private const val dataStoreName = "relay_settings_data"
 private const val schemaVersionKey = "_schema_version"
-private const val currentSchemaVersion = 1
+private const val currentSchemaVersion = 4
 
 private const val enabledProvidersKey = "providers.enabled_names"
 private const val searchProviderKey = "search.default_provider"
 private const val dateFormatKey = "display.date_format"
 private const val profileImageUriKey = "profile.custom_image_uri"
+private const val hiddenHomeRowsKey = "home.hidden_rows"
+private const val minimalHomeEnabledKey = "home.minimal_enabled"
+private const val weatherCityKey = "weather.city"
 private const val continueWatchingLimitPrefix = "continue_watching.provider_limit_"
 private const val profileMappingPrefix = "profile_mapping."
 private const val resolvedProfileMappingPrefix = "resolved_nuvio_"
@@ -126,6 +131,43 @@ internal object RelaySettingsRepository {
 
     fun clearProfileImageUri(context: Context) {
         updateSnapshotAndPersist(context) { it.remove(stringPreferencesKey(profileImageUriKey)) }
+    }
+
+    fun loadHiddenHomeRows(context: Context): Set<HomeRow> {
+        initialize(context)
+        val stored = snapshot.get().values[stringSetPreferencesKey(hiddenHomeRowsKey)]
+            ?: return emptySet()
+        return stored.mapNotNull { value -> HomeRow.entries.firstOrNull { it.name == value } }.toSet()
+    }
+
+    fun saveHiddenHomeRows(context: Context, hiddenRows: Set<HomeRow>) {
+        // Persist the key even when the set is empty. An empty set is an intentional initialized
+        // value, not a signal to fall back to a future default.
+        updateSnapshotAndPersist(context) {
+            it[stringSetPreferencesKey(hiddenHomeRowsKey)] = hiddenRows.map { row -> row.name }.toSet()
+        }
+    }
+
+    fun loadMinimalHomeEnabled(context: Context): Boolean {
+        initialize(context)
+        return snapshot.get().values[booleanPreferencesKey(minimalHomeEnabledKey)] ?: false
+    }
+
+    fun saveMinimalHomeEnabled(context: Context, enabled: Boolean) {
+        updateSnapshotAndPersist(context) {
+            it[booleanPreferencesKey(minimalHomeEnabledKey)] = enabled
+        }
+    }
+
+    fun loadWeatherCity(context: Context): String {
+        initialize(context)
+        return snapshot.get().values[stringPreferencesKey(weatherCityKey)].orEmpty()
+    }
+
+    fun saveWeatherCity(context: Context, city: String) {
+        updateSnapshotAndPersist(context) {
+            it[stringPreferencesKey(weatherCityKey)] = city
+        }
     }
 
     fun loadContinueWatchingLimit(
@@ -325,6 +367,7 @@ internal object RelaySettingsRepository {
         source.getStringSafely(searchProviderKey)?.let { if (!destination.contains(stringPreferencesKey(searchProviderKey))) destination[stringPreferencesKey(searchProviderKey)] = it }
         source.getStringSafely(dateFormatKey)?.let { if (!destination.contains(stringPreferencesKey(dateFormatKey))) destination[stringPreferencesKey(dateFormatKey)] = it }
         source.getStringSafely(profileImageUriKey)?.let { if (!destination.contains(stringPreferencesKey(profileImageUriKey))) destination[stringPreferencesKey(profileImageUriKey)] = it }
+        source.getStringSetSafely(hiddenHomeRowsKey)?.let { if (!destination.contains(stringSetPreferencesKey(hiddenHomeRowsKey))) destination[stringSetPreferencesKey(hiddenHomeRowsKey)] = it }
         copyTypedDynamicKeys(source, destination, useLegacyNames = false)
         source.getIntSafely(schemaVersionKey)?.let { destination[intPreferencesKey(schemaVersionKey)] = it }
     }

@@ -30,6 +30,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.focusGroup
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.focus.FocusRequester
@@ -59,7 +60,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
@@ -80,7 +80,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -140,6 +139,7 @@ import kotlinx.coroutines.withContext
 import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.YearMonth
+import kotlin.math.roundToInt
 
 
 @Composable
@@ -190,6 +190,56 @@ private fun ambientFocusFor(app: InstalledApp, palette: RelayPalette): HomeAmbie
     fallbackPalette = palette,
     app = app
 )
+
+/**
+ * Home has a small, bounded number of vertical sections. Keeping the section entry points
+ * mounted avoids sending focus search into a LazyColumn item that has just been recycled while
+ * a TV remote is delivering a held D-pad direction.
+ */
+@Composable
+private fun HomeContentItem(content: @Composable () -> Unit) {
+    content()
+}
+
+/**
+ * A route endpoint must remain attached even while the LazyRow containing the real first card
+ * is recycled or while Home is swapping rows/modes. The endpoint immediately hands focus to the
+ * currently mounted row entry, or to the current top-content fallback if that row disappeared.
+ */
+@Composable
+internal fun HomeFocusAnchorHost(
+    routeRequesters: Map<HomeRow, FocusRequester>,
+    entryRequesters: Map<HomeRow, FocusRequester>,
+    mountedRows: Set<HomeRow>,
+    fallbackRequester: FocusRequester
+) {
+    Row(Modifier.size(1.dp)) {
+        HomeRow.entries.forEach { row ->
+            val routeRequester = routeRequesters.getValue(row)
+            val entryRequester = entryRequesters.getValue(row)
+            var focused by remember(row) { mutableStateOf(false) }
+            LaunchedEffect(focused, mountedRows, fallbackRequester) {
+                if (focused) {
+                    withFrameNanos { }
+                    val target = if (row in mountedRows) entryRequester else fallbackRequester
+                    if (runCatching { target.requestFocus() }.isFailure && target !== fallbackRequester) {
+                        // A provider/settings refresh can still remove the row between the
+                        // mounted-row snapshot and this frame. Return to the known top target
+                        // rather than leaving the focus owner without a valid destination.
+                        runCatching { fallbackRequester.requestFocus() }
+                    }
+                }
+            }
+            Box(
+                Modifier
+                    .size(1.dp)
+                    .focusRequester(routeRequester)
+                    .focusable()
+                    .onFocusChanged { focused = it.hasFocus }
+            )
+        }
+    }
+}
 
 /**
  * Google TV keeps the page visually tied to the focused content instead of switching to a
@@ -294,6 +344,9 @@ internal fun HomeScreen(
     recommendations: List<MediaItem>,
     dateFormat: RelayDateFormat,
     homeRowOrder: List<HomeRow>,
+    hiddenHomeRows: Set<HomeRow>,
+    minimalHomeEnabled: Boolean,
+    weatherCity: String,
     smartTubeNowPlaying: SmartTubeNowPlaying?,
     smartTubeFeedLoading: Boolean,
     smartTubeSubscriptions: List<SmartTubeSubscriptionVideo>,
@@ -323,7 +376,7 @@ internal fun HomeScreen(
     val recommendationFocusRequester = remember { FocusRequester() }
     val subscriptionFocusRequester = remember { FocusRequester() }
     val upcomingFocusRequester = remember { FocusRequester() }
-    val homeListState = rememberLazyListState()
+    val homeScrollState = rememberScrollState()
     var profilePickerVisible by remember { mutableStateOf(false) }
     var ambientFocus by remember { mutableStateOf(ambientFocusFor(hero)) }
     val showHeroAmbient = {
@@ -389,6 +442,19 @@ internal fun HomeScreen(
         onPeekProvider(provider)
         if (changed && provider == Provider.NUVIO) onRefreshNuvio()
     }
+    // App Peek is mounted conditionally. Do not publish its FocusRequester to the top bar until
+    // the panel has survived a frame with that provider; otherwise a held Down press can arrive
+    // in the recomposition window between the old panel being removed and the new one attaching.
+    var peekFocusReadyFor by remember { mutableStateOf<Provider?>(null) }
+    LaunchedEffect(peekProvider, minimalHomeEnabled) {
+        peekFocusReadyFor = null
+        if (peekProvider != null && !minimalHomeEnabled) {
+            withFrameNanos { }
+            peekFocusReadyFor = peekProvider
+        }
+    }
+    val showPeek = !minimalHomeEnabled && peekProvider != null && peekFocusReadyFor == peekProvider
+    val activePeekProvider = peekProvider.takeIf { showPeek }
     // The primary rail is deliberately provider-neutral: real Nuvio progress,
     // active SmartTube playback, and each enabled provider's available feed.
     val nuvioOnly = providers == setOf(Provider.NUVIO)
@@ -418,6 +484,7 @@ internal fun HomeScreen(
         homeRowOrder.distinct() + HomeRow.entries.filterNot { it in homeRowOrder }
     }
     val availableHomeRows = orderedHomeRows.filter { row ->
+        if (row in hiddenHomeRows) return@filter false
         when (row) {
             HomeRow.CONTINUE_WATCHING -> continueWatching.isNotEmpty()
             HomeRow.FAVORITE_APPS -> favoriteInstalledApps.isNotEmpty()
@@ -426,76 +493,111 @@ internal fun HomeScreen(
             HomeRow.UPCOMING -> upcomingEpisodes.isNotEmpty()
         }
     }
-    val rowFocusRequesters = mapOf(
-        HomeRow.CONTINUE_WATCHING to continueFocusRequester,
-        HomeRow.FAVORITE_APPS to favoriteAppsFocusRequester,
-        HomeRow.RECOMMENDATIONS to recommendationFocusRequester,
-        HomeRow.SUBSCRIPTIONS to subscriptionFocusRequester,
-        HomeRow.UPCOMING to upcomingFocusRequester
-    )
+    val favoriteAppsVisible = HomeRow.FAVORITE_APPS !in hiddenHomeRows && favoriteInstalledApps.isNotEmpty()
+    val rowFocusRequesters = remember {
+        mapOf(
+            HomeRow.CONTINUE_WATCHING to continueFocusRequester,
+            HomeRow.FAVORITE_APPS to favoriteAppsFocusRequester,
+            HomeRow.RECOMMENDATIONS to recommendationFocusRequester,
+            HomeRow.SUBSCRIPTIONS to subscriptionFocusRequester,
+            HomeRow.UPCOMING to upcomingFocusRequester
+        )
+    }
+    val rowEntryFocusRequesters = remember {
+        HomeRow.entries.associateWith { FocusRequester() }
+    }
     val firstRowFocusRequester = availableHomeRows.firstOrNull()?.let { rowFocusRequesters[it] }
-    val topContentFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester
+    val topContentFocusRequester = when {
+        minimalHomeEnabled && favoriteAppsVisible -> favoriteAppsFocusRequester
+        minimalHomeEnabled -> homeFocusRequester
+        activePeekProvider != null -> peekFocusRequester
+        else -> heroFocusRequester
+    }
+    val mountedHomeRows = when {
+        activePeekProvider != null -> emptySet()
+        minimalHomeEnabled -> if (favoriteAppsVisible) setOf(HomeRow.FAVORITE_APPS) else emptySet()
+        providers.isEmpty() -> if (favoriteAppsVisible) setOf(HomeRow.FAVORITE_APPS) else emptySet()
+        continueWatching.isEmpty() && favoriteInstalledApps.isEmpty() && recommendationItems.isEmpty() &&
+            subscriptionItems.isEmpty() && upcomingEpisodes.isEmpty() -> emptySet()
+        else -> availableHomeRows.toSet()
+    }
     fun previousRowFocusRequester(index: Int): FocusRequester =
         if (index == 0) topContentFocusRequester else rowFocusRequesters[availableHomeRows[index - 1]]!!
     fun nextRowFocusRequester(index: Int): FocusRequester? =
         availableHomeRows.getOrNull(index + 1)?.let { rowFocusRequesters[it] }
     val homeScope = rememberCoroutineScope()
     fun scrollHomeToTop() {
-        if (homeListState.firstVisibleItemIndex != 0 || homeListState.firstVisibleItemScrollOffset != 0) {
-            homeScope.launch { homeListState.scrollToItem(0) }
+        if (homeScrollState.value != 0) {
+            homeScope.launch { homeScrollState.scrollTo(0) }
         }
     }
     // Do not restore a previous focus-scroll offset into the hero when returning to Home.
     LaunchedEffect(focusResetGeneration) {
-        homeListState.scrollToItem(0)
+        homeScrollState.scrollTo(0)
         homeFocusRequester.requestFocus()
         withFrameNanos { }
         onHomeFocusRestored()
     }
     Box(modifier = Modifier.fillMaxSize()) {
         HomeAmbientBackdrop(focus = ambientFocus)
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            state = homeListState,
-            contentPadding = PaddingValues(bottom = 52.dp)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(homeScrollState)
         ) {
-            item {
-                if (peekProvider != null) {
-                    AppPeekPanel(
-                        provider = peekProvider,
-                        items = peekItems,
-                        palette = palette,
-                        loading = peekProvider == Provider.SMARTTUBE && smartTubeFeedLoading,
-                        focusRequester = peekFocusRequester,
-                        topFocusRequester = providerFocusRequesters[peekProvider],
-                        onPreviewFocused = ::scrollHomeToTop,
-                        onItemSelected = onItemSelected,
-                        onOpenRelayTube = onOpenRelayTube,
-                        onPlayRelayTube = onPlayRelayTube,
-                        onArtworkColor = { accent ->
-                            if (accent != null) onHeroChanged(hero.copy(palette = paletteFor(MediaItem("", peekProvider, 0f, emptyList(), ""), accent)))
-                        }
-                    )
-                } else HeroPanel(
-                    hero, palette, homeFocusRequester, heroFocusRequester, heroCandidates,
-                    downFocusRequester = firstRowFocusRequester,
-                    onHeroFocused = {
-                        showHeroAmbient()
-                        scrollHomeToTop()
-                    },
-                    onItemSelected = onItemSelected
-                ) { accent ->
-                    if (accent != null) onHeroChanged(hero.copy(palette = hero.palette.copy(accent = accent, glow = accent.copy(alpha = .32f))))
+            HomeContentItem {
+                if (!minimalHomeEnabled) {
+                    val peek = activePeekProvider
+                    if (peek != null) {
+                        AppPeekPanel(
+                            provider = peek,
+                            items = peekItems,
+                            palette = palette,
+                            loading = peek == Provider.SMARTTUBE && smartTubeFeedLoading,
+                            focusRequester = peekFocusRequester,
+                            topFocusRequester = providerFocusRequesters[peek],
+                            onPreviewFocused = ::scrollHomeToTop,
+                            onItemSelected = onItemSelected,
+                            onOpenRelayTube = onOpenRelayTube,
+                            onPlayRelayTube = onPlayRelayTube,
+                            onArtworkColor = { accent ->
+                                if (accent != null) onHeroChanged(hero.copy(palette = paletteFor(MediaItem("", peek, 0f, emptyList(), ""), accent)))
+                            }
+                        )
+                    } else HeroPanel(
+                        hero, palette, homeFocusRequester, heroFocusRequester, heroCandidates,
+                        downFocusRequester = firstRowFocusRequester,
+                        onHeroFocused = {
+                            showHeroAmbient()
+                            scrollHomeToTop()
+                        },
+                        onItemSelected = onItemSelected
+                    ) { accent ->
+                        if (accent != null) onHeroChanged(hero.copy(palette = hero.palette.copy(accent = accent, glow = accent.copy(alpha = .32f))))
+                    }
+                    Spacer(Modifier.height(18.dp))
                 }
-                Spacer(Modifier.height(18.dp))
             }
-            if (providers.isEmpty()) {
-                if (favoriteInstalledApps.isNotEmpty()) {
-                    item {
+            if (minimalHomeEnabled) {
+                if (favoriteAppsVisible) {
+                    HomeContentItem {
                         FavoriteAppsRail(
                             apps = favoriteInstalledApps,
                             palette = palette,
-                            focusRequester = favoriteAppsFocusRequester,
+                            focusRequester = rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS),
+                            upFocusRequester = homeFocusRequester,
+                            downFocusRequester = null,
+                            onFocusedApp = showAppAmbient
+                        ) { app -> InstalledApps.launch(context, app) }
+                    }
+                }
+            } else if (providers.isEmpty()) {
+                if (favoriteInstalledApps.isNotEmpty() && HomeRow.FAVORITE_APPS !in hiddenHomeRows) {
+                    HomeContentItem {
+                        FavoriteAppsRail(
+                            apps = favoriteInstalledApps,
+                            palette = palette,
+                            focusRequester = rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS),
                             upFocusRequester = heroFocusRequester,
                             downFocusRequester = null,
                             onFocusedApp = showAppAmbient
@@ -503,11 +605,11 @@ internal fun HomeScreen(
                         Spacer(Modifier.height(18.dp))
                     }
                 }
-                item {
+                HomeContentItem {
                     EmptyHomeState(palette, onSettings)
                 }
             } else if (continueWatching.isEmpty() && favoriteInstalledApps.isEmpty() && recommendationItems.isEmpty() && subscriptionItems.isEmpty() && upcomingEpisodes.isEmpty()) {
-                item {
+                HomeContentItem {
                     ProviderDataEmptyState(
                         palette = palette,
                         syncing = nuvioSyncing,
@@ -518,7 +620,7 @@ internal fun HomeScreen(
                 }
             } else {
                 availableHomeRows.forEachIndexed { rowIndex, row ->
-                    item {
+                    HomeContentItem {
                         when (row) {
                             HomeRow.CONTINUE_WATCHING -> MediaRail(
                                 title = "Continue Watching",
@@ -530,13 +632,13 @@ internal fun HomeScreen(
                                 onItemSelected = onItemSelected,
                                 largeCards = true,
                                 upFocusRequester = previousRowFocusRequester(rowIndex),
-                                firstFocusRequester = continueFocusRequester,
+                                firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.CONTINUE_WATCHING),
                                 downFocusRequester = nextRowFocusRequester(rowIndex)
                             )
                             HomeRow.FAVORITE_APPS -> FavoriteAppsRail(
                                 apps = favoriteInstalledApps,
                                 palette = palette,
-                                focusRequester = favoriteAppsFocusRequester,
+                                focusRequester = rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS),
                                 upFocusRequester = previousRowFocusRequester(rowIndex),
                                 downFocusRequester = nextRowFocusRequester(rowIndex),
                                 onFocusedApp = showAppAmbient
@@ -551,7 +653,7 @@ internal fun HomeScreen(
                                 onItemSelected = onItemSelected,
                                 posters = true,
                                 upFocusRequester = previousRowFocusRequester(rowIndex),
-                                firstFocusRequester = recommendationFocusRequester,
+                                firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.RECOMMENDATIONS),
                                 downFocusRequester = nextRowFocusRequester(rowIndex)
                             )
                             HomeRow.SUBSCRIPTIONS -> MediaRail(
@@ -564,7 +666,7 @@ internal fun HomeScreen(
                                 onItemSelected = onItemSelected,
                                 largeCards = true,
                                 upFocusRequester = previousRowFocusRequester(rowIndex),
-                                firstFocusRequester = subscriptionFocusRequester,
+                                firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.SUBSCRIPTIONS),
                                 downFocusRequester = nextRowFocusRequester(rowIndex)
                             )
                             HomeRow.UPCOMING -> MediaRail(
@@ -578,7 +680,7 @@ internal fun HomeScreen(
                                 showPremiereDate = true,
                                 largeCards = true,
                                 upFocusRequester = previousRowFocusRequester(rowIndex),
-                                firstFocusRequester = upcomingFocusRequester,
+                                firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.UPCOMING),
                                 downFocusRequester = nextRowFocusRequester(rowIndex)
                             )
                         }
@@ -586,7 +688,14 @@ internal fun HomeScreen(
                     }
                 }
             }
+            Spacer(Modifier.height(52.dp))
         }
+        HomeFocusAnchorHost(
+            routeRequesters = rowFocusRequesters,
+            entryRequesters = rowEntryFocusRequesters,
+            mountedRows = mountedHomeRows,
+            fallbackRequester = topContentFocusRequester
+        )
         // The navigation lives over the artwork, keeping the visual field continuous from the top edge.
         Box(
             modifier = Modifier
@@ -597,21 +706,22 @@ internal fun HomeScreen(
             TopBar(
                 providers = providers,
                 palette = palette,
-                peekProvider = peekProvider,
+                peekProvider = activePeekProvider,
                 homeFocusRequester = homeFocusRequester,
-                heroFocusRequester = heroFocusRequester,
                 peekFocusRequester = peekFocusRequester,
                 providerFocusRequesters = providerFocusRequesters,
-                firstContentFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester,
+                heroFocusRequester = if (minimalHomeEnabled) topContentFocusRequester else heroFocusRequester,
+                firstContentFocusRequester = topContentFocusRequester,
                 onDestination = onDestination,
                 onProvider = onProvider,
                 onSettings = onSettings,
                 onPeekProvider = ::activatePeek,
-                allowProviderPeek = !suppressProviderPeek,
+                allowProviderPeek = !suppressProviderPeek && activePeekProvider != null,
                 onTopFocused = ::scrollHomeToTop,
                 nuvioProfiles = nuvioProfiles,
                 activeNuvioProfile = activeNuvioProfile,
-                profileImageUri = profileImageUri
+                profileImageUri = profileImageUri,
+                weatherCity = weatherCity
             ) {
                 profilePickerVisible = true
             }
@@ -670,6 +780,47 @@ internal fun EmptyHomeState(palette: RelayPalette, onSettings: () -> Unit) {
 }
 
 @Composable
+private fun WeatherReadout(city: String, palette: RelayPalette) {
+    var weather by remember(city) { mutableStateOf<WeatherCurrent?>(null) }
+    LaunchedEffect(city) {
+        weather = withContext(Dispatchers.IO) { WeatherApi.current(city).getOrNull() }
+    }
+    weather?.let { current ->
+        Row(
+            modifier = Modifier
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color.White.copy(alpha = .07f))
+                .padding(horizontal = 10.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = WeatherApi.weatherIcon(current.weatherCode),
+                color = palette.accent,
+                fontSize = 17.sp,
+                modifier = Modifier.padding(end = 6.dp)
+            )
+            Column {
+                Text(
+                    text = "${current.temperatureCelsius.roundToInt()}°",
+                    color = ivory,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.Medium,
+                    lineHeight = 17.sp
+                )
+                Text(
+                    text = current.locationName,
+                    color = muted,
+                    fontSize = 10.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    lineHeight = 12.sp
+                )
+            }
+        }
+    }
+}
+
+@Composable
 internal fun TopBar(
     providers: Set<Provider>,
     palette: RelayPalette,
@@ -688,6 +839,7 @@ internal fun TopBar(
     nuvioProfiles: List<NuvioProfile>,
     activeNuvioProfile: Int,
     profileImageUri: String?,
+    weatherCity: String,
     onProfileClick: () -> Unit
 ) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
@@ -704,6 +856,10 @@ internal fun TopBar(
             Text(logo, color = ivory, fontSize = if (compact) 16.sp else 18.sp, fontWeight = FontWeight.Light, letterSpacing = if (compact) 2.sp else 3.sp)
             Spacer(Modifier.width(if (compact) 12.dp else 26.dp))
             if (!compact) Spacer(Modifier.weight(1f))
+            if (!compact) {
+                WeatherReadout(city = weatherCity, palette = palette)
+                Spacer(Modifier.width(18.dp))
+            }
             TopDestination("Home", icon = relayHomeIcon, selected = peekProvider == null, palette = palette, compact = compact, focusRequester = homeFocusRequester, downFocusRequester = firstContentFocusRequester, onFocused = {
                 if (it) {
                     onPeekProvider(null)
@@ -1172,6 +1328,18 @@ internal fun MediaRail(
         onDispose { pendingHeroUpdate[0]?.cancel() }
     }
     val listState = rememberLazyListState()
+    val firstCardFocusRequester = remember { FocusRequester() }
+    var entryFocused by remember { mutableStateOf(false) }
+    LaunchedEffect(entryFocused) {
+        if (entryFocused && firstFocusRequester != null) {
+            // The entry target is always mounted, even when LazyRow has recycled its first card.
+            // Resetting the row before handing focus to that card makes the transfer deterministic
+            // after a vertical D-pad move from a far-scrolled row.
+            listState.scrollToItem(0)
+            withFrameNanos { }
+            runCatching { firstCardFocusRequester.requestFocus() }
+        }
+    }
     Column(
         Modifier.fillMaxWidth()
             .bringIntoViewRequester(railBringIntoViewRequester)
@@ -1182,6 +1350,18 @@ internal fun MediaRail(
                 railHasFocus[0] = focusState.hasFocus
             }
     ) {
+        if (firstFocusRequester != null) {
+            // Do not point another row at a LazyRow child: that child can be recycled while the
+            // user is holding a direction key. This tiny, invisible bridge remains mounted with
+            // the row and immediately transfers focus to the first card.
+            Box(
+                Modifier
+                    .size(1.dp)
+                    .focusRequester(firstFocusRequester)
+                    .focusable()
+                    .onFocusChanged { entryFocused = it.hasFocus }
+            )
+        }
         Text(title, color = ivory, fontSize = 19.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 76.dp, bottom = 10.dp))
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             // Match TopBar's logical-width split: on the narrower 1080p layout, size the
@@ -1219,7 +1399,7 @@ internal fun MediaRail(
                         dateFormat = dateFormat,
                         showEpisodeInfo = title == "Continue Watching" || title == "Coming Up",
                         showPremiereDate = showPremiereDate,
-                        focusRequester = if (index == 0) firstFocusRequester else null,
+                        focusRequester = if (index == 0 && firstFocusRequester != null) firstCardFocusRequester else null,
                         upFocusRequester = upFocusRequester,
                         downFocusRequester = downFocusRequester,
                         onClick = {
@@ -1401,6 +1581,15 @@ internal fun FavoriteAppsRail(
     if (apps.isEmpty()) return
     val railScope = rememberCoroutineScope()
     val railBringIntoViewRequester = remember { BringIntoViewRequester() }
+    val firstCardFocusRequester = remember { FocusRequester() }
+    var entryFocused by remember { mutableStateOf(false) }
+    LaunchedEffect(entryFocused) {
+        if (entryFocused && focusRequester != null) {
+            railBringIntoViewRequester.bringIntoView()
+            withFrameNanos { }
+            runCatching { firstCardFocusRequester.requestFocus() }
+        }
+    }
     val railHasFocus = remember { booleanArrayOf(false) }
     Column(
         Modifier.fillMaxWidth()
@@ -1413,6 +1602,15 @@ internal fun FavoriteAppsRail(
             }
             .padding(start = 76.dp)
     ) {
+        if (focusRequester != null) {
+            Box(
+                Modifier
+                    .size(1.dp)
+                    .focusRequester(focusRequester)
+                    .focusable()
+                    .onFocusChanged { entryFocused = it.hasFocus }
+            )
+        }
         Text("Favorite Apps", color = ivory, fontSize = 19.sp, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(10.dp))
         LazyRow(
@@ -1424,7 +1622,7 @@ internal fun FavoriteAppsRail(
                 FavoriteAppCard(
                     app = app,
                     palette = palette,
-                    focusRequester = if (index == 0) focusRequester else null,
+                    focusRequester = if (index == 0 && focusRequester != null) firstCardFocusRequester else null,
                     upFocusRequester = upFocusRequester,
                     downFocusRequester = downFocusRequester,
                     onFocusChanged = { focused -> onFocusedApp(if (focused) app else null) }

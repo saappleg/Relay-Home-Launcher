@@ -1,6 +1,7 @@
 package com.relayhome.launcher.ui.shared
 
 import com.relayhome.launcher.SmartTubeNowPlaying
+import com.relayhome.launcher.data.RelaySettingsRepository
 import android.content.Context
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.ui.graphics.Color
@@ -226,6 +227,20 @@ internal object HomeRowOrderStore {
             .edit()
             .putString(orderKey, order.distinct().joinToString(",") { it.name })
             .apply()
+    }
+
+    fun loadHiddenRows(context: Context): Set<HomeRow> =
+        RelaySettingsRepository.loadHiddenHomeRows(context)
+
+    fun saveHiddenRows(context: Context, hiddenRows: Set<HomeRow>) {
+        RelaySettingsRepository.saveHiddenHomeRows(context, hiddenRows)
+    }
+
+    fun loadMinimalHomeEnabled(context: Context): Boolean =
+        RelaySettingsRepository.loadMinimalHomeEnabled(context)
+
+    fun saveMinimalHomeEnabled(context: Context, enabled: Boolean) {
+        RelaySettingsRepository.saveMinimalHomeEnabled(context, enabled)
     }
 }
 

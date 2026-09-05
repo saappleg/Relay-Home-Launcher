@@ -23,6 +23,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -195,6 +196,12 @@ internal fun SettingsScreen(
     onAppearanceChanged: (RelayAppearance) -> Unit,
     homeRowOrder: List<HomeRow>,
     onHomeRowOrderChanged: (List<HomeRow>) -> Unit,
+    hiddenHomeRows: Set<HomeRow>,
+    onHomeRowVisibilityChanged: (HomeRow, Boolean) -> Unit,
+    minimalHomeEnabled: Boolean,
+    onMinimalHomeEnabledChanged: (Boolean) -> Unit,
+    weatherCity: String,
+    onWeatherCityChanged: (String) -> Unit,
     profileImageUri: String?,
     onProfileImageChanged: (String?) -> Unit,
     relayIsDefault: Boolean,
@@ -214,6 +221,7 @@ internal fun SettingsScreen(
     val updateScope = rememberCoroutineScope()
     var webProfileUrl by remember(profileImageUri) { mutableStateOf(profileImageUri?.takeIf { it.startsWith("http://") || it.startsWith("https://") }.orEmpty()) }
     var profileUrlError by remember { mutableStateOf<String?>(null) }
+    var weatherCityDraft by remember(weatherCity) { mutableStateOf(weatherCity) }
     fun moveHomeRow(from: Int, to: Int) {
         if (from !in homeRowOrder.indices || to !in homeRowOrder.indices) return
         val reordered = homeRowOrder.toMutableList()
@@ -283,6 +291,18 @@ internal fun SettingsScreen(
         SettingsPage.entries.associateWith { FocusRequester() }
     }
     val pageContentFocusRequester = remember(page) { FocusRequester() }
+    val pageContentRouteRequester = remember { FocusRequester() }
+    var pageContentRouteFocused by remember { mutableStateOf(false) }
+    LaunchedEffect(pageContentRouteFocused, page) {
+        if (pageContentRouteFocused) {
+            // The page's first control changes with the selected category. Route navigation to a
+            // permanent bridge, then hand focus to the newly mounted control after composition.
+            withFrameNanos { }
+            if (runCatching { pageContentFocusRequester.requestFocus() }.isFailure) {
+                runCatching { pageNavigationFocusRequesters.getValue(page).requestFocus() }
+            }
+        }
+    }
     var settingsHasInitialFocus by remember { mutableStateOf(false) }
     LaunchedEffect(page) {
         settingsContentState.scrollTo(0)
@@ -325,7 +345,7 @@ internal fun SettingsScreen(
                         palette = palette,
                         focusRequester = pageNavigationFocusRequesters[destination],
                         upFocusRequester = if (destination == SettingsPage.entries.first()) backHomeFocusRequester else null,
-                        rightFocusRequester = if (destination == page) pageContentFocusRequester else null
+                        rightFocusRequester = if (destination == page) pageContentRouteRequester else null
                     ) { page = destination }
                 }
             }
@@ -334,6 +354,13 @@ internal fun SettingsScreen(
                     .background(Color(0xFF101218)).border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(18.dp))
                     .verticalScroll(settingsContentState).padding(30.dp)
             ) {
+                Box(
+                    Modifier
+                        .size(1.dp)
+                        .focusRequester(pageContentRouteRequester)
+                        .focusable()
+                        .onFocusChanged { pageContentRouteFocused = it.hasFocus }
+                )
                 when (page) {
                         SettingsPage.STATUS -> {
                             SettingsSectionTitle("Relay status", "A quick health check for the services powering your Home screen.")
@@ -411,9 +438,63 @@ internal fun SettingsScreen(
                                 }
                             }
                             Spacer(Modifier.height(30.dp))
+                            Text("Local weather", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+                            Spacer(Modifier.height(7.dp))
+                            Text("Set a city to show the current temperature in the Home navigation. Leave it blank to hide weather.", color = muted, fontSize = 15.sp, lineHeight = 21.sp)
+                            Spacer(Modifier.height(13.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                OutlinedTextField(
+                                    value = weatherCityDraft,
+                                    onValueChange = { weatherCityDraft = it.take(80) },
+                                    label = { Text("City, state or country") },
+                                    placeholder = { Text("e.g. New York") },
+                                    singleLine = true,
+                                    modifier = Modifier.weight(1f),
+                                    textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
+                                )
+                                ActionButton("Save", palette, primary = true) {
+                                    val normalized = WeatherApi.normalizeCity(weatherCityDraft)
+                                    weatherCityDraft = normalized
+                                    onWeatherCityChanged(normalized)
+                                }
+                                if (weatherCityDraft.isNotBlank()) {
+                                    ActionButton("Clear", palette, primary = false) {
+                                        weatherCityDraft = ""
+                                        onWeatherCityChanged("")
+                                    }
+                                }
+                            }
+                            Spacer(Modifier.height(30.dp))
                             Text("Home row order", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
                             Spacer(Modifier.height(7.dp))
                             Text("Choose the order of rows on Home. Rows with no content are skipped automatically.", color = muted, fontSize = 15.sp, lineHeight = 21.sp)
+                            Spacer(Modifier.height(15.dp))
+                            Row(
+                                Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp))
+                                    .background(Color(0xFF171A20))
+                                    .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(13.dp))
+                                    .padding(start = 16.dp, end = 10.dp, top = 12.dp, bottom = 12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("Minimal / Wallpaper Home", color = ivory, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                                    Spacer(Modifier.height(3.dp))
+                                    Text(
+                                        "Show the ambient wallpaper and Favorite Apps only. Hero and media rows stay hidden until this is turned off.",
+                                        color = muted,
+                                        fontSize = 13.sp,
+                                        lineHeight = 18.sp
+                                    )
+                                }
+                                androidx.compose.material3.Switch(
+                                    checked = minimalHomeEnabled,
+                                    onCheckedChange = onMinimalHomeEnabledChanged
+                                )
+                            }
                             Spacer(Modifier.height(15.dp))
                             homeRowOrder.forEachIndexed { index, row ->
                                 key(row.name) {
@@ -425,6 +506,11 @@ internal fun SettingsScreen(
                                         verticalAlignment = Alignment.CenterVertically
                                     ) {
                                         Text("${index + 1}. ${row.label}", color = ivory, fontSize = 16.sp, modifier = Modifier.weight(1f))
+                                        androidx.compose.material3.Switch(
+                                            checked = row !in hiddenHomeRows,
+                                            onCheckedChange = { visible -> onHomeRowVisibilityChanged(row, visible) }
+                                        )
+                                        Spacer(Modifier.width(8.dp))
                                         ActionButton(
                                             "↑",
                                             palette,
