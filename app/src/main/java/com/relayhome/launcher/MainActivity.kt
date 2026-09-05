@@ -2386,22 +2386,14 @@ private fun AppsScreen(
 ) {
     val context = LocalContext.current
     val apps = remember { InstalledApps.discover(context) }
-    val favoriteInstalledApps = remember(apps, favoriteApps) {
-        apps.filter { it.packageName in favoriteApps }
-    }
     val firstAppFocusRequester = remember { FocusRequester() }
-    val firstFavoriteFocusRequester = remember { FocusRequester() }
     val backFocusRequester = remember { FocusRequester() }
     val appsRailState = rememberLazyListState()
     var activeMenuApp by remember { mutableStateOf<InstalledApp?>(null) }
-    LaunchedEffect(apps, favoriteInstalledApps) {
+    LaunchedEffect(apps) {
         appsRailState.scrollToItem(0)
         withFrameNanos { }
-        if (favoriteInstalledApps.isNotEmpty()) {
-            firstFavoriteFocusRequester.requestFocus()
-        } else if (apps.isNotEmpty()) {
-            firstAppFocusRequester.requestFocus()
-        }
+        if (apps.isNotEmpty()) firstAppFocusRequester.requestFocus()
     }
     BackHandler(enabled = activeMenuApp == null, onBack = onBackHome)
     Column(Modifier.fillMaxSize().padding(horizontal = 56.dp, vertical = 48.dp)) {
@@ -2413,38 +2405,15 @@ private fun AppsScreen(
                 palette,
                 primary = false,
                 focusRequester = backFocusRequester,
-                downFocusRequester = if (favoriteInstalledApps.isNotEmpty()) firstFavoriteFocusRequester else firstAppFocusRequester,
+                downFocusRequester = if (apps.isNotEmpty()) firstAppFocusRequester else null,
                 onClick = onBackHome
             )
         }
         Spacer(Modifier.height(28.dp))
-        if (favoriteInstalledApps.isNotEmpty()) {
-            Row(verticalAlignment = Alignment.Bottom) {
-                Text("Favorites", color = ivory, fontSize = 23.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.width(12.dp))
-                Text("Pinned first for quick access", color = muted, fontSize = 14.sp)
-            }
-            Spacer(Modifier.height(12.dp))
-            LazyRow(
-                contentPadding = PaddingValues(start = 4.dp, end = 4.dp, top = 4.dp, bottom = 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(16.dp)
-            ) {
-                items(favoriteInstalledApps, key = { it.packageName }) { app ->
-                    FavoriteAppCard(
-                        app = app,
-                        palette = palette,
-                        focusRequester = if (app == favoriteInstalledApps.first()) firstFavoriteFocusRequester else null,
-                        upFocusRequester = backFocusRequester,
-                        downFocusRequester = firstAppFocusRequester
-                    ) { InstalledApps.launch(context, app) }
-                }
-            }
-            Spacer(Modifier.height(14.dp))
-        }
         Row(verticalAlignment = Alignment.Bottom) {
             Text("All apps", color = ivory, fontSize = 23.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.width(12.dp))
-            Text("A–Z", color = muted, fontSize = 14.sp)
+            Text("A–Z · Scroll right for more", color = muted, fontSize = 14.sp)
         }
         Spacer(Modifier.height(18.dp))
         if (apps.isEmpty()) {
@@ -2463,7 +2432,7 @@ private fun AppsScreen(
                             app = app,
                             palette = palette,
                             focusRequester = if (index == 0) firstAppFocusRequester else null,
-                            upFocusRequester = if (favoriteInstalledApps.isNotEmpty()) firstFavoriteFocusRequester else backFocusRequester,
+                            upFocusRequester = backFocusRequester,
                             menuOpen = activeMenuApp != null,
                             onLongClick = { activeMenuApp = app },
                             onClick = { InstalledApps.launch(context, app) }
