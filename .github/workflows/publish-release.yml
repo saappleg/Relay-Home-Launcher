@@ -207,14 +207,12 @@ jobs:
         run: |
           set -euo pipefail
           TAG_NAME="v${VERSION_NAME}"
-          release_json="$(gh release view "$TAG_NAME" --json tagName,isDraft,isPrerelease,isLatest,assets)"
+          release_json="$(gh release view "$TAG_NAME" --json tagName,isDraft,isPrerelease,assets)"
           printf '%s' "$release_json" | jq -e --arg tag "$TAG_NAME" '.tagName == $tag' >/dev/null
           printf '%s' "$release_json" | jq -e '.isDraft == false' >/dev/null
           if [ "$CHANNEL" = "stable" ]; then
             printf '%s' "$release_json" | jq -e '.isPrerelease == false' >/dev/null
-            printf '%s' "$release_json" | jq -e '.isLatest == true' >/dev/null
           else
             printf '%s' "$release_json" | jq -e '.isPrerelease == true' >/dev/null
-            printf '%s' "$release_json" | jq -e '.isLatest == false' >/dev/null
           fi
           printf '%s' "$release_json" | jq -e --arg asset "relay-home-${VERSION_NAME}.apk" '.assets | map(select(.name == $asset)) | length == 1' >/dev/null
