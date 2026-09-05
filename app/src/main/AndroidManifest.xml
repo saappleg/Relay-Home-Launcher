@@ -116,7 +116,7 @@
             android:clearTaskOnLaunch="true"
             android:excludeFromRecents="true"
             android:resizeableActivity="true">
-            <intent-filter>
+            <intent-filter android:priority="3">
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.HOME" />
                 <category android:name="android.intent.category.DEFAULT" />

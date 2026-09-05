@@ -97,6 +97,12 @@ Version code 16 makes Shizuku recreate Relay's privileged launcher service when
 the APK changes, preventing an older cached service implementation from being
 reused after an update.
 
+## v0.1.0-alpha.11 release notes
+
+Version code 17 adds a minimal Home intent-priority fallback for Google TV
+firmware that ignores the selected HOME role, and includes the underlying
+verification cause when the OEM still rejects the launcher change.
+
 Before publishing:
 
 1. Build and smoke-test both 1080p and 4K layouts.

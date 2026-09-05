@@ -42,6 +42,7 @@ class RelayShizukuService : IRelayHomeShell.Stub() {
             }
             throw IllegalStateException(
                 "Relay Home could not be verified after applying the launcher override. " +
+                    "Cause: ${failureMessage(error)}. " +
                     if (stockTarget != null) "The stock launcher was restored." else "",
                 error
             )
@@ -65,15 +66,20 @@ class RelayShizukuService : IRelayHomeShell.Stub() {
             runCommand("/system/bin/pm", "disable-user", "--user", USER_ID, target.packageName)
             resolved = runCatching { resolveHome() }.getOrNull()
         }
-        check(resolved == null || resolvedPackage(resolved) != target.packageName) {
-            "Android still resolves Home to $resolved after disabling ${target.componentName}."
-        }
+        // A few Google TV builds keep reporting the stock component even after a successful
+        // disable command. Leave the result for setHome() to verify; Relay's HOME filter has a
+        // minimal priority fallback for those builds.
     }
 
     private fun enableLauncher(target: LauncherTarget) {
         runCommand("/system/bin/pm", "enable", "--user", USER_ID, target.packageName)
         runCommand("/system/bin/pm", "enable", "--user", USER_ID, target.componentName)
     }
+
+    private fun failureMessage(error: Throwable): String = generateSequence(error) { it.cause }
+        .mapNotNull { it.message?.takeIf(String::isNotBlank) }
+        .joinToString("; ")
+        .ifBlank { error::class.java.simpleName }
 
     private fun setHome(packageName: String, activityName: String) {
         val failures = mutableListOf<Throwable>()
