@@ -18,8 +18,18 @@ after the first signed beta.
 The workflow validates the requested alpha, beta, or stable name, refuses to
 continue when any previously published APK cannot be inspected, and checks
 that the built APK's SHA-256 signing certificate matches the configured
-keystore. It passes signing values to Gradle through ephemeral job environment
+keystore. Historical APK inspection only downloads same-repository GitHub
+release assets over HTTPS, without forwarding the workflow token to the asset
+server. Release signing material is removed from the runner workspace at the
+end of the job. Signing values are passed to Gradle through job environment
 variables; they are not written into `local.properties`.
+
+The in-app updater follows a bounded redirect chain only when every hop remains
+HTTPS on the expected GitHub API or release-asset hosts. It accepts one
+unambiguous uploaded APK, requires a valid reported size, and verifies the
+downloaded APK's package, non-debuggable status, signing certificate, semantic
+version (matching the release tag), and increasing Android version code before
+showing the installer.
 
 The initial `v0.1.0-beta.1` asset was debug-signed. Testers must uninstall that
 one build before installing the first permanently signed beta. Future in-app

@@ -9,10 +9,14 @@ import android.graphics.drawable.Drawable
 import android.graphics.drawable.AdaptiveIconDrawable
 import android.os.Process
 import android.util.DisplayMetrics
-import androidx.core.graphics.drawable.toBitmap
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.util.Locale
 
 internal data class InstalledApp(
@@ -36,7 +40,9 @@ internal object FavoriteAppsStore {
     fun load(context: Context): Set<String> {
         val stored = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
             .getStringSet(KEY_PACKAGES, null)
-        favoritePackages = stored ?: defaultFavoritePackages(context)
+        // Do not discover packages from composition. The no-preference path is completed by
+        // InstalledApps after its existing IO-bound discovery finishes.
+        favoritePackages = stored?.toSet() ?: emptySet()
         return favoritePackages
     }
 
@@ -49,13 +55,26 @@ internal object FavoriteAppsStore {
             .apply()
     }
 
-    private fun defaultFavoritePackages(context: Context): Set<String> {
-        return InstalledApps.discover(context).take(6).map { it.packageName }.toSet()
+    fun ensureDefaults(context: Context, apps: List<InstalledApp>): Set<String> {
+        val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        // An explicit empty set and a user toggle both count as an intentional choice.
+        if (preferences.contains(KEY_PACKAGES)) return favoritePackages
+        val defaults = apps.take(6).map { it.packageName }.toSet()
+        if (defaults.isNotEmpty()) {
+            favoritePackages = defaults
+            preferences.edit().putStringSet(KEY_PACKAGES, defaults).apply()
+        }
+        return favoritePackages
     }
 }
 
 /** Reads only activities that advertise a normal Android or TV launcher entry. */
 internal object InstalledApps {
+    private val cacheLock = Any()
+    @Volatile
+    private var cachedApps: List<InstalledApp>? = null
+    private var cacheGeneration = 0L
+
     private fun loadRoundIcon(packageManager: android.content.pm.PackageManager, applicationInfo: ApplicationInfo): Drawable? {
         val resources = runCatching { packageManager.getResourcesForApplication(applicationInfo) }.getOrNull()
             ?: return null
@@ -80,29 +99,62 @@ internal object InstalledApps {
     }
 
     fun discover(context: Context): List<InstalledApp> {
+        val generation = synchronized(cacheLock) {
+            cachedApps?.let { return it }
+            cacheGeneration
+        }
+        val discovered = discoverUncached(context)
+        synchronized(cacheLock) {
+            // A package change can invalidate a discovery while it is in flight. Do not let the
+            // old result repopulate the cache after onResume has requested a fresh snapshot.
+            if (generation == cacheGeneration) cachedApps = discovered
+        }
+        return discovered
+    }
+
+    fun invalidateCache() {
+        synchronized(cacheLock) {
+            cachedApps = null
+            cacheGeneration += 1
+        }
+    }
+
+    private fun discoverUncached(context: Context): List<InstalledApp> {
         val packageManager = context.packageManager
-        val launcherIconByComponent = runCatching {
+        val launcherActivities = runCatching {
             context.getSystemService(LauncherApps::class.java)
                 ?.getActivityList(null, Process.myUserHandle())
-                // XHIGH is plenty for the 70–80dp TV icon slot and avoids decoding every
-                // installed app at XXXHIGH just to downsample it again in Compose.
-                ?.associateBy({ it.componentName }, { it.getIcon(DisplayMetrics.DENSITY_XHIGH) })
                 .orEmpty()
-        }.getOrDefault(emptyMap())
+        }.getOrDefault(emptyList())
         val categories = listOf(Intent.CATEGORY_LEANBACK_LAUNCHER, Intent.CATEGORY_LAUNCHER)
-        return categories
+        val resolveInfos = categories
+            .asSequence()
             .flatMap { category ->
                 packageManager.queryIntentActivities(
                     Intent(Intent.ACTION_MAIN).addCategory(category),
                     0
-                )
+                ).asSequence()
             }
-            .asSequence()
             .filter { it.activityInfo.packageName != context.packageName }
             // Deduplicate before loading labels, banners, icons, and legacy-art bitmaps.
             // Leanback entries come first, so the TV-facing activity wins over a duplicate
             // phone launcher entry for the same package.
             .distinctBy { it.activityInfo.packageName }
+            .toList()
+        val launcherComponents = resolveInfos.asSequence()
+            .map { ComponentName(it.activityInfo.packageName, it.activityInfo.name) }
+            .toSet()
+        val launcherIconByComponent = if (launcherComponents.isEmpty()) {
+            emptyMap()
+        } else {
+            launcherActivities
+                .asSequence()
+                .filter { it.componentName in launcherComponents }
+                // XHIGH is plenty for the 70–80dp TV icon slot and avoids decoding every
+                // installed app at XXXHIGH just to downsample it again in Compose.
+                .associate { it.componentName to it.getIcon(DisplayMetrics.DENSITY_XHIGH) }
+        }
+        return resolveInfos
             .map { resolveInfo ->
                 val applicationInfo = resolveInfo.activityInfo.applicationInfo
                 // Several TV apps, including some Apple TV builds, publish the banner only on
@@ -124,9 +176,11 @@ internal object InstalledApps {
                 // involved, so each package keeps its own native artwork.
                 val roundIcon = loadRoundIcon(packageManager, applicationInfo)
                 val nativeAdaptiveIcon = launcherIcon?.takeIf { it is AdaptiveIconDrawable }
-                val packageIcon = runCatching { applicationInfo.loadIcon(packageManager) }.getOrNull()
-                val activityIcon = runCatching { resolveInfo.loadIcon(packageManager) }.getOrNull()
-                val icon = roundIcon ?: launcherIcon ?: packageIcon ?: activityIcon ?: packageManager.defaultActivityIcon
+                val icon = roundIcon
+                    ?: launcherIcon
+                    ?: runCatching { applicationInfo.loadIcon(packageManager) }.getOrNull()
+                    ?: runCatching { resolveInfo.loadIcon(packageManager) }.getOrNull()
+                    ?: packageManager.defaultActivityIcon
                 InstalledApp(
                     label = runCatching { resolveInfo.loadLabel(packageManager).toString() }
                         .getOrDefault(resolveInfo.activityInfo.packageName),
@@ -153,4 +207,21 @@ internal object InstalledApps {
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         runCatching { context.startActivity(intent) }
     }
+}
+
+@Composable
+internal fun rememberInstalledApps(context: Context): List<InstalledApp> {
+    val appContext = remember(context) { context.applicationContext }
+    // MainActivity increments this whenever it resumes. That makes Apps reflect installs and
+    // uninstalls made in Android settings as soon as the user returns to the launcher.
+    val refreshRevision = (context as? MainActivity)?.launcherStateRevision ?: 0
+    var apps by remember(appContext) { mutableStateOf(emptyList<InstalledApp>()) }
+    LaunchedEffect(appContext, refreshRevision) {
+        val discovered = withContext(Dispatchers.IO) {
+            InstalledApps.discover(appContext)
+        }
+        apps = discovered
+        FavoriteAppsStore.ensureDefaults(appContext, discovered)
+    }
+    return apps
 }

@@ -5,16 +5,160 @@ import org.json.JSONObject
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.graphics.Color
+import java.io.IOException
+import java.io.InterruptedIOException
+import java.net.ConnectException
 import java.net.HttpURLConnection
+import java.net.NoRouteToHostException
+import java.net.SocketException
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.URLEncoder
 import java.text.Normalizer
 import java.time.LocalDate
 import java.util.Locale
+import java.net.UnknownHostException
 
 internal data class TmdbCalendarEntry(val date: LocalDate, val item: MediaItem)
 internal data class TvEpisode(val number: Int, val title: String)
 internal data class TvSeason(val seasons: List<Int>, val episodes: List<TvEpisode>)
+
+internal enum class TmdbMatchConfidence {
+    EXACT,
+    FUZZY
+}
+
+internal data class TmdbTitleMatch(
+    val result: JSONObject,
+    val confidence: TmdbMatchConfidence,
+    val score: Double
+)
+
+internal open class TmdbApiException(message: String, cause: Throwable? = null) : IOException(message, cause)
+
+internal class TmdbNotConfiguredException : TmdbApiException(
+    "TMDB metadata is not configured. Add a TMDB API key to enable metadata enrichment."
+)
+
+internal class TmdbTransientException(
+    val operation: String,
+    val attempts: Int,
+    val statusCode: Int? = null,
+    cause: Throwable? = null
+) : TmdbApiException(
+    buildString {
+        append("TMDB ")
+        append(operation)
+        append(" is temporarily unavailable after ")
+        append(attempts)
+        append(if (attempts == 1) " attempt" else " attempts")
+        statusCode?.let { append(" (HTTP ").append(it).append(")") }
+        append(". Metadata was left unchanged; try again when connected.")
+    },
+    cause
+)
+
+internal class TmdbHttpException(val statusCode: Int) : TmdbApiException(
+    "TMDB metadata lookup failed (HTTP $statusCode)."
+)
+
+internal class TmdbNoConfidentMatchException : TmdbApiException(
+    "TMDB title matching confidence was insufficient; no metadata was attached."
+)
+
+/** Conservative title matcher: exact normalized matches win; fuzzy matches need a clear margin. */
+internal object TmdbTitleMatcher {
+    private const val MIN_FUZZY_TITLE_LENGTH = 8
+    private const val MIN_FUZZY_SCORE = 0.90
+    private const val MIN_FUZZY_MARGIN = 0.08
+
+    fun match(results: JSONArray, query: String, vararg titleKeys: String): TmdbTitleMatch? {
+        val normalizedQuery = normalize(query)
+        if (normalizedQuery.isBlank()) return null
+
+        val candidates = (0 until results.length()).mapNotNull { index ->
+            val result = results.optJSONObject(index) ?: return@mapNotNull null
+            val titles = titleKeys.mapNotNull { key -> result.stringValue(key) }
+            if (titles.isEmpty()) return@mapNotNull null
+            if (titles.any { normalize(it) == normalizedQuery }) {
+                TmdbTitleMatch(result, TmdbMatchConfidence.EXACT, 1.0)
+            } else if (normalizedQuery.length >= MIN_FUZZY_TITLE_LENGTH) {
+                TmdbTitleMatch(
+                    result,
+                    TmdbMatchConfidence.FUZZY,
+                    titles.maxOf { fuzzyScore(query, it) }
+                )
+            } else {
+                null
+            }
+        }
+
+        candidates.firstOrNull { it.confidence == TmdbMatchConfidence.EXACT }?.let { return it }
+        val fuzzy = candidates
+            .filter { it.confidence == TmdbMatchConfidence.FUZZY }
+            .sortedByDescending { it.score }
+        val best = fuzzy.firstOrNull() ?: return null
+        val runnerUp = fuzzy.getOrNull(1)
+        if (best.score < MIN_FUZZY_SCORE || runnerUp != null && best.score - runnerUp.score < MIN_FUZZY_MARGIN) {
+            return null
+        }
+        return best
+    }
+
+    fun normalize(value: String): String = Normalizer.normalize(value.trim(), Normalizer.Form.NFD)
+        .replace(Regex("\\p{M}+"), "")
+        .lowercase(Locale.ROOT)
+        .replace(Regex("[^a-z0-9]+"), "")
+
+    private fun fuzzyScore(query: String, candidate: String): Double {
+        val normalizedQuery = normalize(query)
+        val normalizedCandidate = normalize(candidate)
+        if (normalizedCandidate.isBlank()) return 0.0
+        val editScore = levenshteinSimilarity(normalizedQuery, normalizedCandidate)
+        val queryTokens = tokens(query)
+        val candidateTokens = tokens(candidate)
+        val sharedTokenScore = if (queryTokens.isNotEmpty() && candidateTokens.isNotEmpty()) {
+            queryTokens.toSet().intersect(candidateTokens.toSet()).size.toDouble() /
+                maxOf(queryTokens.size, candidateTokens.size)
+        } else {
+            0.0
+        }
+        // Token order changes are safe only when both titles contain the same words. For all
+        // other cases the edit-distance score remains the controlling signal.
+        return maxOf(editScore, if (sharedTokenScore == 1.0) 0.92 else editScore * .8 + sharedTokenScore * .2)
+    }
+
+    private fun levenshteinSimilarity(left: String, right: String): Double {
+        if (left == right) return 1.0
+        if (left.isEmpty() || right.isEmpty()) return 0.0
+        var previous = IntArray(right.length + 1) { it }
+        for (leftIndex in left.indices) {
+            val current = IntArray(right.length + 1)
+            current[0] = leftIndex + 1
+            for (rightIndex in right.indices) {
+                current[rightIndex + 1] = minOf(
+                    current[rightIndex] + 1,
+                    previous[rightIndex + 1] + 1,
+                    previous[rightIndex] + if (left[leftIndex] == right[rightIndex]) 0 else 1
+                )
+            }
+            previous = current
+        }
+        return 1.0 - previous[right.length].toDouble() / maxOf(left.length, right.length)
+    }
+
+    private fun tokens(value: String): List<String> = Normalizer.normalize(value.trim(), Normalizer.Form.NFD)
+        .replace(Regex("\\p{M}+"), "")
+        .lowercase(Locale.ROOT)
+        .splitToSequence(Regex("[^a-z0-9]+"))
+        .filter { it.isNotBlank() }
+        .toList()
+
+    private fun JSONObject.stringValue(key: String): String? = when (val value = opt(key)) {
+        is String -> value.trim().takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+        else -> null
+    }
+}
 
 /** Read-only metadata supplement for Nuvio episodes. Nuvio remains the progress authority. */
 internal object TmdbApi {
@@ -26,9 +170,17 @@ internal object TmdbApi {
         return items.map { item -> runCatching { enrichEpisode(item) }.getOrDefault(item) }
     }
 
+    internal fun enrichEpisodesResult(items: List<MediaItem>): Result<List<MediaItem>> =
+        if (apiKey.isBlank()) Result.failure(TmdbNotConfiguredException())
+        else tmdbCall { items.map { enrichEpisode(it) } }
+
     suspend fun enrichEpisodeDetails(item: MediaItem): MediaItem = withContext(Dispatchers.IO) {
-        if (apiKey.isBlank()) return@withContext item
-        runCatching { enrichEpisode(item) }.getOrDefault(item)
+        enrichEpisodeDetailsResult(item).getOrDefault(item)
+    }
+
+    internal suspend fun enrichEpisodeDetailsResult(item: MediaItem): Result<MediaItem> = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) Result.failure(TmdbNotConfiguredException())
+        else tmdbCall { enrichEpisode(item) }
     }
 
     private fun tmdbArtwork(path: String?, size: String): String? = path
@@ -38,11 +190,16 @@ internal object TmdbApi {
 
     /** Searches TMDB metadata for Nuvio, whose public handoff accepts these title identifiers. */
     suspend fun search(query: String, provider: Provider): List<MediaItem> = withContext(Dispatchers.IO) {
+        searchResult(query, provider).getOrDefault(emptyList())
+    }
+
+    internal suspend fun searchResult(query: String, provider: Provider): Result<List<MediaItem>> = withContext(Dispatchers.IO) {
         // TMDB results are metadata only. Relay has no supported Stremio catalog bridge and no
         // YouTube id resolver, so presenting them as provider-owned cards would create invalid
         // handoff targets. Those providers are searched through their own public handoff below.
-        if (apiKey.isBlank() || query.isBlank() || provider != Provider.NUVIO) return@withContext emptyList()
-        runCatching {
+        if (apiKey.isBlank()) return@withContext Result.failure(TmdbNotConfiguredException())
+        if (query.isBlank() || provider != Provider.NUVIO) return@withContext Result.success(emptyList())
+        tmdbCall {
             val movies = JSONObject(get("/search/movie", mapOf("query" to query))).optJSONArray("results") ?: JSONArray()
             val shows = JSONObject(get("/search/tv", mapOf("query" to query))).optJSONArray("results") ?: JSONArray()
             fun map(values: JSONArray, type: String) = (0 until values.length()).mapNotNull { index ->
@@ -70,23 +227,30 @@ internal object TmdbApi {
                 }
             }
             (map(shows, "series") + map(movies, "movie")).distinctBy { "${it.contentType}:${it.title}" }.take(20)
-        }.getOrDefault(emptyList())
+        }
     }
 
-    /** Personalized TV recommendations seeded by exact titles in the active provider library. */
+    /** Personalized TV recommendations seeded by high-confidence titles in the active library. */
     suspend fun recommendations(items: List<MediaItem>): List<MediaItem> = withContext(Dispatchers.IO) {
-        if (apiKey.isBlank()) return@withContext emptyList()
-        // Three exact seeds already provide a full rail; avoid a burst of serial requests when
-        // Home opens on a TV with a slower connection.
-        items.take(3).flatMap { item -> runCatching { recommendationsFor(item) }.getOrDefault(emptyList()) }
-            .distinctBy { normalize(it.title) }
-            .take(18)
+        recommendationsResult(items).getOrDefault(emptyList())
+    }
+
+    internal suspend fun recommendationsResult(items: List<MediaItem>): Result<List<MediaItem>> = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) return@withContext Result.failure(TmdbNotConfiguredException())
+        tmdbCall {
+            // Three seeds already provide a full rail; avoid a burst of serial requests when Home
+            // opens on a TV with a slower connection.
+            items.take(3).flatMap { item -> recommendationsFor(item) }
+                .distinctBy { TmdbTitleMatcher.normalize(it.title) }
+                .take(18)
+        }
     }
 
     private fun recommendationsFor(source: MediaItem): List<MediaItem> {
         val queryTitle = source.showTitle ?: source.title
         val search = JSONObject(get("/search/tv", mapOf("query" to queryTitle)))
-        val series = findExactResult(search.optJSONArray("results") ?: JSONArray(), queryTitle, "name", "original_name") ?: return emptyList()
+        val series = findTmdbTitleMatch(search.optJSONArray("results") ?: JSONArray(), queryTitle, "name", "original_name")?.result
+            ?: return emptyList()
         val seriesId = series.optInt("id", -1).takeIf { it > 0 } ?: return emptyList()
         val results = JSONObject(get("/tv/$seriesId/recommendations")).optJSONArray("results") ?: JSONArray()
         return (0 until minOf(results.length(), 8)).mapNotNull { index ->
@@ -113,18 +277,25 @@ internal object TmdbApi {
         }
     }
 
-    /** Next aired episodes for exact library matches, used by Relay's Home and Calendar views. */
+    /** Next aired episodes for high-confidence library matches, used by Relay's Home and Calendar views. */
     suspend fun upcomingEpisodes(items: List<MediaItem>): List<TmdbCalendarEntry> = withContext(Dispatchers.IO) {
-        if (apiKey.isBlank()) return@withContext emptyList()
-        items.mapNotNull { item -> runCatching { upcomingEpisode(item) }.getOrNull() }
-            .distinctBy { "${it.date}:${it.item.providerContentId ?: normalize(it.item.title)}:${it.item.episodeInfo}" }
-            .sortedBy { it.date }
+        upcomingEpisodesResult(items).getOrDefault(emptyList())
+    }
+
+    internal suspend fun upcomingEpisodesResult(items: List<MediaItem>): Result<List<TmdbCalendarEntry>> = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) return@withContext Result.failure(TmdbNotConfiguredException())
+        tmdbCall {
+            items.mapNotNull { item -> upcomingEpisode(item) }
+                .distinctBy { "${it.date}:${it.item.providerContentId ?: TmdbTitleMatcher.normalize(it.item.title)}:${it.item.episodeInfo}" }
+                .sortedBy { it.date }
+        }
     }
 
     private fun upcomingEpisode(item: MediaItem): TmdbCalendarEntry? {
         val queryTitle = item.showTitle ?: item.title
         val search = JSONObject(get("/search/tv", mapOf("query" to queryTitle)))
-        val series = findExactResult(search.optJSONArray("results") ?: JSONArray(), queryTitle, "name", "original_name") ?: return null
+        val series = findTmdbTitleMatch(search.optJSONArray("results") ?: JSONArray(), queryTitle, "name", "original_name")?.result
+            ?: return null
         val seriesId = series.optInt("id", -1).takeIf { it > 0 } ?: return null
         val details = JSONObject(get("/tv/$seriesId"))
         val episode = details.optJSONObject("next_episode_to_air") ?: return null
@@ -152,16 +323,23 @@ internal object TmdbApi {
         )
     }
 
-    /** Supplies dated, exact-match TV metadata for Relay's calendar without changing provider progress. */
+    /** Supplies dated, high-confidence TV metadata without changing provider progress. */
     suspend fun calendarEntries(items: List<MediaItem>): List<TmdbCalendarEntry> = withContext(Dispatchers.IO) {
-        if (apiKey.isBlank()) return@withContext emptyList()
-        items.mapNotNull { item -> runCatching { calendarEntry(item) }.getOrNull() }
+        calendarEntriesResult(items).getOrDefault(emptyList())
+    }
+
+    internal suspend fun calendarEntriesResult(items: List<MediaItem>): Result<List<TmdbCalendarEntry>> = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) return@withContext Result.failure(TmdbNotConfiguredException())
+        tmdbCall {
+            items.mapNotNull { item -> calendarEntry(item) }
+        }
     }
 
     private fun calendarEntry(item: MediaItem): TmdbCalendarEntry? {
         val queryTitle = item.showTitle ?: item.title
         val search = JSONObject(get("/search/tv", mapOf("query" to queryTitle)))
-        val series = findExactResult(search.optJSONArray("results") ?: JSONArray(), queryTitle, "name", "original_name") ?: return null
+        val series = findTmdbTitleMatch(search.optJSONArray("results") ?: JSONArray(), queryTitle, "name", "original_name")?.result
+            ?: return null
         val seriesId = series.optInt("id", -1).takeIf { it > 0 } ?: return null
         val match = Regex("(?i)S\\s*(\\d+)\\D{0,8}E\\s*(\\d+)").find(item.episodeInfo.orEmpty())
         if (match != null) {
@@ -177,14 +355,15 @@ internal object TmdbApi {
         return TmdbCalendarEntry(LocalDate.parse(premiere), item.copy(showTitle = series.firstText("name", "original_name")))
     }
 
-    /** Accurate season/episode choices for Relay's picker; never inferred from titles alone. */
+    /** Accurate season/episode choices for Relay's picker; never inferred without a confident title match. */
     suspend fun seasonEpisodes(item: MediaItem, season: Int): Result<TvSeason> = withContext(Dispatchers.IO) {
-        runCatching {
-            check(apiKey.isNotBlank()) { "TMDB is not configured" }
+        if (apiKey.isBlank()) {
+            Result.failure(TmdbNotConfiguredException())
+        } else tmdbCall {
             val queryTitle = item.showTitle ?: item.title
             val search = JSONObject(get("/search/tv", mapOf("query" to queryTitle)))
-            val series = findExactResult(search.optJSONArray("results") ?: JSONArray(), queryTitle, "name", "original_name")
-                ?: error("No exact matching TV series")
+            val series = findTmdbTitleMatch(search.optJSONArray("results") ?: JSONArray(), queryTitle, "name", "original_name")?.result
+                ?: throw TmdbNoConfidentMatchException()
             val seriesId = series.optInt("id", -1).takeIf { it > 0 } ?: error("TV series has no valid TMDB id")
             val seriesDetails = JSONObject(get("/tv/$seriesId"))
             val seasons = (seriesDetails.optJSONArray("seasons") ?: JSONArray()).let { values ->
@@ -204,21 +383,16 @@ internal object TmdbApi {
         }
     }
 
-    private fun normalize(value: String): String = Normalizer.normalize(value.trim(), Normalizer.Form.NFD)
-        .replace(Regex("\\p{M}+"), "")
-        .lowercase(Locale.ROOT)
-        .replace(Regex("[^a-z0-9]+"), "")
-
     private fun enrichEpisode(item: MediaItem): MediaItem {
         // Nuvio's sync payload does not include a TMDB series ID. Restrict enrichment to TV-like
-        // media and require an exact normalized title match before attaching episode metadata.
+        // media and require a high-confidence title match before attaching episode metadata.
         if (item.contentType.lowercase() !in setOf("tv", "show", "series", "episode")) return item
         val match = Regex("(?i)S\\s*(\\d+)\\D{0,8}E\\s*(\\d+)").find(item.episodeInfo ?: "") ?: return item
         val season = match.groupValues[1].toInt().takeIf { it > 0 } ?: return item
         val episode = match.groupValues[2].toInt().takeIf { it > 0 } ?: return item
         val search = JSONObject(get("/search/tv", mapOf("query" to (item.showTitle ?: item.title))))
         val results = search.optJSONArray("results") ?: JSONArray()
-        val series = findExactResult(results, item.showTitle ?: item.title, "name", "original_name") ?: return item
+        val series = findTmdbTitleMatch(results, item.showTitle ?: item.title, "name", "original_name")?.result ?: return item
         val seriesId = series.optInt("id", -1).takeIf { it > 0 } ?: return item
         val details = JSONObject(get("/tv/$seriesId/season/$season/episode/$episode"))
         val episodeName = details.optString("name").trim()
@@ -233,13 +407,24 @@ internal object TmdbApi {
         )
     }
 
+    private fun findTmdbTitleMatch(results: JSONArray, query: String, vararg titleKeys: String): TmdbTitleMatch? =
+        TmdbTitleMatcher.match(results, query, *titleKeys)
+
+    // Kept as a private compatibility shim for older diagnostics/tests. Production lookups use
+    // findTmdbTitleMatch above so they receive the explicit exact-or-conservative-fuzzy boundary.
+    private fun normalize(value: String): String = TmdbTitleMatcher.normalize(value)
+
     private fun findExactResult(results: JSONArray, query: String, vararg titleKeys: String): JSONObject? {
         val normalizedQuery = normalize(query)
         if (normalizedQuery.isBlank()) return null
         return (0 until results.length())
             .asSequence()
             .mapNotNull { results.optJSONObject(it) }
-            .firstOrNull { result -> titleKeys.any { key -> normalize(result.optString(key)) == normalizedQuery } }
+            .firstOrNull { result ->
+                titleKeys.any { key ->
+                    (result.opt(key) as? String)?.let(::normalize) == normalizedQuery
+                }
+            }
     }
 
     private fun JSONObject.firstText(vararg keys: String): String? = keys
@@ -265,19 +450,61 @@ internal object TmdbApi {
         val params = (query + ("api_key" to apiKey)).entries.joinToString("&") {
             "${URLEncoder.encode(it.key, "UTF-8")}=${URLEncoder.encode(it.value, "UTF-8")}"
         }
-        val connection = (URL("$baseUrl$path?$params").openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 8_000
-            readTimeout = 8_000
+        var attempt = 1
+        while (true) {
+            try {
+                val connection = (URL("$baseUrl$path?$params").openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = REQUEST_TIMEOUT_MS
+                    readTimeout = REQUEST_TIMEOUT_MS
+                }
+                try {
+                    val status = connection.responseCode
+                    val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+                    val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+                    if (status in TRANSIENT_HTTP_STATUSES) {
+                        if (attempt >= MAX_REQUEST_ATTEMPTS) throw TmdbTransientException(path, attempt, status)
+                    } else {
+                        if (status !in 200..299) throw TmdbHttpException(status)
+                        return body
+                    }
+                } finally {
+                    connection.disconnect()
+                }
+            } catch (known: TmdbApiException) {
+                throw known
+            } catch (network: IOException) {
+                if (!network.isTransientNetwork() || attempt >= MAX_REQUEST_ATTEMPTS) {
+                    if (network.isTransientNetwork()) throw TmdbTransientException(path, attempt, cause = network)
+                    throw network
+                }
+            }
+            sleepBeforeRetry(attempt)
+            attempt += 1
         }
+    }
+
+    private inline fun <T> tmdbCall(block: () -> T): Result<T> = try {
+        Result.success(block())
+    } catch (known: TmdbApiException) {
+        Result.failure(known)
+    } catch (unexpected: Exception) {
+        Result.failure(TmdbApiException("TMDB returned an invalid metadata response.", unexpected))
+    }
+
+    private fun Throwable.isTransientNetwork(): Boolean = this is SocketTimeoutException ||
+        this is ConnectException ||
+        this is SocketException ||
+        this is UnknownHostException ||
+        this is NoRouteToHostException ||
+        this is InterruptedIOException
+
+    private fun sleepBeforeRetry(attempt: Int) {
         try {
-            val status = connection.responseCode
-            val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-            val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
-            check(status in 200..299) { "TMDB metadata lookup failed" }
-            return body
-        } finally {
-            connection.disconnect()
+            Thread.sleep(RETRY_BASE_DELAY_MS * (1L shl (attempt - 1).coerceAtMost(4)))
+        } catch (interrupted: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw TmdbTransientException("request", attempt, cause = interrupted)
         }
     }
 
@@ -294,3 +521,8 @@ internal object TmdbApi {
         37 to "Western"
     )
 }
+
+private const val REQUEST_TIMEOUT_MS = 8_000
+private const val MAX_REQUEST_ATTEMPTS = 3
+private const val RETRY_BASE_DELAY_MS = 300L
+private val TRANSIENT_HTTP_STATUSES = setOf(408, 425, 429, 500, 502, 503, 504)

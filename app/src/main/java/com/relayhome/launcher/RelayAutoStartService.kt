@@ -20,11 +20,57 @@ class RelayAutoStartService : AccessibilityService() {
         val now = SystemClock.elapsedRealtime()
         if (now - lastLaunchAt < 2_000L) return
         lastLaunchAt = now
-        startActivity(
-            Intent(this, MainActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-            }
+        val target = "${BuildConfig.APPLICATION_ID}/${MainActivity::class.java.name}"
+        LauncherOverride.recordLocalEvent(
+            this,
+            LauncherDiagnosticEvent(
+                timestampMs = System.currentTimeMillis(),
+                operation = "accessibility_auto_start",
+                strategy = LauncherOverrideStrategy.ACCESSIBILITY,
+                phase = "activity",
+                outcome = "started",
+                cause = "Stock launcher window became active.",
+                target = target,
+                observedHome = packageName
+            )
         )
+        try {
+            startActivity(
+                Intent(this, MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                }
+            )
+            // startActivity() does not prove that Relay became the visible or resolved Home app.
+            // Keep this explicitly unverified so diagnostics never overstate auto-start success.
+            LauncherOverride.recordLocalEvent(
+                this,
+                LauncherDiagnosticEvent(
+                    timestampMs = System.currentTimeMillis(),
+                    operation = "accessibility_auto_start",
+                    strategy = LauncherOverrideStrategy.ACCESSIBILITY,
+                    phase = "activity",
+                    outcome = "unverified",
+                    cause = "Activity launch was accepted; visibility was not independently verified.",
+                    target = target,
+                    observedHome = packageName
+                )
+            )
+        } catch (error: Throwable) {
+            LauncherOverride.recordLocalEvent(
+                this,
+                LauncherDiagnosticEvent(
+                    timestampMs = System.currentTimeMillis(),
+                    operation = "accessibility_auto_start",
+                    strategy = LauncherOverrideStrategy.ACCESSIBILITY,
+                    phase = "activity",
+                    outcome = "failure",
+                    cause = error.message ?: error::class.java.simpleName,
+                    target = target,
+                    observedHome = packageName
+                )
+            )
+            throw error
+        }
     }
 
     override fun onInterrupt() = Unit

@@ -54,6 +54,7 @@ android {
         applicationId = "com.relayhome.launcher"
         minSdk = 26
         targetSdk = 34
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         versionCode = relayVersionCode
         versionName = relayVersionName
         buildConfigField("String", "TMDB_API_KEY", "\"$relayTmdbApiKey\"")
@@ -105,4 +106,14 @@ dependencies {
     implementation("dev.rikka.shizuku:api:13.1.5")
     implementation("dev.rikka.shizuku:provider:13.1.5")
     debugImplementation(libs.androidx.compose.ui.tooling)
+    testImplementation(libs.junit4)
+    testImplementation(libs.org.json)
+    androidTestImplementation(libs.androidx.test.core.ktx)
+    androidTestImplementation(libs.androidx.test.junit)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.rules)
+    androidTestImplementation(libs.androidx.espresso.core)
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.androidx.compose.ui.test.junit4)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
 }

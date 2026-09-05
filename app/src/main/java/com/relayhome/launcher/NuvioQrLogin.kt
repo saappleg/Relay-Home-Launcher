@@ -125,7 +125,10 @@ internal object NuvioQrLogin {
     /** Safe for logs and diagnostics; query values are never emitted. */
     fun redactUrl(raw: String): String = runCatching {
         val uri = URI(raw.trim())
-        val host = uri.host ?: "?"
+        val host = when (uri.host?.lowercase()) {
+            "www.nuvio.tv" -> "nuvio.tv"
+            else -> uri.host ?: "?"
+        }
         val path = uri.path?.takeIf { it.isNotBlank() } ?: "/"
         "${uri.scheme ?: "?"}://$host$path"
     }.getOrElse { "<invalid-url>" }

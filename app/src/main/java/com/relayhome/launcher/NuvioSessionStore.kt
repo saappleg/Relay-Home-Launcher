@@ -19,16 +19,20 @@ internal object NuvioSessionStore {
     private const val tokenKey = "encrypted_access_token"
     private const val profileKey = "active_profile"
     private const val keyAlias = "relay_nuvio_session_key"
+    private const val gcmIvBytes = 12
 
     fun load(context: Context): NuvioSession? = runCatching {
         val payload = preferences(context).getString(tokenKey, null) ?: return null
         val parts = payload.split(':', limit = 2)
         require(parts.size == 2)
-        val plaintext = cipher(Cipher.DECRYPT_MODE, Base64.decode(parts[0], Base64.NO_WRAP))
-            .doFinal(Base64.decode(parts[1], Base64.NO_WRAP))
+        val iv = Base64.decode(parts[0], Base64.NO_WRAP)
+        require(iv.size == gcmIvBytes)
+        val ciphertext = Base64.decode(parts[1], Base64.NO_WRAP)
+        require(ciphertext.isNotEmpty())
+        val plaintext = cipher(Cipher.DECRYPT_MODE, iv).doFinal(ciphertext)
         val stored = plaintext.decodeToString().trim()
         require(stored.isNotBlank())
-        if (stored.startsWith("{")) {
+        val session = if (stored.startsWith("{")) {
             val session = JSONObject(stored)
             NuvioSession(
                 accessToken = session.getString("access_token"),
@@ -39,8 +43,11 @@ internal object NuvioSessionStore {
             // Migrate the original token-only payload without treating it as an expired session.
             NuvioSession(stored)
         }
+        require(session.accessToken.isNotBlank())
+        session
     }.getOrElse {
-        clear(context)
+        // A corrupt/undecryptable token must not reset the nonsecret profile selection.
+        preferences(context).edit().remove(tokenKey).apply()
         null
     }
 
@@ -85,6 +92,7 @@ internal object NuvioSessionStore {
                 KeyGenParameterSpec.Builder(keyAlias, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
                     .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
                     .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .setRandomizedEncryptionRequired(true)
                     .build()
             )
         }.generateKey()

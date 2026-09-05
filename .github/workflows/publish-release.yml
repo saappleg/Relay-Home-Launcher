@@ -33,6 +33,8 @@ jobs:
     steps:
       - name: Check out Relay Home
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -84,13 +86,33 @@ jobs:
           highest_code=0
           while IFS= read -r asset_url; do
             [[ -n "$asset_url" ]] || continue
+            case "$asset_url" in
+              "https://github.com/${GITHUB_REPOSITORY}/releases/download/"*) ;;
+              *)
+                echo "Previously published APK has an unexpected GitHub asset URL: $asset_url" >&2
+                exit 1
+                ;;
+            esac
             asset_file="$RUNNER_TEMP/relay-published-$RANDOM.apk"
-            if ! curl --fail --location --silent --show-error --connect-timeout 15 --max-time 120 \
-              --max-filesize 209715200 --header "Authorization: Bearer $GH_TOKEN" \
-              --header "Accept: application/octet-stream" --output "$asset_file" "$asset_url"; then
+            if ! effective_url="$(curl --fail --location --silent --show-error --connect-timeout 15 --max-time 120 \
+              --max-redirs 5 --proto '=https' --proto-redir '=https' --max-filesize 209715200 \
+              --write-out '%{url_effective}' --output "$asset_file" "$asset_url")"; then
               echo "Could not inspect previously published APK $asset_url; refusing to prove version monotonicity." >&2
               exit 1
             fi
+            case "$effective_url" in
+              "https://github.com/${GITHUB_REPOSITORY}/releases/download/"*|\
+              https://objects.githubusercontent.com/*|https://*.githubusercontent.com/*) ;;
+              *)
+                echo "Previously published APK redirected to an unexpected host: $effective_url" >&2
+                exit 1
+                ;;
+            esac
+            asset_size="$(wc -c < "$asset_file")"
+            (( asset_size >= 262144 && asset_size <= 209715200 )) || {
+              echo "Previously published APK has an invalid size: $asset_url" >&2
+              exit 1
+            }
             badging="$("$AAPT2" dump badging "$asset_file" 2>/dev/null || true)"
             package_line="$(printf '%s\n' "$badging" | grep -F "package: name='com.relayhome.launcher' " || true)"
             [[ -n "$package_line" ]] || {
@@ -216,3 +238,7 @@ jobs:
             printf '%s' "$release_json" | jq -e '.isPrerelease == true' >/dev/null
           fi
           printf '%s' "$release_json" | jq -e --arg asset "relay-home-${VERSION_NAME}.apk" '.assets | map(select(.name == $asset)) | length == 1' >/dev/null
+
+      - name: Remove release signing material
+        if: always()
+        run: rm -f "$GITHUB_WORKSPACE/relay-home-release.p12"

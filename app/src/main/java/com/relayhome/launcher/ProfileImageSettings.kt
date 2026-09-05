@@ -1,27 +1,18 @@
 package com.relayhome.launcher
 
 import android.content.Context
+import com.relayhome.launcher.data.RelaySettingsRepository
 
 internal object ProfileImageSettings {
-    private const val preferencesName = "relay_profile"
-    private const val imageUriKey = "custom_image_uri"
-
     fun load(context: Context): String? =
-        context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
-            .getString(imageUriKey, null)
+        RelaySettingsRepository.loadProfileImageUri(context)
             ?.takeIf { it.isNotBlank() }
 
     fun save(context: Context, uri: String) {
-        context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
-            .edit()
-            .putString(imageUriKey, uri)
-            .apply()
+        RelaySettingsRepository.saveProfileImageUri(context, uri)
     }
 
     fun clear(context: Context) {
-        context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
-            .edit()
-            .remove(imageUriKey)
-            .apply()
+        RelaySettingsRepository.clearProfileImageUri(context)
     }
 }

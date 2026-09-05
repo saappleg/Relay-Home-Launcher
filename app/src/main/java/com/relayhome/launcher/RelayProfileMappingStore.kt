@@ -1,29 +1,27 @@
 package com.relayhome.launcher
 
 import android.content.Context
+import com.relayhome.launcher.data.RelaySettingsRepository
 import java.text.Normalizer
 import java.util.Locale
 
 /** Maps a local Relay/Nuvio profile to an opaque RelayTube profile id. */
 internal object RelayProfileMappingStore {
-    private const val preferencesName = "relay_profile_mappings"
-
     fun get(context: Context, nuvioProfile: Int): String? =
-        preferences(context).getString(mappingKey(nuvioProfile), null)
+        RelaySettingsRepository.getResolvedProfileMapping(context, nuvioProfile)
             ?.let(::cleanOpaqueId)
 
     /** Stores a candidate only; resolve() promotes it after an exact profile-name match. */
     fun set(context: Context, nuvioProfile: Int, relayTubeProfileId: String) {
-        val editor = preferences(context).edit()
         if (relayTubeProfileId.isBlank()) {
-            editor.remove(candidateKey(nuvioProfile))
-                .remove(mappingKey(nuvioProfile))
-                .remove(legacyMappingKey(nuvioProfile))
+            RelaySettingsRepository.clearProfileMapping(context, nuvioProfile)
         } else {
-            cleanOpaqueId(relayTubeProfileId)?.let { editor.putString(candidateKey(nuvioProfile), it) }
-                ?: editor.remove(candidateKey(nuvioProfile))
+            RelaySettingsRepository.saveProfileMappingCandidate(
+                context,
+                nuvioProfile,
+                cleanOpaqueId(relayTubeProfileId)
+            )
         }
-        editor.apply()
     }
 
     @Suppress("UNUSED_PARAMETER")
@@ -63,22 +61,9 @@ internal object RelayProfileMappingStore {
 
     private fun saveResolved(context: Context, nuvioProfile: Int, relayTubeProfileId: String) {
         cleanOpaqueId(relayTubeProfileId)?.let { cleanId ->
-            preferences(context).edit()
-                .putString(mappingKey(nuvioProfile), cleanId)
-                .remove(candidateKey(nuvioProfile))
-                .remove(legacyMappingKey(nuvioProfile))
-                .apply()
+            RelaySettingsRepository.saveResolvedProfileMapping(context, nuvioProfile, cleanId)
         }
     }
-
-    private fun mappingKey(nuvioProfile: Int) = "resolved_nuvio_$nuvioProfile"
-
-    private fun candidateKey(nuvioProfile: Int) = "candidate_nuvio_$nuvioProfile"
-
-    private fun legacyMappingKey(nuvioProfile: Int) = "nuvio_$nuvioProfile"
-
-    private fun preferences(context: Context) =
-        context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
 
     private const val MAX_OPAQUE_ID_LENGTH = 128
 }

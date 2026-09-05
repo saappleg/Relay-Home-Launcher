@@ -233,6 +233,10 @@ private fun dispatchRelayTubeBroadcast(context: Context, intent: Intent) {
     if (intent.action != RELAY_TUBE_PLAYBACK_ACTION) return
     val title = normalizeRelayTubeText(intent.getStringExtra(RELAY_TUBE_EXTRA_TITLE), MAX_TITLE_LENGTH) ?: return
     val videoId = ProviderHandoff.normalizeYouTubeVideoId(intent.getStringExtra(RELAY_TUBE_EXTRA_VIDEO_ID)) ?: return
+    val positionMs = intent.getLongExtra(RELAY_TUBE_EXTRA_POSITION, 0L)
+    val durationMs = intent.getLongExtra(RELAY_TUBE_EXTRA_DURATION, 0L)
+    if (positionMs !in 0L..MAX_MEDIA_TIME_MS || durationMs !in 0L..MAX_MEDIA_TIME_MS) return
+    if (durationMs > 0L && positionMs > durationMs) return
     val profileId = normalizeRelayTubeProfileId(intent.getStringExtra(RELAY_TUBE_EXTRA_PROFILE_ID))
     if (profileId != null && SmartTubePlaybackStore.activeProfileId != null &&
         profileId != SmartTubePlaybackStore.activeProfileId
@@ -247,8 +251,8 @@ private fun dispatchRelayTubeBroadcast(context: Context, intent: Intent) {
         artworkUrl = normalizeRelayTubeArtwork(intent.getStringExtra(RELAY_TUBE_EXTRA_ARTWORK)),
         description = normalizeRelayTubeText(intent.getStringExtra(RELAY_TUBE_EXTRA_DESCRIPTION), MAX_DESCRIPTION_LENGTH),
         metadata = normalizeRelayTubeText(intent.getStringExtra(RELAY_TUBE_EXTRA_METADATA), MAX_METADATA_LENGTH),
-        positionMs = intent.getLongExtra(RELAY_TUBE_EXTRA_POSITION, 0L).coerceAtLeast(0L),
-        durationMs = intent.getLongExtra(RELAY_TUBE_EXTRA_DURATION, 0L).coerceAtLeast(0L),
+        positionMs = positionMs,
+        durationMs = durationMs,
         playing = intent.getBooleanExtra(RELAY_TUBE_EXTRA_PLAYING, false)
     ))
 }
@@ -262,21 +266,29 @@ private fun parseRelayTubeProfilePayload(payload: String?): ParsedRelayTubeProfi
         return ParsedRelayTubeProfiles(false, emptyList())
     return runCatching {
         val profiles = JSONArray(raw)
+        if (profiles.length() > MAX_PROFILES) return@runCatching ParsedRelayTubeProfiles(false, emptyList())
+        val parsedProfiles = buildList {
+            for (index in 0 until profiles.length()) {
+                val item = profiles.optJSONObject(index)
+                    ?: return@runCatching ParsedRelayTubeProfiles(false, emptyList())
+                val id = normalizeRelayTubeProfileId(item.firstText("id", "profile_id", "profileId"))
+                    ?: return@runCatching ParsedRelayTubeProfiles(false, emptyList())
+                val name = normalizeRelayTubeText(item.firstText("name", "display_name", "displayName"), MAX_PROFILE_NAME_LENGTH)
+                    ?: return@runCatching ParsedRelayTubeProfiles(false, emptyList())
+                add(RelayTubeProfile(
+                    id = id,
+                    name = name,
+                    avatarUrl = normalizeRelayTubeArtwork(item.firstText("avatar", "avatar_url", "avatarUrl", "image_url")),
+                    selected = item.optBoolean("selected", false)
+                ))
+            }
+        }
+        if (parsedProfiles.map { it.id }.distinct().size != parsedProfiles.size) {
+            return@runCatching ParsedRelayTubeProfiles(false, emptyList())
+        }
         ParsedRelayTubeProfiles(
             valid = true,
-            profiles = buildList {
-                for (index in 0 until profiles.length()) {
-                    val item = profiles.optJSONObject(index) ?: continue
-                    val id = normalizeRelayTubeProfileId(item.firstText("id", "profile_id", "profileId")) ?: continue
-                    val name = normalizeRelayTubeText(item.firstText("name", "display_name", "displayName"), MAX_PROFILE_NAME_LENGTH) ?: continue
-                    add(RelayTubeProfile(
-                        id = id,
-                        name = name,
-                        avatarUrl = normalizeRelayTubeArtwork(item.firstText("avatar", "avatar_url", "avatarUrl", "image_url")),
-                        selected = item.optBoolean("selected", false)
-                    ))
-                }
-            }.distinctBy { it.id }.take(MAX_PROFILES)
+            profiles = parsedProfiles
         )
     }.getOrDefault(ParsedRelayTubeProfiles(false, emptyList()))
 }
@@ -286,31 +298,55 @@ private fun parseSubscriptionVideoPayload(payload: String?): ParsedSubscriptionV
         return ParsedSubscriptionVideos(false, emptyList())
     return runCatching {
         val videos = JSONArray(raw)
+        if (videos.length() > MAX_FEED_ITEMS) return@runCatching ParsedSubscriptionVideos(false, emptyList())
+        val parsedVideos = buildList {
+            for (index in 0 until videos.length()) {
+                val video = videos.optJSONObject(index)
+                    ?: return@runCatching ParsedSubscriptionVideos(false, emptyList())
+                val id = ProviderHandoff.normalizeYouTubeVideoId(video.firstText("id", "video_id", "videoId", "url"))
+                    ?: return@runCatching ParsedSubscriptionVideos(false, emptyList())
+                val title = normalizeRelayTubeText(video.firstText("title", "name"), MAX_TITLE_LENGTH)
+                    ?: return@runCatching ParsedSubscriptionVideos(false, emptyList())
+                val durationMs = video.firstLong("duration_ms", "durationMs")
+                    ?: if (video.hasAny("duration_ms", "durationMs")) {
+                        return@runCatching ParsedSubscriptionVideos(false, emptyList())
+                    } else 0L
+                val positionMs = video.firstLong("position_ms", "positionMs", "resume_position_ms")
+                    ?: if (video.hasAny("position_ms", "positionMs", "resume_position_ms")) {
+                        return@runCatching ParsedSubscriptionVideos(false, emptyList())
+                    } else 0L
+                if (durationMs > MAX_MEDIA_TIME_MS || positionMs > MAX_MEDIA_TIME_MS || durationMs > 0L && positionMs > durationMs) {
+                    return@runCatching ParsedSubscriptionVideos(false, emptyList())
+                }
+                val progressValue = video.firstDouble("progress")
+                    ?: if (video.hasAny("progress")) {
+                        return@runCatching ParsedSubscriptionVideos(false, emptyList())
+                    } else 0.0
+                val progress = when {
+                    progressValue in 0.0..1.0 -> progressValue
+                    progressValue in 1.0..100.0 -> progressValue / 100.0
+                    else -> return@runCatching ParsedSubscriptionVideos(false, emptyList())
+                }
+                add(SmartTubeSubscriptionVideo(
+                    videoId = id,
+                    title = title,
+                    channel = normalizeRelayTubeText(video.firstText("channel", "author", "uploader"), MAX_CHANNEL_LENGTH),
+                    channelId = normalizeRelayTubeToken(video.firstText("channel_id", "channelId"), MAX_PROFILE_ID_LENGTH),
+                    artworkUrl = normalizeRelayTubeArtwork(video.firstText("artwork", "artwork_url", "thumbnail", "thumbnail_url")),
+                    description = normalizeRelayTubeText(video.firstText("description", "summary"), MAX_DESCRIPTION_LENGTH),
+                    metadata = normalizeRelayTubeText(video.firstText("metadata", "subtitle", "published_at", "publishedAt"), MAX_METADATA_LENGTH),
+                    durationMs = durationMs,
+                    progress = progress.toFloat(),
+                    resumePositionMs = positionMs
+                ))
+            }
+        }
+        if (parsedVideos.map { it.videoId }.distinct().size != parsedVideos.size) {
+            return@runCatching ParsedSubscriptionVideos(false, emptyList())
+        }
         ParsedSubscriptionVideos(
             valid = true,
-            videos = buildList {
-                for (index in 0 until videos.length()) {
-                    val video = videos.optJSONObject(index) ?: continue
-                    val id = ProviderHandoff.normalizeYouTubeVideoId(video.firstText("id", "video_id", "videoId", "url")) ?: continue
-                    val title = normalizeRelayTubeText(video.firstText("title", "name"), MAX_TITLE_LENGTH) ?: continue
-                    val durationMs = video.firstLong("duration_ms", "durationMs")?.coerceAtLeast(0L) ?: 0L
-                    val positionMs = video.firstLong("position_ms", "positionMs", "resume_position_ms")?.coerceAtLeast(0L) ?: 0L
-                    val progressValue = video.firstDouble("progress") ?: 0.0
-                    val progress = if (progressValue in 1.0..100.0) progressValue / 100.0 else progressValue
-                    add(SmartTubeSubscriptionVideo(
-                        videoId = id,
-                        title = title,
-                        channel = normalizeRelayTubeText(video.firstText("channel", "author", "uploader"), MAX_CHANNEL_LENGTH),
-                        channelId = normalizeRelayTubeToken(video.firstText("channel_id", "channelId"), MAX_PROFILE_ID_LENGTH),
-                        artworkUrl = normalizeRelayTubeArtwork(video.firstText("artwork", "artwork_url", "thumbnail", "thumbnail_url")),
-                        description = normalizeRelayTubeText(video.firstText("description", "summary"), MAX_DESCRIPTION_LENGTH),
-                        metadata = normalizeRelayTubeText(video.firstText("metadata", "subtitle", "published_at", "publishedAt"), MAX_METADATA_LENGTH),
-                        durationMs = durationMs,
-                        progress = progress.toFloat().coerceIn(0f, 1f),
-                        resumePositionMs = if (durationMs > 0L) positionMs.coerceAtMost(durationMs) else positionMs
-                    ))
-                }
-            }.distinctBy { it.videoId }.take(MAX_FEED_ITEMS)
+            videos = parsedVideos
         )
     }.getOrDefault(ParsedSubscriptionVideos(false, emptyList()))
 }
@@ -331,7 +367,7 @@ private fun normalizeRelayTubeText(value: String?, maxLength: Int): String? {
     val cleaned = value
         ?.replace(Regex("[\\p{C}\\s]+"), " ")
         ?.trim()
-        ?.take(maxLength)
+        ?.takeIf { it.length <= maxLength }
         ?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
     return cleaned
 }
@@ -340,23 +376,31 @@ private fun normalizeRelayTubeArtwork(value: String?): String? {
     val raw = normalizeRelayTubeText(value, MAX_ARTWORK_URL_LENGTH) ?: return null
     val uri = runCatching { Uri.parse(raw) }.getOrNull() ?: return null
     val scheme = uri.scheme?.lowercase() ?: return null
-    return raw.takeIf { scheme in setOf("http", "https") && !uri.host.isNullOrBlank() }
+    return raw.takeIf {
+        scheme in setOf("http", "https") &&
+            !uri.host.isNullOrBlank() &&
+            uri.userInfo == null &&
+            uri.fragment == null &&
+            (uri.port == -1 || uri.port in setOf(80, 443))
+    }
 }
 
 private fun JSONObject.firstText(vararg names: String): String? = names
     .asSequence()
-    .mapNotNull { name -> opt(name)?.takeUnless { it == JSONObject.NULL }?.toString() }
+    .mapNotNull { name -> (opt(name) as? String)?.trim() }
     .firstOrNull { it.isNotBlank() }
+
+private fun JSONObject.hasAny(vararg names: String): Boolean = names.any { has(it) && opt(it) != JSONObject.NULL }
 
 private fun JSONObject.firstLong(vararg names: String): Long? = names
     .asSequence()
     .mapNotNull { name ->
         when (val value = opt(name)) {
-            is Number -> value.toLong()
+            is Number -> value.toDouble().takeIf { it.isFinite() && it == it.toLong().toDouble() }?.toLong()
             else -> value?.toString()?.toLongOrNull()
         }
     }
-    .firstOrNull()
+    .firstOrNull { it >= 0L }
 
 private fun JSONObject.firstDouble(vararg names: String): Double? = names
     .asSequence()
@@ -398,6 +442,7 @@ private const val MAX_CHANNEL_LENGTH = 160
 private const val MAX_DESCRIPTION_LENGTH = 2_000
 private const val MAX_METADATA_LENGTH = 300
 private const val MAX_ARTWORK_URL_LENGTH = 2_048
+private const val MAX_MEDIA_TIME_MS = 30L * 24L * 60L * 60L * 1_000L
 
 internal object RelayTubeProfileBridge {
     private const val selectAction = "com.relaytube.action.SELECT_PROFILE"
@@ -470,7 +515,9 @@ internal object RelayTubeProfileBridge {
         runCatching {
             val result = context.contentResolver.call(Uri.parse(endpoint.providerUri), "feeds", profileId, null) ?: return@runCatching
             val returnedProfileId = normalizeRelayTubeProfileId(result.getString(RELAY_TUBE_EXTRA_PROFILE_ID))
-            if (returnedProfileId != null && returnedProfileId != profileId) return@runCatching
+            // A feed response is profile-scoped. Without an echoed id there is no safe way to
+            // prove that a delayed response belongs to the currently selected profile.
+            if (returnedProfileId != profileId) return@runCatching
             result.getString("subscriptions")?.let { payload ->
                 val parsed = parseSubscriptionVideoPayload(payload)
                 if (parsed.valid) SmartTubePlaybackStore.saveSubscriptionVideos(context, profileId, payload, parsed.videos)
