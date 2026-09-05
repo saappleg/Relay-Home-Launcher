@@ -64,6 +64,12 @@ Version code 11 accepts RelayTube alpha, beta, stable, and F-Droid bridge
 broadcasts, discovers the installed RelayTube profile provider dynamically, and
 keeps the package-specific bridge permissions aligned across flavors.
 
+## v0.1.0-alpha.6 release notes
+
+Version code 12 preserves Nuvio provider context through re-authentication,
+hardens RelayTube return navigation, and validates GitHub update metadata,
+downloaded APK identity, and signing-certificate continuity.
+
 Before publishing:
 
 1. Build and smoke-test both 1080p and 4K layouts.
