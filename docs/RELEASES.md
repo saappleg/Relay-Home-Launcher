@@ -70,6 +70,14 @@ Version code 12 preserves Nuvio provider context through re-authentication,
 hardens RelayTube return navigation, and validates GitHub update metadata,
 downloaded APK identity, and signing-certificate continuity.
 
+## v0.1.0-alpha.7 release notes
+
+Version code 13 adds Nuvio TV QR sign-in with a scannable approval flow and
+manual code fallback, improves search, details, Apps, and settings focus on
+Android TV, and gives installed apps consistent circular icon treatment.
+RelayTube bridge payloads, profile isolation, YouTube handoff validation, and
+TMDB metadata normalization are also hardened for safer provider fallbacks.
+
 Before publishing:
 
 1. Build and smoke-test both 1080p and 4K layouts.

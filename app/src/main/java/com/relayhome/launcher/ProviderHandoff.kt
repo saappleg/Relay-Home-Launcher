@@ -84,7 +84,7 @@ internal object ProviderHandoff {
 
     /** Opens a specific YouTube video in the installed SmartTube / RelayTube variant. */
     fun openSmartTubeVideo(context: Context, videoId: String, resumePositionMs: Long = 0L) {
-        val cleanVideoId = cleanProviderId(videoId)
+        val cleanVideoId = normalizeYouTubeVideoId(videoId)
         val packageName = installedSmartTubePackage(context)
         if (packageName == null) {
             notice(context, "RelayTube is not installed. Install RelayTube first.")
@@ -242,10 +242,36 @@ internal object ProviderHandoff {
             .build()
     }
 
+    /**
+     * Accepts only a raw YouTube id or a public YouTube URL that resolves to one.
+     * RelayTube's bridge promises the raw id, but accepting its public URL fallback makes
+     * handoff resilient to older companion builds without allowing arbitrary URLs through.
+     */
+    internal fun normalizeYouTubeVideoId(value: String?): String? {
+        val raw = value?.trim()?.takeIf { it.isNotBlank() } ?: return null
+        if (youtubeVideoIdPattern.matches(raw)) return raw
+
+        val uri = runCatching {
+            Uri.parse(raw)
+        }.getOrNull() ?: return null
+        val scheme = uri.scheme?.lowercase(Locale.ROOT)
+        val host = uri.host?.lowercase(Locale.ROOT)
+        if (scheme !in setOf("http", "https") || host !in youtubeHosts) return null
+
+        val pathSegments = uri.pathSegments
+        val candidate = when {
+            host == "youtu.be" && pathSegments.size == 1 -> pathSegments.single()
+            host != "youtu.be" && pathSegments.firstOrNull() == "watch" -> uri.getQueryParameter("v")
+            host != "youtu.be" && pathSegments.size == 2 && pathSegments.first() in youtubeVideoPathPrefixes -> pathSegments[1]
+            else -> null
+        }
+        return candidate?.takeIf { youtubeVideoIdPattern.matches(it) }
+    }
+
     private fun cleanProviderId(value: String?): String? = value
         ?.trim()
         ?.takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
-        ?.takeIf { it.none(Char::isWhitespace) && '/' !in it && '?' !in it && '#' !in it }
+        ?.takeIf { it.none { character -> character.isWhitespace() || character.isISOControl() } && '/' !in it && '?' !in it && '#' !in it }
 
     private fun launch(context: Context, uri: Uri, unavailableMessage: String, packageName: String? = null) {
         val intent = Intent(Intent.ACTION_VIEW, uri)
@@ -262,4 +288,8 @@ internal object ProviderHandoff {
     private fun notice(context: Context, message: String) {
         Toast.makeText(context, message, Toast.LENGTH_LONG).show()
     }
+
+    private val youtubeVideoIdPattern = Regex("[A-Za-z0-9_-]{11}")
+    private val youtubeHosts = setOf("youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be")
+    private val youtubeVideoPathPrefixes = setOf("shorts", "embed", "live")
 }

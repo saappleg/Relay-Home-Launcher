@@ -1,5 +1,6 @@
 package com.relayhome.launcher
 
+import android.graphics.Bitmap
 import android.os.Bundle
 import android.app.role.RoleManager
 import android.content.ClipData
@@ -105,6 +106,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -113,6 +115,9 @@ import androidx.core.graphics.drawable.toBitmap
 import androidx.palette.graphics.Palette
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.EncodeHintType
+import com.google.zxing.MultiFormatWriter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -2302,9 +2307,6 @@ private fun FavoriteAppCard(
     val source = remember { MutableInteractionSource() }
     val focused by source.collectIsFocusedAsState()
     val scale = if (focused) 1.07f else 1f
-    val icon = remember(app.packageName, app.hasRoundIcon, app.useCircularMask) {
-        app.icon.toBitmap(192, 192).asImageBitmap()
-    }
     Column(
         (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .then(if (upFocusRequester != null || downFocusRequester != null) Modifier.focusProperties {
@@ -2315,28 +2317,16 @@ private fun FavoriteAppCard(
             .clickable(interactionSource = source, indication = null, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Box(
-            Modifier.size(76.dp).clip(CircleShape).background(Color(0xFF242730)).graphicsLayer {
+        CircularAppIcon(
+            app = app,
+            palette = palette,
+            focused = focused,
+            iconSize = 76.dp,
+            modifier = Modifier.graphicsLayer {
                 scaleX = scale
                 scaleY = scale
-                shape = CircleShape
-                clip = true
             }
-                .background(if (focused) palette.accent.copy(alpha = .30f) else Color.Transparent)
-                .border(if (focused) 2.dp else 0.dp, if (focused) palette.accent else Color.Transparent, CircleShape),
-            contentAlignment = Alignment.Center
-        ) {
-            Image(
-                painter = BitmapPainter(icon),
-                contentDescription = app.label,
-                contentScale = if (app.useCircularMask) ContentScale.FillBounds else ContentScale.Fit,
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(if (app.useCircularMask) 0.dp else if (app.hasRoundIcon) 2.dp else 7.dp)
-                    .then(if (app.useCircularMask) Modifier.clip(CircleShape) else Modifier)
-            )
-            if (focused) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = .08f)))
-        }
+        )
         Spacer(Modifier.height(7.dp))
         Text(
             app.label,
@@ -2349,6 +2339,43 @@ private fun FavoriteAppCard(
     }
 }
 
+/**
+ * A single TV-friendly icon treatment shared by the Home favorites rail and the Apps page.
+ * Always using the app icon (never a banner) keeps mixed launcher metadata from producing
+ * stretched or visually mashed tiles. Native round/adaptive icons retain their own artwork;
+ * legacy square icons receive the same circular slot Google TV uses for consistency.
+ */
+@Composable
+private fun CircularAppIcon(
+    app: InstalledApp,
+    palette: RelayPalette,
+    focused: Boolean,
+    iconSize: Dp,
+    modifier: Modifier = Modifier
+) {
+    val icon = remember(app.packageName) {
+        app.icon.toBitmap(192, 192).asImageBitmap()
+    }
+    Box(
+        modifier
+            .size(iconSize)
+            .clip(CircleShape)
+            .background(if (focused) palette.accent.copy(alpha = .30f) else Color(0xFF242730))
+            .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .10f), CircleShape),
+        contentAlignment = Alignment.Center
+    ) {
+        Image(
+            painter = BitmapPainter(icon),
+            contentDescription = app.label,
+            contentScale = ContentScale.Fit,
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(if (app.hasRoundIcon) 2.dp else 7.dp)
+        )
+        if (focused) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = .08f)))
+    }
+}
+
 @Composable
 private fun AppsScreen(
     palette: RelayPalette,
@@ -2358,22 +2385,66 @@ private fun AppsScreen(
 ) {
     val context = LocalContext.current
     val apps = remember { InstalledApps.discover(context).sortedBy { it.label.lowercase() } }
+    val favoriteInstalledApps = remember(apps, favoriteApps) {
+        apps.filter { it.packageName in favoriteApps }
+    }
     val firstAppFocusRequester = remember { FocusRequester() }
+    val firstFavoriteFocusRequester = remember { FocusRequester() }
+    val backFocusRequester = remember { FocusRequester() }
     val appsGridState = rememberLazyGridState()
     var activeMenuApp by remember { mutableStateOf<InstalledApp?>(null) }
-    LaunchedEffect(apps) {
+    LaunchedEffect(apps, favoriteInstalledApps) {
         appsGridState.scrollToItem(0)
-        if (apps.isNotEmpty()) firstAppFocusRequester.requestFocus()
+        withFrameNanos { }
+        if (favoriteInstalledApps.isNotEmpty()) {
+            firstFavoriteFocusRequester.requestFocus()
+        } else if (apps.isNotEmpty()) {
+            firstAppFocusRequester.requestFocus()
+        }
     }
     BackHandler(enabled = activeMenuApp == null, onBack = onBackHome)
     Column(Modifier.fillMaxSize().padding(horizontal = 56.dp, vertical = 48.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Apps", color = ivory, fontSize = 34.sp, fontWeight = FontWeight.Light)
             Spacer(Modifier.weight(1f))
-            ActionButton("Back to Home", palette, primary = false, onClick = onBackHome)
+            ActionButton(
+                "Back to Home",
+                palette,
+                primary = false,
+                focusRequester = backFocusRequester,
+                downFocusRequester = if (favoriteInstalledApps.isNotEmpty()) firstFavoriteFocusRequester else firstAppFocusRequester,
+                onClick = onBackHome
+            )
         }
         Spacer(Modifier.height(28.dp))
-        Text("All apps", color = ivory, fontSize = 23.sp, fontWeight = FontWeight.SemiBold)
+        if (favoriteInstalledApps.isNotEmpty()) {
+            Row(verticalAlignment = Alignment.Bottom) {
+                Text("Favorites", color = ivory, fontSize = 23.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.width(12.dp))
+                Text("Pinned first for quick access", color = muted, fontSize = 14.sp)
+            }
+            Spacer(Modifier.height(12.dp))
+            LazyRow(
+                contentPadding = PaddingValues(start = 4.dp, end = 4.dp, top = 4.dp, bottom = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                items(favoriteInstalledApps, key = { it.packageName }) { app ->
+                    FavoriteAppCard(
+                        app = app,
+                        palette = palette,
+                        focusRequester = if (app == favoriteInstalledApps.first()) firstFavoriteFocusRequester else null,
+                        upFocusRequester = backFocusRequester,
+                        downFocusRequester = firstAppFocusRequester
+                    ) { InstalledApps.launch(context, app) }
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+        }
+        Row(verticalAlignment = Alignment.Bottom) {
+            Text("All apps", color = ivory, fontSize = 23.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.width(12.dp))
+            Text("A–Z", color = muted, fontSize = 14.sp)
+        }
         Spacer(Modifier.height(18.dp))
         if (apps.isEmpty()) {
             Text("No launchable apps were found yet.", color = muted, fontSize = 17.sp)
@@ -2392,6 +2463,7 @@ private fun AppsScreen(
                         app = app,
                         palette = palette,
                         focusRequester = if (index == 0) firstAppFocusRequester else null,
+                        upFocusRequester = if (favoriteInstalledApps.isNotEmpty()) firstFavoriteFocusRequester else backFocusRequester,
                         menuOpen = activeMenuApp != null,
                         onLongClick = { activeMenuApp = app },
                         onClick = { InstalledApps.launch(context, app) }
@@ -2432,6 +2504,7 @@ private fun InstalledAppTile(
     app: InstalledApp,
     palette: RelayPalette,
     focusRequester: FocusRequester? = null,
+    upFocusRequester: FocusRequester? = null,
     menuOpen: Boolean,
     onLongClick: () -> Unit,
     onClick: () -> Unit
@@ -2444,10 +2517,6 @@ private fun InstalledAppTile(
     val showFocus = focused && !menuOpen
     val scale by animateFloatAsState(if (showFocus) 1.07f else 1f, label = "app tile focus")
     val shape = RoundedCornerShape(16.dp)
-    val artwork = remember(app.packageName) {
-        if (app.hasLeanbackBanner) app.artwork.toBitmap(480, 270).asImageBitmap()
-        else app.artwork.toBitmap(192, 192).asImageBitmap()
-    }
     DisposableEffect(Unit) {
         onDispose { selectHoldJob?.cancel() }
     }
@@ -2458,13 +2527,11 @@ private fun InstalledAppTile(
             longPressHandled = false
         }
     }
-    Box(
+    Column(
         modifier = (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .then(if (upFocusRequester != null) Modifier.focusProperties { up = upFocusRequester } else Modifier)
             .fillMaxWidth()
-            .aspectRatio(16f / 9f)
             .scale(scale)
-            .clip(shape)
-            .background(if (showFocus) palette.accent.copy(alpha = .24f) else Color(0xFF20232A))
             .onPreviewKeyEvent { event ->
                 val nativeEvent = event.nativeKeyEvent
                 val isSelectKey = nativeEvent.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
@@ -2501,28 +2568,30 @@ private fun InstalledAppTile(
                 }
             }
             .combinedClickable(interactionSource = source, indication = null, onLongClick = onLongClick, onClick = onClick),
-        contentAlignment = Alignment.Center
+        horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        if (app.hasLeanbackBanner) {
-            Image(
-                painter = BitmapPainter(artwork),
-                contentDescription = app.label,
-                contentScale = ContentScale.Crop,
-                modifier = Modifier.fillMaxSize()
+        Box(
+            Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(shape)
+                .background(if (showFocus) palette.accent.copy(alpha = .24f) else Color(0xFF20232A)),
+            contentAlignment = Alignment.Center
+        ) {
+            CircularAppIcon(
+                app = app,
+                palette = palette,
+                focused = showFocus,
+                iconSize = 76.dp
             )
-        } else {
-            Image(
-                painter = BitmapPainter(artwork),
-                contentDescription = app.label,
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize(.58f).align(Alignment.Center)
-            )
+            if (showFocus) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = .08f)))
         }
-        if (showFocus) {
-            Box(
-                Modifier.fillMaxSize().background(Color.White.copy(alpha = .08f))
-            )
-        }
+        Spacer(Modifier.height(7.dp))
+        Text(
+            app.label,
+            color = if (showFocus) ivory else muted,
+            fontSize = 13.sp,
+            fontWeight = if (showFocus) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
@@ -2870,6 +2939,7 @@ private fun SearchScreen(
                 onValueChange = { query = it },
                 singleLine = true,
                 label = { Text("Search ${searchProvider.label}", maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                placeholder = { Text("Title, show, or channel", color = muted, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 textStyle = androidx.compose.ui.text.TextStyle(color = ivory, fontSize = 20.sp),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 keyboardActions = KeyboardActions(onSearch = {
@@ -2879,7 +2949,9 @@ private fun SearchScreen(
                 modifier = Modifier
                     .widthIn(max = 960.dp)
                     .fillMaxWidth()
-                    .heightIn(min = 74.dp)
+                    // A fixed TV-sized field prevents the floating label and cursor from
+                    // being clipped by OEM Compose text-field minimums on 1080p surfaces.
+                    .height(72.dp)
                     .focusRequester(searchFocusRequester)
                     .then(
                         if (searchDownRequester != null) Modifier.focusProperties {
@@ -2958,7 +3030,7 @@ private fun SearchScreen(
             items(installedApps.size) { index ->
                 val app = installedApps[index]
                 AppTile(
-                    app.label,
+                    app,
                     palette,
                     focusRequester = if (index == 0) appFocusRequester else null,
                     upFocusRequester = if (hasHandoff) handoffFocusRequester else if (hasResults) resultFocusRequester else searchFocusRequester
@@ -2970,7 +3042,7 @@ private fun SearchScreen(
 
 @Composable
 private fun AppTile(
-    label: String,
+    app: InstalledApp,
     palette: RelayPalette,
     focusRequester: FocusRequester? = null,
     upFocusRequester: FocusRequester? = null,
@@ -2978,15 +3050,17 @@ private fun AppTile(
 ) {
     val source = remember { MutableInteractionSource() }
     val focused by source.collectIsFocusedAsState()
-    Box(
+    Column(
         modifier = (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .then(if (upFocusRequester != null) Modifier.focusProperties { up = upFocusRequester } else Modifier)
-            .size(132.dp, 86.dp).clip(RoundedCornerShape(13.dp))
-            .background(Color(0xFF171A20))
-            .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color(0xFF333740), RoundedCornerShape(13.dp))
+            .width(132.dp)
             .clickable(interactionSource = source, indication = null, onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) { Text(label, color = ivory, fontSize = 15.sp) }
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        CircularAppIcon(app = app, palette = palette, focused = focused, iconSize = 70.dp)
+        Spacer(Modifier.height(7.dp))
+        Text(app.label, color = if (focused) ivory else muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
 }
 
 private enum class SettingsPage(val label: String) {
@@ -3116,10 +3190,19 @@ private fun SettingsScreen(
         SettingsPage.entries.associateWith { FocusRequester() }
     }
     val pageContentFocusRequester = remember(page) { FocusRequester() }
+    var settingsHasInitialFocus by remember { mutableStateOf(false) }
     LaunchedEffect(page) {
         settingsContentState.scrollTo(0)
         withFrameNanos { }
-        pageContentFocusRequester.requestFocus()
+        if (!settingsHasInitialFocus) {
+            settingsHasInitialFocus = true
+            pageContentFocusRequester.requestFocus()
+        } else {
+            // Keep the selected category visible while opening its content at the top. Focusing
+            // the first control here makes Compose center that control and hides the section
+            // heading on long pages, which is especially confusing on a TV.
+            pageNavigationFocusRequesters[page]?.requestFocus()
+        }
     }
     BackHandler(onBack = onBackHome)
     Column(Modifier.fillMaxSize().padding(horizontal = 58.dp, vertical = 42.dp)) {
@@ -3844,12 +3927,18 @@ private fun NuvioConnectScreen(
     val emailFocusRequester = remember { FocusRequester() }
     val passwordFocusRequester = remember { FocusRequester() }
     val connectFocusRequester = remember { FocusRequester() }
+    val qrFocusRequester = remember { FocusRequester() }
+    val qrRestartFocusRequester = remember { FocusRequester() }
     val backFocusRequester = remember { FocusRequester() }
     var email by remember { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
     var status by remember { mutableStateOf<String?>(null) }
     var working by remember { mutableStateOf(false) }
     var connectRequested by remember { mutableStateOf(false) }
+    var qrStartRequested by remember { mutableStateOf(false) }
+    var qrSession by remember { mutableStateOf<NuvioQrLoginSession?>(null) }
+    var qrMessage by remember { mutableStateOf<String?>(null) }
+
     LaunchedEffect(connectRequested) {
         if (connectRequested) {
             NuvioApi.signIn(email, password)
@@ -3864,12 +3953,79 @@ private fun NuvioConnectScreen(
                 }
         }
     }
+
+    LaunchedEffect(qrStartRequested) {
+        if (qrStartRequested) {
+            NuvioApi.startQrLoginSession(deviceName = "Relay Home TV")
+                .onSuccess { session ->
+                    qrSession = session
+                    qrMessage = "Waiting for approval on your phone…"
+                    working = false
+                    qrStartRequested = false
+                }
+                .onFailure { error ->
+                    status = error.message ?: "Could not start Nuvio QR login."
+                    working = false
+                    qrStartRequested = false
+                }
+        }
+    }
+
+    LaunchedEffect(qrSession) {
+        val session = qrSession ?: return@LaunchedEffect
+        withFrameNanos { }
+        qrRestartFocusRequester.requestFocus()
+        while (!session.isExpired()) {
+            delay(session.nextPollDelaySeconds() * 1_000L)
+            val pollResult = NuvioApi.pollQrLoginSession(session)
+            val poll = pollResult.getOrNull()
+            if (poll == null) {
+                qrMessage = pollResult.exceptionOrNull()?.message ?: "Could not check QR approval yet. Retrying…"
+                delay(5_000L)
+                continue
+            }
+            when (poll.status) {
+                NuvioQrLoginStatus.PENDING -> qrMessage = "Waiting for approval on your phone…"
+                NuvioQrLoginStatus.APPROVED -> {
+                    qrMessage = "Approved. Signing Relay Home in…"
+                    NuvioApi.exchangeQrLoginSession(session, poll)
+                        .onSuccess {
+                            qrSession = null
+                            onConnected(it)
+                        }
+                        .onFailure { error ->
+                            qrMessage = error.message ?: "Nuvio QR login could not be completed."
+                            qrSession = null
+                        }
+                    return@LaunchedEffect
+                }
+                NuvioQrLoginStatus.EXPIRED -> {
+                    qrMessage = "This QR code expired. Start a new one to try again."
+                    return@LaunchedEffect
+                }
+                NuvioQrLoginStatus.USED -> {
+                    qrMessage = "This QR code was already used. Start a new one to try again."
+                    return@LaunchedEffect
+                }
+                NuvioQrLoginStatus.CANCELLED -> {
+                    qrMessage = "This QR login was cancelled. Start a new one to try again."
+                    return@LaunchedEffect
+                }
+                NuvioQrLoginStatus.UNKNOWN -> {
+                    qrMessage = "Nuvio returned an unrecognized QR status. Start a new code to try again."
+                    return@LaunchedEffect
+                }
+            }
+        }
+        qrMessage = "This QR code expired. Start a new one to try again."
+    }
+
     BackHandler(onBack = onBack)
     LaunchedEffect(reauthRequired) {
         withFrameNanos { }
-        emailFocusRequester.requestFocus()
+        if (qrSession == null) emailFocusRequester.requestFocus()
     }
-    Column(Modifier.fillMaxSize().padding(76.dp), verticalArrangement = Arrangement.Center) {
+    Column(Modifier.fillMaxSize().padding(horizontal = 76.dp, vertical = 48.dp), verticalArrangement = Arrangement.Center) {
         Text("Connect Nuvio", color = ivory, fontSize = 42.sp, fontWeight = FontWeight.Light)
         Spacer(Modifier.height(12.dp))
         Text(
@@ -3882,54 +4038,147 @@ private fun NuvioConnectScreen(
             fontSize = 18.sp
         )
         Spacer(Modifier.height(28.dp))
-        OutlinedTextField(
-            email,
-            { email = it },
-            label = { Text("Nuvio email") },
-            singleLine = true,
-            modifier = Modifier.width(520.dp).focusRequester(emailFocusRequester).focusProperties { down = passwordFocusRequester },
-            textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
-        )
-        Spacer(Modifier.height(12.dp))
-        OutlinedTextField(
-            value = password,
-            onValueChange = { password = it },
-            label = { Text("Nuvio password") },
-            singleLine = true,
-            visualTransformation = PasswordVisualTransformation(),
-            modifier = Modifier.width(520.dp).focusRequester(passwordFocusRequester).focusProperties {
-                up = emailFocusRequester
-                down = connectFocusRequester
-            },
-            textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
-        )
-        Spacer(Modifier.height(18.dp))
-        ActionButton(
-            if (working) "Connecting…" else if (reauthRequired) "Sign in again" else "Connect securely",
-            palette,
-            primary = true,
-            focusRequester = connectFocusRequester,
-            upFocusRequester = passwordFocusRequester,
-            downFocusRequester = backFocusRequester
-        ) {
-            if (!working && email.isNotBlank() && password.isNotBlank()) {
-                working = true
-                status = null
-                connectRequested = true
+        if (qrSession == null) {
+            OutlinedTextField(
+                email,
+                { email = it },
+                label = { Text("Nuvio email") },
+                singleLine = true,
+                modifier = Modifier.width(520.dp).focusRequester(emailFocusRequester).focusProperties { down = passwordFocusRequester },
+                textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
+            )
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                value = password,
+                onValueChange = { password = it },
+                label = { Text("Nuvio password") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.width(520.dp).focusRequester(passwordFocusRequester).focusProperties {
+                    up = emailFocusRequester
+                    down = connectFocusRequester
+                },
+                textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
+            )
+            Spacer(Modifier.height(18.dp))
+            ActionButton(
+                if (working) "Connecting…" else if (reauthRequired) "Sign in again" else "Connect securely",
+                palette,
+                primary = true,
+                focusRequester = connectFocusRequester,
+                upFocusRequester = passwordFocusRequester,
+                downFocusRequester = qrFocusRequester
+            ) {
+                if (!working && email.isNotBlank() && password.isNotBlank()) {
+                    working = true
+                    status = null
+                    connectRequested = true
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            ActionButton(
+                if (working && qrStartRequested) "Starting QR login…" else "Use QR code instead",
+                palette.copy(accent = Provider.NUVIO.accent),
+                primary = false,
+                focusRequester = qrFocusRequester,
+                upFocusRequester = connectFocusRequester,
+                downFocusRequester = backFocusRequester
+            ) {
+                if (!working) {
+                    working = true
+                    status = null
+                    qrStartRequested = true
+                }
+            }
+            status?.let { Text(it, color = muted, modifier = Modifier.padding(top = 12.dp), maxLines = 2, overflow = TextOverflow.Ellipsis) }
+        } else {
+            val session = checkNotNull(qrSession)
+            Row(horizontalArrangement = Arrangement.spacedBy(28.dp), verticalAlignment = Alignment.CenterVertically) {
+                NuvioQrCode(session.verificationUrl)
+                Column(Modifier.widthIn(max = 520.dp)) {
+                    Text("Scan to connect", color = ivory, fontSize = 25.sp, fontWeight = FontWeight.Medium)
+                    Spacer(Modifier.height(8.dp))
+                    Text("Open your phone camera, scan this code, and approve Relay Home in Nuvio.", color = muted, fontSize = 16.sp, lineHeight = 22.sp)
+                    Spacer(Modifier.height(16.dp))
+                    Text("Or visit nuvio.tv/tv-login and enter:", color = muted, fontSize = 14.sp)
+                    Spacer(Modifier.height(6.dp))
+                    Text(session.code, color = Provider.NUVIO.accent, fontSize = 28.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+                    Spacer(Modifier.height(12.dp))
+                    Text(qrMessage.orEmpty(), color = ivory.copy(alpha = .86f), fontSize = 15.sp, lineHeight = 20.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.height(16.dp))
+                    ActionButton(
+                        "Start a new QR code",
+                        palette.copy(accent = Provider.NUVIO.accent),
+                        primary = true,
+                        focusRequester = qrRestartFocusRequester,
+                        onClick = {
+                            qrSession = null
+                            qrMessage = null
+                            working = true
+                            qrStartRequested = true
+                        }
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    ActionButton(
+                        "Back",
+                        palette,
+                        primary = false,
+                        focusRequester = backFocusRequester,
+                        upFocusRequester = qrRestartFocusRequester,
+                        onClick = onBack
+                    )
+                }
             }
         }
-        status?.let { Text(it, color = muted, modifier = Modifier.padding(top = 12.dp)) }
-        Spacer(Modifier.height(12.dp))
-        ActionButton(
-            "Back",
-            palette,
-            primary = false,
-            focusRequester = backFocusRequester,
-            upFocusRequester = connectFocusRequester,
-            onClick = onBack
+        if (qrSession == null) {
+            Spacer(Modifier.height(12.dp))
+            ActionButton(
+                "Back",
+                palette,
+                primary = false,
+                focusRequester = backFocusRequester,
+                upFocusRequester = qrFocusRequester,
+                onClick = onBack
+            )
+        }
+    }
+}
+
+@Composable
+private fun NuvioQrCode(payload: String) {
+    val bitmap = remember(payload) { createQrBitmap(payload, 320) }
+    if (bitmap == null) {
+        Box(
+            Modifier.size(320.dp).clip(RoundedCornerShape(12.dp)).background(Color.White),
+            contentAlignment = Alignment.Center
+        ) {
+            Text("QR unavailable", color = Color.Black, fontSize = 18.sp)
+        }
+    } else {
+        Image(
+            painter = BitmapPainter(bitmap.asImageBitmap()),
+            contentDescription = "Nuvio QR login code",
+            modifier = Modifier.size(320.dp).clip(RoundedCornerShape(12.dp))
         )
     }
 }
+
+private fun createQrBitmap(payload: String, size: Int): Bitmap? = runCatching {
+    val matrix = MultiFormatWriter().encode(
+        payload,
+        BarcodeFormat.QR_CODE,
+        size,
+        size,
+        mapOf(EncodeHintType.MARGIN to 1)
+    )
+    Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888).also { bitmap ->
+        for (x in 0 until size) {
+            for (y in 0 until size) {
+                bitmap.setPixel(x, y, if (matrix[x, y]) android.graphics.Color.BLACK else android.graphics.Color.WHITE)
+            }
+        }
+    }
+}.getOrNull()
 
 @Composable
 private fun DetailsScreen(
@@ -3946,6 +4195,7 @@ private fun DetailsScreen(
     val backFocusRequester = remember { FocusRequester() }
     val resumeFocusRequester = remember { FocusRequester() }
     val seasonFocusRequester = remember { FocusRequester() }
+    val libraryFocusRequester = remember { FocusRequester() }
     val episodeMatch = remember(item.episodeInfo) { Regex("(?i)S\\s*(\\d+)\\D{0,8}E\\s*(\\d+)").find(item.episodeInfo.orEmpty()) }
     val seasonEpisode = episodeMatch?.value
     val originalSeason = episodeMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
@@ -4000,96 +4250,131 @@ private fun DetailsScreen(
             modifier = Modifier.fillMaxSize().padding(start = 78.dp, end = 78.dp, top = 98.dp, bottom = 48.dp),
             contentAlignment = Alignment.CenterStart
         ) {
-            Column(modifier = Modifier.width(800.dp)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    DetailPill(item.provider.label.uppercase(), item.provider.accent)
+            Row(
+                modifier = Modifier.fillMaxWidth().widthIn(max = 840.dp),
+                horizontalArrangement = Arrangement.spacedBy(26.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    Modifier.width(190.dp).height(270.dp).clip(RoundedCornerShape(18.dp))
+                        .background(item.provider.accent.copy(alpha = .18f))
+                        .border(1.dp, item.provider.accent.copy(alpha = .55f), RoundedCornerShape(18.dp)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (item.artworkUrl.visibleRelayText().isNotBlank()) {
+                        AsyncImage(
+                            model = ImageRequest.Builder(context).data(item.artworkUrl).crossfade(true).build(),
+                            contentDescription = item.title,
+                            contentScale = ContentScale.Crop,
+                            modifier = Modifier.fillMaxSize()
+                        )
+                    } else {
+                        Text(item.provider.label, color = item.provider.accent, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+                    }
+                    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, midnight.copy(alpha = .52f)))))
                 }
-                Spacer(Modifier.height(9.dp))
-                Text(
-                    item.title.uppercase(),
-                    color = ivory,
-                    fontSize = 30.sp,
-                    lineHeight = 35.sp,
-                    fontWeight = FontWeight.Light,
-                    letterSpacing = 2.sp,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(Modifier.height(7.dp))
-                Text(
+                Column(Modifier.weight(1f)) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        DetailPill(item.provider.label.uppercase(), item.provider.accent)
+                        if (item.contentType.visibleRelayText().isNotBlank()) {
+                            DetailPill(item.contentType.replaceFirstChar { it.uppercase() }, Color.White.copy(alpha = .18f))
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                    item.showTitle.visibleRelayText().takeIf { it.isNotBlank() && !it.equals(item.title, ignoreCase = true) }?.let { show ->
+                        Text("From $show", color = item.provider.accent, fontSize = 14.sp, fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Spacer(Modifier.height(4.dp))
+                    }
+                    Text(
+                        item.title.visibleRelayText().ifBlank { "Untitled" },
+                        color = ivory,
+                        fontSize = 32.sp,
+                        lineHeight = 37.sp,
+                        fontWeight = FontWeight.Light,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Spacer(Modifier.height(8.dp))
                     listOfNotNull(
-                        item.episodeInfo,
+                        item.episodeInfo.visibleRelayText().takeIf { it.isNotBlank() },
                         formatRelayDate(item.releaseInfo, dateFormat),
                         item.durationMs.takeIf { it > 0 }?.let(::formatMediaDuration),
                         item.rating?.let { "★ ${"%.1f".format(it)}" },
-                        item.genres,
-                        item.progress.takeIf { it > 0f }?.let { "${(it * 100).toInt()}% complete" }
-                    ).joinToString("  •  "),
-                    color = ivory.copy(alpha = .82f),
-                    fontSize = 14.sp,
-                    lineHeight = 20.sp,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Spacer(Modifier.height(9.dp))
-                Text(
-                    item.description ?: "Details are available in ${item.provider.label}.",
-                    color = muted,
-                    fontSize = 15.sp,
-                    lineHeight = 20.sp,
-                    maxLines = 3,
-                    overflow = TextOverflow.Ellipsis
-                )
-                seasonEpisode?.let {
-                    Spacer(Modifier.height(10.dp))
-                    Text("Season & episode", color = ivory.copy(alpha = .9f), fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        item.genres.visibleRelayText().takeIf { it.isNotBlank() },
+                        item.infoProgress().takeIf { it > 0f }?.let { "${(it * 100).toInt()}% complete" }
+                    ).joinToString("  •  ").takeIf { it.isNotBlank() }?.let { metadata ->
+                        Text(metadata, color = ivory.copy(alpha = .82f), fontSize = 14.sp, lineHeight = 20.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Text("About this title", color = ivory.copy(alpha = .9f), fontSize = 14.sp, fontWeight = FontWeight.Medium)
                     Spacer(Modifier.height(5.dp))
-                    ActionButton(
-                        "S${selectedSeason.toString().padStart(2, '0')}  •  E${selectedEpisode.toString().padStart(2, '0')}    Choose episode",
-                        palette,
-                        primary = false,
-                        focusRequester = seasonFocusRequester,
-                        upFocusRequester = backFocusRequester,
-                        downFocusRequester = resumeFocusRequester
-                    ) { pickerVisible = true }
-                }
-                Spacer(Modifier.height(12.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    ActionButton(
-                        "▶  ${if (selectedPlaybackItem.progress > 0f) "Resume" else "Play"}",
-                        palette,
-                        primary = true,
-                        focusRequester = resumeFocusRequester,
-                        upFocusRequester = if (seasonEpisode != null) seasonFocusRequester else backFocusRequester
-                    ) { ProviderHandoff.play(context, selectedPlaybackItem) }
-                    if (nuvioSession != null && item.provider == Provider.NUVIO && item.providerContentId != null) {
-                        ActionButton(if (librarySaving) "Adding…" else "＋ Add to Nuvio Library", palette.copy(accent = Provider.NUVIO.accent), primary = false) {
-                            if (!librarySaving) {
-                                librarySaving = true
-                                libraryStatus = null
-                                libraryScope.launch {
-                                    NuvioApi.addToLibrary(nuvioSession, nuvioProfileId, item)
-                                        .onSuccess {
-                                            libraryStatus = "Added to your Nuvio Library."
-                                            onLibraryChanged()
-                                        }
-                                        .onFailure { error -> libraryStatus = error.message ?: "Couldn’t add this title to Nuvio." }
-                                    librarySaving = false
+                    Text(
+                        item.description.visibleRelayText().ifBlank { "Details are available in ${item.provider.label}." },
+                        color = muted,
+                        fontSize = 15.sp,
+                        lineHeight = 20.sp,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    seasonEpisode?.let {
+                        Spacer(Modifier.height(11.dp))
+                        Text("Season & episode", color = ivory.copy(alpha = .9f), fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Spacer(Modifier.height(5.dp))
+                        ActionButton(
+                            "S${selectedSeason.toString().padStart(2, '0')}  •  E${selectedEpisode.toString().padStart(2, '0')}    Choose episode",
+                            palette,
+                            primary = false,
+                            focusRequester = seasonFocusRequester,
+                            upFocusRequester = backFocusRequester,
+                            downFocusRequester = resumeFocusRequester
+                        ) { pickerVisible = true }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        val hasLibraryAction = nuvioSession != null && item.provider == Provider.NUVIO && item.providerContentId != null
+                        ActionButton(
+                            "▶  ${if (selectedPlaybackItem.infoProgress() > 0f) "Resume" else "Play"}",
+                            palette,
+                            primary = true,
+                            focusRequester = resumeFocusRequester,
+                            upFocusRequester = if (seasonEpisode != null) seasonFocusRequester else backFocusRequester,
+                            rightFocusRequester = if (hasLibraryAction) libraryFocusRequester else null
+                        ) { ProviderHandoff.play(context, selectedPlaybackItem) }
+                        if (hasLibraryAction) {
+                            ActionButton(
+                                if (librarySaving) "Adding…" else "＋ Add to Nuvio Library",
+                                palette.copy(accent = Provider.NUVIO.accent),
+                                primary = false,
+                                focusRequester = libraryFocusRequester,
+                                leftFocusRequester = resumeFocusRequester
+                            ) {
+                                if (!librarySaving) {
+                                    librarySaving = true
+                                    libraryStatus = null
+                                    libraryScope.launch {
+                                        NuvioApi.addToLibrary(nuvioSession, nuvioProfileId, item)
+                                            .onSuccess {
+                                                libraryStatus = "Added to your Nuvio Library."
+                                                onLibraryChanged()
+                                            }
+                                            .onFailure { error -> libraryStatus = error.message ?: "Couldn’t add this title to Nuvio." }
+                                        librarySaving = false
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                libraryStatus?.let {
-                    Spacer(Modifier.height(8.dp))
-                    Text(it, color = if (it.startsWith("Added")) Provider.NUVIO.accent else Provider.SMARTTUBE.accent, fontSize = 14.sp)
-                }
-                Spacer(Modifier.height(12.dp))
-                if (item.progress > 0f) {
-                    Text("Continue watching", color = ivory.copy(alpha = .9f), fontSize = 15.sp)
-                    Spacer(Modifier.height(5.dp))
-                    Box(Modifier.width(400.dp).height(5.dp).clip(CircleShape).background(Color.White.copy(alpha = .22f))) {
-                        Box(Modifier.fillMaxWidth(item.progress).height(5.dp).background(item.provider.accent))
+                    libraryStatus?.let {
+                        Spacer(Modifier.height(8.dp))
+                        Text(it, color = if (it.startsWith("Added")) Provider.NUVIO.accent else Provider.SMARTTUBE.accent, fontSize = 14.sp)
+                    }
+                    if (item.infoProgress() > 0f) {
+                        Spacer(Modifier.height(12.dp))
+                        Text("Continue watching", color = ivory.copy(alpha = .9f), fontSize = 15.sp)
+                        Spacer(Modifier.height(5.dp))
+                        Box(Modifier.fillMaxWidth().height(5.dp).clip(CircleShape).background(Color.White.copy(alpha = .22f))) {
+                            Box(Modifier.fillMaxWidth(item.infoProgress()).height(5.dp).background(item.provider.accent))
+                        }
                     }
                 }
             }

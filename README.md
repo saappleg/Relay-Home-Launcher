@@ -2,7 +2,7 @@
 
 Relay Home is an Android TV / Google TV media launcher. It is the discovery and navigation layer; providers retain responsibility for their catalogs, profiles, and playback.
 
-> Beta software — expect rough edges and report reproducible issues through GitHub Issues.
+> Alpha software — expect rough edges and report reproducible issues through GitHub Issues.
 
 ## Beta features
 
@@ -10,6 +10,7 @@ Relay Home is an Android TV / Google TV media launcher. It is the discovery and 
 - D-pad focus behavior across Home, App Peek, details, Search, All Apps, provider hubs, and Settings.
 - Provider tabs are opt-in and persist between launches. Home shows only the providers enabled in Settings.
 - Nuvio sign-in, encrypted session persistence, profile switching, watch-progress sync, season/episode context, and title/resume deep-link handoff.
+- Nuvio TV QR sign-in with explicit approval polling, expiry handling, and manual code fallback.
 - RelayTube/SmartTube Continue Watching, subscriptions, active playback, rich video details, and direct video handoff.
 - Stremio board and search handoff through its public URI scheme.
 - TMDB-backed artwork, recommendations, episode metadata, and calendar data.

@@ -43,10 +43,122 @@ private class NuvioNetworkException(cause: Throwable) : NuvioApiException(
     cause
 )
 
+private class NuvioQrLoginException(message: String, cause: Throwable? = null) : NuvioApiException(message, cause)
+
 /** Client for Nuvio's documented public API. The session itself is device-encrypted by NuvioSessionStore. */
 internal object NuvioApi {
     private const val baseUrl = "https://api.nuvio.tv"
     private const val publishableKey = "sb_publishable_1Clq8rlTVACkdcZuqr6_AD__xUUC_EN"
+    private const val startQrLoginEndpoint = "/rest/v1/rpc/start_tv_login_session"
+    private const val pollQrLoginEndpoint = "/rest/v1/rpc/poll_tv_login_session"
+    private const val exchangeQrLoginEndpoint = "/functions/v1/tv-logins-exchange"
+
+    /**
+     * Starts Nuvio's documented TV QR flow. The returned verificationUrl is the exact payload a
+     * QR renderer should encode; no credentials are placed in the QR by Relay.
+     */
+    suspend fun startQrLoginSession(
+        deviceNonce: String = NuvioQrLogin.newDeviceNonce(),
+        deviceName: String? = null,
+        redirectBaseUrl: String = NuvioQrLogin.defaultRedirectBaseUrl
+    ): Result<NuvioQrLoginSession> = withContext(Dispatchers.IO) {
+        apiCall {
+            val nonce = NuvioQrLogin.validateDeviceNonce(deviceNonce)
+            val redirect = NuvioQrLogin.validateRedirectBaseUrl(redirectBaseUrl)
+            val basePayload = JSONObject()
+                .put("p_device_nonce", nonce)
+                .put("p_redirect_base_url", redirect)
+            val payloadWithName = JSONObject(basePayload.toString()).apply {
+                deviceName?.trim()?.takeIf { it.isNotBlank() }?.let { put("p_device_name", it) }
+            }
+            var response = postPublicJson(startQrLoginEndpoint, payloadWithName)
+            if (!response.isSuccessful && payloadWithName.has("p_device_name") && response.isLegacyDeviceNameError()) {
+                // Older Nuvio deployments expose the same RPC without p_device_name. Retrying
+                // only this known compatibility case keeps current servers strict and working.
+                response = postPublicJson(startQrLoginEndpoint, basePayload)
+            }
+            if (!response.isSuccessful) {
+                throw NuvioQrLoginException(
+                    "Nuvio QR login could not start (HTTP ${response.status}). ${response.body.nuvioErrorDetail().orEmpty()}".trim()
+                )
+            }
+            val result = response.body.firstJsonObject()
+            val code = result.firstString("code")
+                ?: throw NuvioQrLoginException("Nuvio QR login returned no device code.")
+            val verificationUrl = result.firstString("web_url", "verification_uri_complete")
+                ?: throw NuvioQrLoginException("Nuvio QR login returned no verification URL.")
+            val expiresAt = NuvioQrLogin.parseExpiresAt(result.firstString("expires_at"))
+                ?: throw NuvioQrLoginException("Nuvio QR login returned an invalid expiry.")
+            NuvioQrLoginSession(
+                code = NuvioQrLogin.validateDeviceCode(code),
+                deviceNonce = nonce,
+                verificationUrl = NuvioQrLogin.validateVerificationUrl(verificationUrl),
+                expiresAtEpochSeconds = expiresAt,
+                pollIntervalSeconds = NuvioQrLogin.normalizePollInterval(result.optInt("poll_interval_seconds", 0).takeIf { it > 0 })
+            )
+        }
+    }
+
+    /** Polls the existing QR session. Unknown server statuses remain UNKNOWN and never auto-login. */
+    suspend fun pollQrLoginSession(session: NuvioQrLoginSession): Result<NuvioQrLoginPoll> = withContext(Dispatchers.IO) {
+        apiCall {
+            requireActiveQrSession(session)
+            val response = postPublicJson(
+                pollQrLoginEndpoint,
+                JSONObject()
+                    .put("p_code", session.code)
+                    .put("p_device_nonce", session.deviceNonce)
+            )
+            if (!response.isSuccessful) {
+                throw NuvioQrLoginException(
+                    "Nuvio QR login status check failed (HTTP ${response.status}). ${response.body.nuvioErrorDetail().orEmpty()}".trim()
+                )
+            }
+            val result = response.body.firstJsonObject()
+            val rawStatus = result.firstString("status")
+                ?: throw NuvioQrLoginException("Nuvio QR login returned no status.")
+            NuvioQrLoginPoll(
+                status = NuvioQrLoginStatus.parse(rawStatus),
+                rawStatus = rawStatus,
+                expiresAtEpochSeconds = NuvioQrLogin.parseExpiresAt(result.firstString("expires_at")),
+                pollIntervalSeconds = result.optInt("poll_interval_seconds", 0).takeIf { it > 0 }
+                    ?.let(NuvioQrLogin::normalizePollInterval)
+            )
+        }
+    }
+
+    /** Exchanges an explicitly approved QR code for the same encrypted-session-compatible token model. */
+    suspend fun exchangeQrLoginSession(
+        session: NuvioQrLoginSession,
+        approvedPoll: NuvioQrLoginPoll
+    ): Result<NuvioSession> = withContext(Dispatchers.IO) {
+        apiCall {
+            check(approvedPoll.status == NuvioQrLoginStatus.APPROVED) {
+                "Nuvio QR login cannot be exchanged before the server reports approved."
+            }
+            requireActiveQrSession(session)
+            val response = postPublicJson(
+                exchangeQrLoginEndpoint,
+                JSONObject()
+                    .put("code", session.code)
+                    .put("device_nonce", session.deviceNonce)
+            )
+            if (!response.isSuccessful) {
+                throw NuvioQrLoginException(
+                    "Nuvio QR login exchange failed (HTTP ${response.status}). ${response.body.nuvioErrorDetail().orEmpty()}".trim()
+                )
+            }
+            val result = response.body.firstJsonObject()
+            val accessToken = result.firstString("access_token")
+                ?: throw NuvioQrLoginException("Nuvio QR login returned no access token.")
+            val expiresIn = result.optLong("expires_in", 0L).takeIf { it > 0L }
+            NuvioSession(
+                accessToken = accessToken,
+                refreshToken = result.firstString("refresh_token"),
+                expiresAtEpochSeconds = expiresIn?.let { Instant.now().epochSecond + it }
+            )
+        }
+    }
 
     suspend fun signIn(email: String, password: String): Result<NuvioSession> = withContext(Dispatchers.IO) {
         apiCall {
@@ -220,6 +332,32 @@ internal object NuvioApi {
         }
     }
 
+    private fun postPublicJson(endpoint: String, body: JSONObject): HttpResponse {
+        val connection = (URL(baseUrl + endpoint).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            doOutput = true
+            setRequestProperty("apikey", publishableKey)
+            setRequestProperty("Authorization", "Bearer $publishableKey")
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("Content-Type", "application/json")
+            connectTimeout = 12_000
+            readTimeout = 12_000
+        }
+        return try {
+            connection.outputStream.bufferedWriter().use { it.write(body.toString()) }
+            connection.readResponse()
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun requireActiveQrSession(session: NuvioQrLoginSession) {
+        NuvioQrLogin.validateDeviceNonce(session.deviceNonce)
+        NuvioQrLogin.validateDeviceCode(session.code)
+        NuvioQrLogin.validateVerificationUrl(session.verificationUrl)
+        check(!session.isExpired()) { "Nuvio QR login session expired. Start a new QR login." }
+    }
+
     private fun requireUsableSession(session: NuvioSession) {
         if (session.accessToken.isBlank() || session.isExpired()) throw NuvioSessionExpiredException()
     }
@@ -237,6 +375,15 @@ internal object NuvioApi {
     }
 
     private data class HttpResponse(val status: Int, val body: String)
+
+    private val HttpResponse.isSuccessful: Boolean
+        get() = status in 200..299
+
+    private fun HttpResponse.isLegacyDeviceNameError(): Boolean {
+        val detail = body.lowercase()
+        return (detail.contains("could not find the function") || detail.contains("function") && detail.contains("does not exist")) &&
+            detail.contains("p_device_name")
+    }
 
     private fun HttpURLConnection.readResponse(): HttpResponse {
         val status = responseCode
@@ -262,4 +409,13 @@ internal object NuvioApi {
         .asSequence()
         .map { optInt(it, 0) }
         .firstOrNull { it > 0 }
+
+    private fun String.firstJsonObject(): JSONObject {
+        val value = trim()
+        return when {
+            value.startsWith("[") -> JSONArray(value).optJSONObject(0)
+            value.startsWith("{") -> JSONObject(value)
+            else -> null
+        } ?: throw NuvioQrLoginException("Nuvio returned an invalid QR login response.")
+    }
 }

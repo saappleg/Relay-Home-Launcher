@@ -1,6 +1,7 @@
 package com.relayhome.launcher
 
 import android.content.Context
+import java.text.Normalizer
 import java.util.Locale
 
 /** Maps a local Relay/Nuvio profile to an opaque RelayTube profile id. */
@@ -9,8 +10,7 @@ internal object RelayProfileMappingStore {
 
     fun get(context: Context, nuvioProfile: Int): String? =
         preferences(context).getString(mappingKey(nuvioProfile), null)
-            ?.trim()
-            ?.takeIf { it.isNotBlank() }
+            ?.let(::cleanOpaqueId)
 
     /** Stores a candidate only; resolve() promotes it after an exact profile-name match. */
     fun set(context: Context, nuvioProfile: Int, relayTubeProfileId: String) {
@@ -20,7 +20,8 @@ internal object RelayProfileMappingStore {
                 .remove(mappingKey(nuvioProfile))
                 .remove(legacyMappingKey(nuvioProfile))
         } else {
-            editor.putString(candidateKey(nuvioProfile), relayTubeProfileId.trim())
+            cleanOpaqueId(relayTubeProfileId)?.let { editor.putString(candidateKey(nuvioProfile), it) }
+                ?: editor.remove(candidateKey(nuvioProfile))
         }
         editor.apply()
     }
@@ -32,9 +33,11 @@ internal object RelayProfileMappingStore {
         relayTubeProfiles: List<RelayTubeProfile>,
         allowSelectedFallback: Boolean
     ): String? {
-        val normalizedName = normalize(nuvioProfile.name)
+        val normalizedName = normalizeProfileName(nuvioProfile.name)
         if (normalizedName.isBlank()) return null
-        val matched = relayTubeProfiles.filter { normalize(it.name) == normalizedName }.singleOrNull()
+        val matched = relayTubeProfiles
+            .filter { cleanOpaqueId(it.id) != null && normalizeProfileName(it.name) == normalizedName }
+            .singleOrNull()
 
         // An opaque id saved for a different generation of profiles must not override a new
         // exact name match. If there is no name match, leave the profile visibly unmapped rather
@@ -43,19 +46,29 @@ internal object RelayProfileMappingStore {
             set(context, nuvioProfile.index, "")
             return null
         }
-        return matched.id.takeIf { it.isNotBlank() }?.also {
+        return cleanOpaqueId(matched.id)?.also {
             saveResolved(context, nuvioProfile.index, it)
         }
     }
 
-    private fun normalize(value: String): String = value.trim().lowercase(Locale.ROOT)
+    private fun normalizeProfileName(value: String): String = Normalizer.normalize(value.trim(), Normalizer.Form.NFD)
+        .replace(Regex("\\p{M}+"), "")
+        .lowercase(Locale.ROOT)
+        .replace(Regex("[^a-z0-9]+"), "")
+
+    private fun cleanOpaqueId(value: String?): String? = value
+        ?.trim()
+        ?.takeIf { it.isNotBlank() && it.length <= MAX_OPAQUE_ID_LENGTH }
+        ?.takeIf { id -> id.none { it.isWhitespace() || it.isISOControl() } }
 
     private fun saveResolved(context: Context, nuvioProfile: Int, relayTubeProfileId: String) {
-        preferences(context).edit()
-            .putString(mappingKey(nuvioProfile), relayTubeProfileId)
-            .remove(candidateKey(nuvioProfile))
-            .remove(legacyMappingKey(nuvioProfile))
-            .apply()
+        cleanOpaqueId(relayTubeProfileId)?.let { cleanId ->
+            preferences(context).edit()
+                .putString(mappingKey(nuvioProfile), cleanId)
+                .remove(candidateKey(nuvioProfile))
+                .remove(legacyMappingKey(nuvioProfile))
+                .apply()
+        }
     }
 
     private fun mappingKey(nuvioProfile: Int) = "resolved_nuvio_$nuvioProfile"
@@ -66,4 +79,6 @@ internal object RelayProfileMappingStore {
 
     private fun preferences(context: Context) =
         context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
+
+    private const val MAX_OPAQUE_ID_LENGTH = 128
 }
