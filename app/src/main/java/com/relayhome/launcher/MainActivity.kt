@@ -1,5 +1,6 @@
 package com.relayhome.launcher
 
+import com.relayhome.launcher.ui.RelayHomeApp
 import android.app.role.RoleManager
 import android.content.ComponentName
 import android.content.Intent

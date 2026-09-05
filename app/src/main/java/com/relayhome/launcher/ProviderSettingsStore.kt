@@ -2,6 +2,7 @@ package com.relayhome.launcher
 
 import android.content.Context
 import com.relayhome.launcher.data.RelaySettingsRepository
+import com.relayhome.launcher.ui.shared.Provider
 
 /** Persists the provider tabs the household has deliberately activated for Relay Home. */
 internal object ProviderSettingsStore {

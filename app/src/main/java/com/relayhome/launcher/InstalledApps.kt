@@ -31,49 +31,37 @@ internal data class InstalledApp(
     val hasLeanbackLogo: Boolean = false
 )
 
-internal object FavoriteAppsStore {
-    private const val PREFS = "relay_favorite_apps"
-    private const val KEY_PACKAGES = "favorite_package_names"
-    var favoritePackages by mutableStateOf(emptySet<String>())
-        private set
+/** Generation-aware cache used by installed-app discovery. Kept generic so its race behavior is
+ * testable without constructing framework Drawables or depending on PackageManager internals. */
+internal class InstalledAppsDiscoveryCache<T> {
+    private val lock = Any()
+    @Volatile
+    private var value: List<T>? = null
+    private var generation = 0L
 
-    fun load(context: Context): Set<String> {
-        val stored = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getStringSet(KEY_PACKAGES, null)
-        // Do not discover packages from composition. The no-preference path is completed by
-        // InstalledApps after its existing IO-bound discovery finishes.
-        favoritePackages = stored?.toSet() ?: emptySet()
-        return favoritePackages
-    }
-
-    fun toggle(context: Context, packageName: String) {
-        val next = if (packageName in favoritePackages) favoritePackages - packageName else favoritePackages + packageName
-        favoritePackages = next
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .putStringSet(KEY_PACKAGES, next)
-            .apply()
-    }
-
-    fun ensureDefaults(context: Context, apps: List<InstalledApp>): Set<String> {
-        val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        // An explicit empty set and a user toggle both count as an intentional choice.
-        if (preferences.contains(KEY_PACKAGES)) return favoritePackages
-        val defaults = apps.take(6).map { it.packageName }.toSet()
-        if (defaults.isNotEmpty()) {
-            favoritePackages = defaults
-            preferences.edit().putStringSet(KEY_PACKAGES, defaults).apply()
+    fun getOrDiscover(discover: () -> List<T>): List<T> {
+        val requestedGeneration = synchronized(lock) {
+            value?.let { return it }
+            generation
         }
-        return favoritePackages
+        val discovered = discover()
+        synchronized(lock) {
+            if (requestedGeneration == generation) value = discovered
+        }
+        return discovered
+    }
+
+    fun invalidate() {
+        synchronized(lock) {
+            value = null
+            generation += 1
+        }
     }
 }
 
 /** Reads only activities that advertise a normal Android or TV launcher entry. */
 internal object InstalledApps {
-    private val cacheLock = Any()
-    @Volatile
-    private var cachedApps: List<InstalledApp>? = null
-    private var cacheGeneration = 0L
+    private val cache = InstalledAppsDiscoveryCache<InstalledApp>()
 
     private fun loadRoundIcon(packageManager: android.content.pm.PackageManager, applicationInfo: ApplicationInfo): Drawable? {
         val resources = runCatching { packageManager.getResourcesForApplication(applicationInfo) }.getOrNull()
@@ -99,25 +87,20 @@ internal object InstalledApps {
     }
 
     fun discover(context: Context): List<InstalledApp> {
-        val generation = synchronized(cacheLock) {
-            cachedApps?.let { return it }
-            cacheGeneration
-        }
-        val discovered = discoverUncached(context)
-        synchronized(cacheLock) {
-            // A package change can invalidate a discovery while it is in flight. Do not let the
-            // old result repopulate the cache after onResume has requested a fresh snapshot.
-            if (generation == cacheGeneration) cachedApps = discovered
-        }
-        return discovered
+        return cache.getOrDiscover { discoverUncached(context) }
     }
 
     fun invalidateCache() {
-        synchronized(cacheLock) {
-            cachedApps = null
-            cacheGeneration += 1
-        }
+        cache.invalidate()
     }
+
+    /**
+     * Provider apps have dedicated Relay tabs and must not also appear in All Apps.
+     * Keep this check separate from PackageManager access so the discovery rule can be tested
+     * without relying on mocked framework internals.
+     */
+    internal fun isExcludedPackage(relayPackageName: String, packageName: String): Boolean =
+        packageName == relayPackageName || ProviderHandoff.isProviderPackage(packageName)
 
     private fun discoverUncached(context: Context): List<InstalledApp> {
         val packageManager = context.packageManager
@@ -135,7 +118,7 @@ internal object InstalledApps {
                     0
                 ).asSequence()
             }
-            .filter { it.activityInfo.packageName != context.packageName }
+            .filterNot { isExcludedPackage(context.packageName, it.activityInfo.packageName) }
             // Deduplicate before loading labels, banners, icons, and legacy-art bitmaps.
             // Leanback entries come first, so the TV-facing activity wins over a duplicate
             // phone launcher entry for the same package.

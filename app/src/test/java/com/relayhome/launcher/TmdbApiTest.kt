@@ -1,5 +1,6 @@
 package com.relayhome.launcher
 
+import com.relayhome.launcher.ui.shared.MediaItem
 import org.json.JSONArray
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull

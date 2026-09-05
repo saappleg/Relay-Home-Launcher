@@ -2,6 +2,7 @@ package com.relayhome.launcher
 
 import android.content.Context
 import com.relayhome.launcher.data.RelaySettingsRepository
+import com.relayhome.launcher.ui.shared.Provider
 
 internal object SearchProviderSettings {
     fun load(context: Context): Provider = RelaySettingsRepository.loadSearchProvider(context)

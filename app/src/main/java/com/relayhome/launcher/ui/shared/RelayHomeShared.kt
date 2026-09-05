@@ -1,5 +1,6 @@
-package com.relayhome.launcher
+package com.relayhome.launcher.ui.shared
 
+import com.relayhome.launcher.SmartTubeNowPlaying
 import android.content.Context
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.ui.graphics.Color

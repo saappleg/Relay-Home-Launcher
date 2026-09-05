@@ -57,6 +57,13 @@ internal object RelayUpdater {
         "(?i)^v?([0-9]+)\\.([0-9]+)\\.([0-9]+)(?:-(alpha|beta|rc)(?:[.-]([0-9]+))?)?(?:\\+[0-9A-Za-z.-]+)?$"
     )
 
+    /** Pure seams for regression tests; production update selection still uses the same parser. */
+    internal fun compareVersionsForTest(left: String, right: String): Int =
+        compareValues(parsedVersion(left), parsedVersion(right))
+
+    internal fun prereleaseFlagMatchesForTest(tag: String, prerelease: Boolean): Boolean =
+        parsedVersion(tag)?.let { (it.stage < STABLE_STAGE) == prerelease } ?: false
+
     suspend fun check(includePrereleases: Boolean): Result<RelayRelease?> = withContext(Dispatchers.IO) {
         runCatching {
             val connection = openTrustedConnection(releasesUrl, apiOnly = true)
@@ -235,10 +242,26 @@ internal object RelayUpdater {
         }
     }
 
-    private fun openTrustedConnection(address: String, apiOnly: Boolean = false): HttpURLConnection {
+    private fun openTrustedConnection(address: String, apiOnly: Boolean = false): HttpURLConnection =
+        openTrustedConnection(address, apiOnly) { nextAddress, nextApiOnly ->
+            openConnection(nextAddress, nextApiOnly)
+        }
+
+    /** Injectable connection seam keeps redirect-policy tests hermetic and network-free. */
+    internal fun openTrustedConnectionForTest(
+        address: String,
+        apiOnly: Boolean = false,
+        connectionFactory: (String, Boolean) -> HttpURLConnection
+    ): HttpURLConnection = openTrustedConnection(address, apiOnly, connectionFactory)
+
+    private fun openTrustedConnection(
+        address: String,
+        apiOnly: Boolean,
+        connectionFactory: (String, Boolean) -> HttpURLConnection
+    ): HttpURLConnection {
         var nextAddress = address
         repeat(maxRedirects + 1) { redirectCount ->
-            val connection = openConnection(nextAddress, apiOnly)
+            val connection = connectionFactory(nextAddress, apiOnly)
             try {
                 val responseCode = connection.responseCode
                 if (!isRedirect(responseCode)) return connection

@@ -1,5 +1,6 @@
 package com.relayhome.launcher
 
+import com.relayhome.launcher.ui.shared.visibleRelayText
 import kotlinx.coroutines.runBlocking
 import org.json.JSONObject
 import org.junit.Assert.assertEquals

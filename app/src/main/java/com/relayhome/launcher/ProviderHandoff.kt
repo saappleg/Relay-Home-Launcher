@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.widget.Toast
+import com.relayhome.launcher.ui.shared.MediaItem
+import com.relayhome.launcher.ui.shared.Provider
 import java.util.Locale
 
 /**
@@ -30,10 +32,14 @@ internal object ProviderHandoff {
         smartTubePackages.firstOrNull { context.packageManager.getLaunchIntentForPackage(it) != null }
     }.getOrNull()
 
-    internal fun isSmartTubePackage(packageName: String): Boolean = packageName in smartTubePackages
+    internal fun isSmartTubePackage(packageName: String): Boolean =
+        packageName in smartTubePackages ||
+            packageName.startsWith("app.smarttube.") ||
+            packageName.startsWith("org.smarttube.") ||
+            packageName.startsWith("com.relaytube.")
 
     fun isProviderPackage(packageName: String): Boolean =
-        packageName == nuvioPackage || packageName == stremioPackage || packageName in smartTubePackages
+        packageName == nuvioPackage || packageName == stremioPackage || isSmartTubePackage(packageName)
 
     fun isNuvioInstalled(context: Context): Boolean =
         context.packageManager.getLaunchIntentForPackage(nuvioPackage) != null

@@ -53,14 +53,22 @@ internal object NuvioSessionStore {
 
     fun save(context: Context, session: NuvioSession) {
         require(session.accessToken.isNotBlank()) { "Nuvio session token cannot be blank." }
-        val encryptor = cipher(Cipher.ENCRYPT_MODE)
-        val plaintext = JSONObject()
+        saveEncrypted(context, JSONObject()
             .put("access_token", session.accessToken)
             .put("refresh_token", session.refreshToken)
             .put("expires_at", session.expiresAtEpochSeconds)
-            .toString()
-            .encodeToByteArray()
-        val ciphertext = encryptor.doFinal(plaintext)
+            .toString())
+    }
+
+    /** Test-only seam for exercising upgrades from the original encrypted token-only format. */
+    internal fun saveLegacyTokenForTest(context: Context, accessToken: String) {
+        require(accessToken.isNotBlank())
+        saveEncrypted(context, accessToken)
+    }
+
+    private fun saveEncrypted(context: Context, plaintext: String) {
+        val encryptor = cipher(Cipher.ENCRYPT_MODE)
+        val ciphertext = encryptor.doFinal(plaintext.encodeToByteArray())
         val payload = "${Base64.encodeToString(encryptor.iv, Base64.NO_WRAP)}:${Base64.encodeToString(ciphertext, Base64.NO_WRAP)}"
         preferences(context).edit().putString(tokenKey, payload).apply()
     }

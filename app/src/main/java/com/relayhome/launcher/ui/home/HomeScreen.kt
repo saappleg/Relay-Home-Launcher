@@ -1,5 +1,9 @@
-package com.relayhome.launcher
+package com.relayhome.launcher.ui.home
 
+import com.relayhome.launcher.*
+import com.relayhome.launcher.ui.apppeek.AppPeekPanel
+import com.relayhome.launcher.ui.apppeek.FocusedMediaInfoCard
+import com.relayhome.launcher.ui.shared.*
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.os.Bundle
@@ -85,6 +89,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.graphicsLayer
@@ -160,6 +165,114 @@ internal class NativeIconPainter(
     }
 }
 
+private data class HomeAmbientFocus(
+    val key: String,
+    val artworkUrl: String?,
+    val fallbackPalette: RelayPalette,
+    val app: InstalledApp? = null
+)
+
+private fun ambientFocusFor(hero: Hero): HomeAmbientFocus = HomeAmbientFocus(
+    key = "hero:${hero.item?.contentKey() ?: hero.artworkUrl}",
+    artworkUrl = hero.artworkUrl.takeIf { it.isNotBlank() },
+    fallbackPalette = hero.palette
+)
+
+private fun ambientFocusFor(item: MediaItem): HomeAmbientFocus = HomeAmbientFocus(
+    key = "media:${item.contentKey()}",
+    artworkUrl = item.artworkUrl.takeIf { it.isNotBlank() },
+    fallbackPalette = paletteFor(item)
+)
+
+private fun ambientFocusFor(app: InstalledApp, palette: RelayPalette): HomeAmbientFocus = HomeAmbientFocus(
+    key = "app:${app.packageName}",
+    artworkUrl = null,
+    fallbackPalette = palette,
+    app = app
+)
+
+/**
+ * Google TV keeps the page visually tied to the focused content instead of switching to a
+ * flat page color between rows. The request is intentionally the same 640x360 size used by a
+ * landscape MediaCard, so moving focus normally hits Coil's existing memory-cache entry.
+ * Compose blur is a safe softened-image fallback on older TV devices, while the enlarged,
+ * low-alpha layer still provides an ambient treatment where platform blur is unavailable.
+ */
+@Composable
+private fun HomeAmbientBackdrop(focus: HomeAmbientFocus) {
+    val context = LocalContext.current
+    val artworkRequest = remember(focus.artworkUrl) {
+        focus.artworkUrl?.let { artworkUrl ->
+            ImageRequest.Builder(context)
+                .data(artworkUrl)
+                .size(640, 360)
+                .crossfade(false)
+                .build()
+        }
+    }
+    val backdrop = focus.fallbackPalette.backdrop
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(backdrop.copy(alpha = .82f))
+    ) {
+        if (artworkRequest != null) {
+            key(focus.key) {
+                AsyncImage(
+                    model = artworkRequest,
+                    contentDescription = null,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .graphicsLayer {
+                            // Overscan the blurred image so its edges never reveal a hard
+                            // seam while the user scrolls the underlying LazyColumn.
+                            scaleX = 1.14f
+                            scaleY = 1.14f
+                        }
+                        .blur(42.dp)
+                        .alpha(.54f)
+                )
+            }
+        } else if (focus.app != null) {
+            // Favorite apps do not have remote artwork. Their launcher icon still gives the
+            // focused item a visual identity without downloading or decoding another asset.
+            Image(
+                painter = rememberNativeIconPainter(focus.app.icon),
+                contentDescription = null,
+                contentScale = ContentScale.Fit,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        scaleX = 2.8f
+                        scaleY = 2.8f
+                    }
+                    .blur(48.dp)
+                    .alpha(.20f)
+            )
+        }
+        // Keep text, focus rings, and the persistent navigation legible over bright key art.
+        Box(
+            Modifier.fillMaxSize().background(
+                Brush.verticalGradient(
+                    listOf(
+                        midnight.copy(alpha = .68f),
+                        midnight.copy(alpha = .44f),
+                        midnight.copy(alpha = .84f)
+                    )
+                )
+            )
+        )
+        Box(
+            Modifier.fillMaxSize().background(
+                Brush.horizontalGradient(
+                    listOf(midnight.copy(alpha = .40f), Color.Transparent, midnight.copy(alpha = .28f))
+                )
+            )
+        )
+    }
+}
+
 @Composable
 internal fun HomeScreen(
     hero: Hero,
@@ -173,6 +286,7 @@ internal fun HomeScreen(
     onSettings: () -> Unit,
     onHeroChanged: (Hero) -> Unit,
     onItemSelected: (MediaItem) -> Unit,
+    heroCandidates: List<MediaItem>,
     nuvioItems: List<MediaItem>,
     nuvioSyncing: Boolean,
     nuvioSyncError: String?,
@@ -211,6 +325,25 @@ internal fun HomeScreen(
     val upcomingFocusRequester = remember { FocusRequester() }
     val homeListState = rememberLazyListState()
     var profilePickerVisible by remember { mutableStateOf(false) }
+    var ambientFocus by remember { mutableStateOf(ambientFocusFor(hero)) }
+    val showHeroAmbient = {
+        ambientFocus = ambientFocusFor(hero)
+    }
+    val showMediaAmbient: (MediaItem) -> Unit = { item ->
+        ambientFocus = ambientFocusFor(item)
+    }
+    val showAppAmbient: (InstalledApp?) -> Unit = { app ->
+        ambientFocus = app?.let { ambientFocusFor(it, palette) } ?: ambientFocusFor(hero)
+    }
+
+    // Hero rotation and live-session updates are allowed to refresh the backdrop only while
+    // the hero remains the focused surface. A card/app focus owns the backdrop until it loses
+    // focus, so a stale parent update cannot replace the artwork currently under the user.
+    LaunchedEffect(hero.artworkUrl, hero.item?.contentKey()) {
+        if (ambientFocus.key.startsWith("hero:") || ambientFocus.key == "media:${hero.item?.contentKey()}") {
+            ambientFocus = ambientFocusFor(hero)
+        }
+    }
     val smartTubeItem = smartTubeNowPlaying?.toRelayMediaItem()
     fun smartTubeItems(videos: List<SmartTubeSubscriptionVideo>) = videos.map { video ->
             MediaItem(
@@ -320,6 +453,7 @@ internal fun HomeScreen(
         onHomeFocusRestored()
     }
     Box(modifier = Modifier.fillMaxSize()) {
+        HomeAmbientBackdrop(focus = ambientFocus)
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
             state = homeListState,
@@ -343,9 +477,12 @@ internal fun HomeScreen(
                         }
                     )
                 } else HeroPanel(
-                    hero, palette, homeFocusRequester, heroFocusRequester,
+                    hero, palette, homeFocusRequester, heroFocusRequester, heroCandidates,
                     downFocusRequester = firstRowFocusRequester,
-                    onHeroFocused = ::scrollHomeToTop,
+                    onHeroFocused = {
+                        showHeroAmbient()
+                        scrollHomeToTop()
+                    },
                     onItemSelected = onItemSelected
                 ) { accent ->
                     if (accent != null) onHeroChanged(hero.copy(palette = hero.palette.copy(accent = accent, glow = accent.copy(alpha = .32f))))
@@ -360,7 +497,8 @@ internal fun HomeScreen(
                             palette = palette,
                             focusRequester = favoriteAppsFocusRequester,
                             upFocusRequester = heroFocusRequester,
-                            downFocusRequester = null
+                            downFocusRequester = null,
+                            onFocusedApp = showAppAmbient
                         ) { app -> InstalledApps.launch(context, app) }
                         Spacer(Modifier.height(18.dp))
                     }
@@ -388,6 +526,7 @@ internal fun HomeScreen(
                                 palette = palette,
                                 dateFormat = dateFormat,
                                 onHeroChanged = onHeroChanged,
+                                onFocusedItem = showMediaAmbient,
                                 onItemSelected = onItemSelected,
                                 largeCards = true,
                                 upFocusRequester = previousRowFocusRequester(rowIndex),
@@ -399,7 +538,8 @@ internal fun HomeScreen(
                                 palette = palette,
                                 focusRequester = favoriteAppsFocusRequester,
                                 upFocusRequester = previousRowFocusRequester(rowIndex),
-                                downFocusRequester = nextRowFocusRequester(rowIndex)
+                                downFocusRequester = nextRowFocusRequester(rowIndex),
+                                onFocusedApp = showAppAmbient
                             ) { app -> InstalledApps.launch(context, app) }
                             HomeRow.RECOMMENDATIONS -> MediaRail(
                                 title = "Recommended TV Shows",
@@ -407,6 +547,7 @@ internal fun HomeScreen(
                                 palette = palette,
                                 dateFormat = dateFormat,
                                 onHeroChanged = onHeroChanged,
+                                onFocusedItem = showMediaAmbient,
                                 onItemSelected = onItemSelected,
                                 posters = true,
                                 upFocusRequester = previousRowFocusRequester(rowIndex),
@@ -419,6 +560,7 @@ internal fun HomeScreen(
                                 palette = palette,
                                 dateFormat = dateFormat,
                                 onHeroChanged = onHeroChanged,
+                                onFocusedItem = showMediaAmbient,
                                 onItemSelected = onItemSelected,
                                 largeCards = true,
                                 upFocusRequester = previousRowFocusRequester(rowIndex),
@@ -431,6 +573,7 @@ internal fun HomeScreen(
                                 palette = palette,
                                 dateFormat = dateFormat,
                                 onHeroChanged = onHeroChanged,
+                                onFocusedItem = showMediaAmbient,
                                 onItemSelected = onItemSelected,
                                 showPremiereDate = true,
                                 largeCards = true,
@@ -825,54 +968,12 @@ internal fun TopDestination(
 }
 
 @Composable
-internal fun EmbossedSettingsButton(
-    palette: RelayPalette,
-    compact: Boolean = false,
-    onFocused: (Boolean) -> Unit = {},
-    onClick: () -> Unit
-) {
-    val source = remember { MutableInteractionSource() }
-    val focused by source.collectIsFocusedAsState()
-    LaunchedEffect(focused) { onFocused(focused) }
-    Box(
-        modifier = Modifier
-            .size(if (compact) 38.dp else 42.dp)
-            .scale(if (focused) 1.1f else 1f)
-            .clip(CircleShape)
-            .background(Brush.radialGradient(listOf(Color(0xFF31353D), Color(0xFF111318))))
-            .border(1.dp, if (focused) palette.accent else Color(0xFF3A3D45), CircleShape)
-            .clickable(interactionSource = source, indication = null, onClick = onClick),
-        contentAlignment = Alignment.Center
-    ) {
-        Text("⚙", color = if (focused) palette.accent else ivory, fontSize = if (compact) 20.sp else 23.sp)
-    }
-}
-
-@Composable
-internal fun EmbossedSearchButton(
-    palette: RelayPalette,
-    compact: Boolean = false,
-    onFocused: (Boolean) -> Unit = {},
-    onClick: () -> Unit
-) {
-    val source = remember { MutableInteractionSource() }
-    val focused by source.collectIsFocusedAsState()
-    LaunchedEffect(focused) { onFocused(focused) }
-    Row(
-        Modifier.clip(RoundedCornerShape(22.dp)).background(Brush.linearGradient(listOf(Color(0xFF30343C), Color(0xFF111318))))
-            .border(1.dp, if (focused) palette.accent else Color(0xFF3A3D45), RoundedCornerShape(22.dp))
-            .clickable(interactionSource = source, indication = null, onClick = onClick)
-            .padding(horizontal = if (compact) 11.dp else 14.dp, vertical = if (compact) 8.dp else 10.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) { Text("⌕", color = ivory, fontSize = 19.sp); Spacer(Modifier.width(6.dp)); Text("Search", color = ivory, fontSize = if (compact) 14.sp else 16.sp) }
-}
-
-@Composable
 internal fun HeroPanel(
     hero: Hero,
     palette: RelayPalette,
     homeFocusRequester: FocusRequester,
     resumeFocusRequester: FocusRequester,
+    heroCandidates: List<MediaItem>,
     downFocusRequester: FocusRequester? = null,
     onHeroFocused: () -> Unit,
     onItemSelected: (MediaItem) -> Unit,
@@ -917,6 +1018,19 @@ internal fun HeroPanel(
             )
         )
         Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, midnight.copy(alpha = .72f)))))
+        val activeHeroIndex = hero.item?.let { activeItem ->
+            heroCandidates.indexOfFirst { it.contentKey() == activeItem.contentKey() }
+        } ?: -1
+        if (heroCandidates.size > 1 && activeHeroIndex >= 0) {
+            HeroPaginationIndicator(
+                count = heroCandidates.size,
+                activeIndex = activeHeroIndex,
+                accent = palette.accent,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 78.dp, bottom = 24.dp)
+            )
+        }
         // Keep changing media titles well clear of the persistent navigation overlay.
         Column(modifier = Modifier.padding(start = 78.dp, top = 180.dp, end = 78.dp, bottom = 42.dp).width(620.dp)) {
             val heroItem = hero.item
@@ -958,6 +1072,33 @@ internal fun HeroPanel(
                     onFocused = { if (it) onHeroFocused() }
                 ) { hero.item?.let(onItemSelected) }
             }
+        }
+    }
+}
+
+@Composable
+private fun HeroPaginationIndicator(
+    count: Int,
+    activeIndex: Int,
+    accent: Color,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(midnight.copy(alpha = .68f))
+            .padding(horizontal = 9.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        repeat(count) { index ->
+            Box(
+                modifier = Modifier
+                    .width(if (index == activeIndex) 18.dp else 6.dp)
+                    .height(6.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(if (index == activeIndex) accent else ivory.copy(alpha = .62f))
+            )
         }
     }
 }
@@ -1011,6 +1152,7 @@ internal fun MediaRail(
     palette: RelayPalette,
     dateFormat: RelayDateFormat,
     onHeroChanged: (Hero) -> Unit,
+    onFocusedItem: (MediaItem) -> Unit = {},
     onItemSelected: (MediaItem) -> Unit,
     posters: Boolean = false,
     showPremiereDate: Boolean = false,
@@ -1092,6 +1234,7 @@ internal fun MediaRail(
                         val item = items[index]
                         val itemKey = item.contentKey()
                         if (isFocused) {
+                            onFocusedItem(item)
                             focusedItemKey = itemKey
                             pendingHeroUpdate[0]?.cancel()
                             pendingHeroUpdate[0] = railScope.launch {
@@ -1252,6 +1395,7 @@ internal fun FavoriteAppsRail(
     focusRequester: FocusRequester? = null,
     upFocusRequester: FocusRequester? = null,
     downFocusRequester: FocusRequester? = null,
+    onFocusedApp: (InstalledApp?) -> Unit = {},
     onLaunch: (InstalledApp) -> Unit
 ) {
     if (apps.isEmpty()) return
@@ -1282,7 +1426,8 @@ internal fun FavoriteAppsRail(
                     palette = palette,
                     focusRequester = if (index == 0) focusRequester else null,
                     upFocusRequester = upFocusRequester,
-                    downFocusRequester = downFocusRequester
+                    downFocusRequester = downFocusRequester,
+                    onFocusChanged = { focused -> onFocusedApp(if (focused) app else null) }
                 ) { onLaunch(app) }
             }
         }
@@ -1296,6 +1441,7 @@ internal fun FavoriteAppCard(
     focusRequester: FocusRequester? = null,
     upFocusRequester: FocusRequester? = null,
     downFocusRequester: FocusRequester? = null,
+    onFocusChanged: (Boolean) -> Unit = {},
     onClick: () -> Unit
 ) {
     val source = remember { MutableInteractionSource() }
@@ -1308,6 +1454,7 @@ internal fun FavoriteAppCard(
                 if (downFocusRequester != null) down = downFocusRequester
             } else Modifier)
             .width(104.dp)
+            .onFocusChanged { onFocusChanged(it.hasFocus) }
             .clickable(interactionSource = source, indication = null, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {

@@ -1,8 +1,11 @@
 package com.relayhome.launcher
 
+import com.relayhome.launcher.ui.shared.Provider
 import android.content.Context
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.relayhome.launcher.data.RelaySettingsRepository
+import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -16,14 +19,14 @@ class ContinueWatchingLimitsAndroidTest {
 
     @Before
     fun clearPreferences() {
-        newPreferences().edit().clear().commit()
         legacyPreferences().edit().clear().commit()
+        runBlocking { RelaySettingsRepository.resetForTesting(context) }
     }
 
     @After
     fun restorePreferences() {
-        newPreferences().edit().clear().commit()
         legacyPreferences().edit().clear().commit()
+        runBlocking { RelaySettingsRepository.resetForTesting(context) }
     }
 
     @Test
@@ -45,8 +48,6 @@ class ContinueWatchingLimitsAndroidTest {
         assertEquals(24, limits.getValue(Provider.STREMIO))
         assertEquals(12, limits.getValue(Provider.SMARTTUBE))
     }
-
-    private fun newPreferences() = context.getSharedPreferences("relay_settings_data", Context.MODE_PRIVATE)
 
     private fun legacyPreferences() = context.getSharedPreferences("relay_continue_watching", Context.MODE_PRIVATE)
 }

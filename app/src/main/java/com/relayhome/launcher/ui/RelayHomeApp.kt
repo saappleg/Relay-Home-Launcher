@@ -1,5 +1,17 @@
-package com.relayhome.launcher
+package com.relayhome.launcher.ui
 
+import com.relayhome.launcher.*
+import com.relayhome.launcher.ui.apppeek.*
+import com.relayhome.launcher.ui.apps.*
+import com.relayhome.launcher.ui.calendar.*
+import com.relayhome.launcher.ui.details.*
+import com.relayhome.launcher.ui.home.*
+import com.relayhome.launcher.ui.nuvioconnect.*
+import com.relayhome.launcher.ui.providerhub.*
+import com.relayhome.launcher.ui.search.*
+import com.relayhome.launcher.ui.settings.*
+import com.relayhome.launcher.ui.shared.*
+import com.relayhome.launcher.data.RelaySettingsRepository
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
@@ -7,6 +19,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -23,6 +36,7 @@ import kotlinx.coroutines.withContext
 @Composable
 internal fun RelayHomeApp() {
     val context = LocalContext.current
+    val settingsRevision by RelaySettingsRepository.revision(context).collectAsState()
     val launcherStateRevision = (context as? MainActivity)?.launcherStateRevision ?: 0
     var launcherState by remember(context, launcherStateRevision) { mutableStateOf<LauncherState?>(null) }
     LaunchedEffect(context, launcherStateRevision) {
@@ -31,11 +45,11 @@ internal fun RelayHomeApp() {
         }
     }
     val inspectedLauncherState = launcherState ?: LauncherState(null, null, null)
-    var dateFormat by remember { mutableStateOf(DateFormatSettings.load(context)) }
+    var dateFormat by remember(context, settingsRevision) { mutableStateOf(DateFormatSettings.load(context)) }
     var appearance by remember { mutableStateOf(loadRelayAppearance(context)) }
     var homeRowOrder by remember { mutableStateOf(HomeRowOrderStore.load(context)) }
     val dynamicColorScheme = remember(context) { dynamicRelayColorScheme(context) }
-    var profileImageUri by remember { mutableStateOf(ProfileImageSettings.load(context)) }
+    var profileImageUri by remember(context, settingsRevision) { mutableStateOf(ProfileImageSettings.load(context)) }
     remember(context) { FavoriteAppsStore.load(context) }
     // Read the snapshot directly so the async default-favorites completion invalidates this
     // composition without a second synchronous package discovery.
@@ -69,7 +83,7 @@ internal fun RelayHomeApp() {
             peekProvider = null
         }
     }
-    var continueWatchingLimits by remember { mutableStateOf(ContinueWatchingLimits.load(context)) }
+    var continueWatchingLimits by remember(context, settingsRevision) { mutableStateOf(ContinueWatchingLimits.load(context)) }
     var nuvioSession by remember { mutableStateOf(NuvioSessionStore.load(context)) }
     var nuvioAuthRequired by remember { mutableStateOf(false) }
     val defaultProviders = remember(nuvioSession) {
@@ -78,7 +92,7 @@ internal fun RelayHomeApp() {
             if (ProviderHandoff.isSmartTubeInstalled(context)) add(Provider.SMARTTUBE)
         }
     }
-    var enabledProviders by remember {
+    var enabledProviders by remember(context, settingsRevision, defaultProviders) {
         mutableStateOf(
             ProviderSettingsStore.load(
                 context,
@@ -326,6 +340,7 @@ internal fun RelayHomeApp() {
                     onSettings = { destination = Destination.SETTINGS },
                     onHeroChanged = { hero -> if (hero != activeHero) activeHero = hero },
                     onItemSelected = ::openMediaDetails,
+                    heroCandidates = heroCandidates,
                     nuvioItems = nuvioMedia,
                     nuvioSyncing = nuvioSyncing,
                     nuvioSyncError = nuvioSyncError,

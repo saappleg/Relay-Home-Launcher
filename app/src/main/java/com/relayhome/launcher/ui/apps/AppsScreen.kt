@@ -1,5 +1,9 @@
-package com.relayhome.launcher
+package com.relayhome.launcher.ui.apps
 
+import com.relayhome.launcher.*
+import com.relayhome.launcher.ui.home.ActionButton
+import com.relayhome.launcher.ui.home.LauncherAppIcon
+import com.relayhome.launcher.ui.shared.*
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.os.Bundle

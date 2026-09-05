@@ -175,7 +175,18 @@ internal object LauncherOverride {
     private const val diagnosticOperationKey = "diagnostic_last_operation"
     private const val diagnosticUpdatedKey = "diagnostic_updated_at_ms"
     private const val diagnosticDeviceKey = "diagnostic_device"
-    private const val maxDiagnosticEvents = 48
+    internal const val maxDiagnosticEvents = 48
+
+    /** Pure decision seam for the PackageManager-backed observation below. */
+    internal fun isDisableStillObservedForState(
+        strategy: String,
+        packageEnabled: Boolean,
+        componentEnabled: Boolean
+    ): Boolean = when (strategy) {
+        LauncherOverrideStrategy.PACKAGE_LEVEL -> !packageEnabled
+        LauncherOverrideStrategy.COMPONENT_DISABLE -> packageEnabled && !componentEnabled
+        else -> false
+    }
 
     fun inspect(context: Context): LauncherState {
         val packageManager = context.packageManager
@@ -369,16 +380,16 @@ internal object LauncherOverride {
             stock.packageName,
             PackageManager.MATCH_DISABLED_COMPONENTS
         )
-        when (strategy) {
-            LauncherOverrideStrategy.PACKAGE_LEVEL -> !packageInfo.enabled
-            LauncherOverrideStrategy.COMPONENT_DISABLE -> {
-                packageInfo.enabled && !packageManager.getActivityInfo(
-                    android.content.ComponentName(stock.packageName, stock.activityName),
-                    PackageManager.MATCH_DISABLED_COMPONENTS
-                ).enabled
-            }
-            else -> false
+        val componentEnabled = if (strategy == LauncherOverrideStrategy.COMPONENT_DISABLE) {
+            packageManager.getActivityInfo(
+                android.content.ComponentName(stock.packageName, stock.activityName),
+                PackageManager.MATCH_DISABLED_COMPONENTS
+            ).enabled
+        } else {
+            // Package-level observation does not require the remembered activity to be queryable.
+            true
         }
+        isDisableStillObservedForState(strategy, packageInfo.enabled, componentEnabled)
     }.getOrDefault(false)
 
     private fun log(event: LauncherDiagnosticEvent) {

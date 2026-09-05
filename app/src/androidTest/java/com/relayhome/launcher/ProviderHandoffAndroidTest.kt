@@ -1,5 +1,7 @@
 package com.relayhome.launcher
 
+import com.relayhome.launcher.ui.shared.MediaItem
+import com.relayhome.launcher.ui.shared.Provider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull

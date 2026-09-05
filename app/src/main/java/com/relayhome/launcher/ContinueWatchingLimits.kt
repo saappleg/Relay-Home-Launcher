@@ -2,6 +2,7 @@ package com.relayhome.launcher
 
 import android.content.Context
 import com.relayhome.launcher.data.RelaySettingsRepository
+import com.relayhome.launcher.ui.shared.Provider
 
 /** Per-provider presentation limits for Relay's combined Continue Watching rail. */
 internal object ContinueWatchingLimits {
