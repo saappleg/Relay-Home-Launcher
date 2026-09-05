@@ -59,7 +59,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.CircleShape
@@ -2386,14 +2385,41 @@ private fun AppsScreen(
 ) {
     val context = LocalContext.current
     val apps = remember { InstalledApps.discover(context) }
-    val firstAppFocusRequester = remember { FocusRequester() }
+    val appColumns = 5
+    val rowsPerPage = 3
+    val appsPerPage = appColumns * rowsPerPage
+    val pageCount = if (apps.isEmpty()) 0 else (apps.size + appsPerPage - 1) / appsPerPage
+    var appPage by remember { mutableStateOf(0) }
+    var pageFocusIndex by remember { mutableStateOf(0) }
+    val appFocusRequesters = remember(apps) {
+        apps.associate { it.packageName to FocusRequester() }
+    }
     val backFocusRequester = remember { FocusRequester() }
-    val appsRailState = rememberLazyListState()
     var activeMenuApp by remember { mutableStateOf<InstalledApp?>(null) }
-    LaunchedEffect(apps) {
-        appsRailState.scrollToItem(0)
+    LaunchedEffect(apps, appPage, pageFocusIndex) {
         withFrameNanos { }
-        if (apps.isNotEmpty()) firstAppFocusRequester.requestFocus()
+        val absoluteIndex = appPage * appsPerPage + pageFocusIndex
+        apps.getOrNull(absoluteIndex)?.let { appFocusRequesters[it.packageName]?.requestFocus() }
+    }
+    val pageApps = apps.drop(appPage * appsPerPage).take(appsPerPage)
+    val pageRows = pageApps.chunked(appColumns)
+    val currentPageFirstFocusRequester = pageApps.firstOrNull()?.let { appFocusRequesters[it.packageName] }
+    fun requesterFor(localIndex: Int?): FocusRequester? = localIndex
+        ?.takeIf { it in pageApps.indices }
+        ?.let { appFocusRequesters[pageApps[it].packageName] }
+    fun movePage(direction: Int, currentIndex: Int): Boolean {
+        val nextPage = appPage + direction
+        if (nextPage !in 0 until pageCount) return false
+        val nextAppCount = minOf(appsPerPage, apps.size - nextPage * appsPerPage)
+        val currentRow = currentIndex / appColumns
+        val nextLastRow = (nextAppCount - 1) / appColumns
+        val targetRow = minOf(currentRow, nextLastRow)
+        val targetRowStart = targetRow * appColumns
+        val targetRowEnd = minOf(targetRowStart + appColumns, nextAppCount)
+        val targetColumn = if (direction > 0) 0 else appColumns - 1
+        appPage = nextPage
+        pageFocusIndex = minOf(targetRowStart + targetColumn, targetRowEnd - 1)
+        return true
     }
     BackHandler(enabled = activeMenuApp == null, onBack = onBackHome)
     Column(Modifier.fillMaxSize().padding(horizontal = 56.dp, vertical = 48.dp)) {
@@ -2405,7 +2431,7 @@ private fun AppsScreen(
                 palette,
                 primary = false,
                 focusRequester = backFocusRequester,
-                downFocusRequester = if (apps.isNotEmpty()) firstAppFocusRequester else null,
+                downFocusRequester = currentPageFirstFocusRequester,
                 onClick = onBackHome
             )
         }
@@ -2413,30 +2439,69 @@ private fun AppsScreen(
         Row(verticalAlignment = Alignment.Bottom) {
             Text("All apps", color = ivory, fontSize = 23.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.width(12.dp))
-            Text("A–Z · Scroll right for more", color = muted, fontSize = 14.sp)
+            Text(
+                if (pageCount > 1) "A–Z · Page ${appPage + 1} of $pageCount · Left/right for more" else "A–Z",
+                color = muted,
+                fontSize = 14.sp
+            )
         }
         Spacer(Modifier.height(18.dp))
         if (apps.isEmpty()) {
             Text("No launchable apps were found yet.", color = muted, fontSize = 17.sp)
         } else {
-            LazyRow(
-                state = appsRailState,
-                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(18.dp),
-                modifier = Modifier.weight(1f).focusGroup()
-            ) {
-                items(apps.size, key = { apps[it].packageName }) { index ->
-                    val app = apps[index]
-                    Box(Modifier.width(240.dp)) {
-                        InstalledAppTile(
-                            app = app,
-                            palette = palette,
-                            focusRequester = if (index == 0) firstAppFocusRequester else null,
-                            upFocusRequester = backFocusRequester,
-                            menuOpen = activeMenuApp != null,
-                            onLongClick = { activeMenuApp = app },
-                            onClick = { InstalledApps.launch(context, app) }
-                        )
+            Box(Modifier.weight(1f).fillMaxWidth().focusGroup()) {
+                Column(
+                    Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(24.dp)
+                ) {
+                    pageRows.forEachIndexed { rowIndex, rowApps ->
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(18.dp)
+                        ) {
+                            rowApps.forEachIndexed { column, app ->
+                                val localIndex = rowIndex * appColumns + column
+                                val rowStart = rowIndex * appColumns
+                                val rowEnd = rowStart + rowApps.size
+                                val upIndex = if (rowIndex > 0) {
+                                    minOf((rowIndex - 1) * appColumns + column, rowStart - 1)
+                                } else {
+                                    null
+                                }
+                                val downIndex = if (rowIndex + 1 < pageRows.size) {
+                                    minOf((rowIndex + 1) * appColumns + column, pageApps.size - 1)
+                                } else {
+                                    null
+                                }
+                                Box(Modifier.weight(1f)) {
+                                    InstalledAppTile(
+                                        app = app,
+                                        palette = palette,
+                                        focusRequester = appFocusRequesters[app.packageName],
+                                        upFocusRequester = requesterFor(upIndex) ?: backFocusRequester,
+                                        downFocusRequester = requesterFor(downIndex),
+                                        leftFocusRequester = requesterFor(localIndex - 1).takeIf { column > 0 },
+                                        rightFocusRequester = requesterFor(localIndex + 1).takeIf { localIndex + 1 < rowEnd },
+                                        onPageMoveLeft = if (column == 0 && appPage > 0) {
+                                            { movePage(-1, localIndex) }
+                                        } else {
+                                            null
+                                        },
+                                        onPageMoveRight = if (localIndex + 1 == rowEnd && appPage + 1 < pageCount) {
+                                            { movePage(1, localIndex) }
+                                        } else {
+                                            null
+                                        },
+                                        menuOpen = activeMenuApp != null,
+                                        onLongClick = { activeMenuApp = app },
+                                        onClick = { InstalledApps.launch(context, app) }
+                                    )
+                                }
+                            }
+                            repeat(appColumns - rowApps.size) {
+                                Spacer(Modifier.weight(1f))
+                            }
+                        }
                     }
                 }
             }
@@ -2467,7 +2532,7 @@ private fun AppsScreen(
     }
 }
 
-/** Google TV-style artwork-only app tile using the application's own 16:9 TV banner. */
+/** Google TV-style app tile using the application's own Leanback banner when available. */
 @Composable
 @OptIn(ExperimentalFoundationApi::class)
 private fun InstalledAppTile(
@@ -2475,6 +2540,11 @@ private fun InstalledAppTile(
     palette: RelayPalette,
     focusRequester: FocusRequester? = null,
     upFocusRequester: FocusRequester? = null,
+    downFocusRequester: FocusRequester? = null,
+    leftFocusRequester: FocusRequester? = null,
+    rightFocusRequester: FocusRequester? = null,
+    onPageMoveLeft: (() -> Boolean)? = null,
+    onPageMoveRight: (() -> Boolean)? = null,
     menuOpen: Boolean,
     onLongClick: () -> Unit,
     onClick: () -> Unit
@@ -2487,6 +2557,9 @@ private fun InstalledAppTile(
     val showFocus = focused && !menuOpen
     val scale by animateFloatAsState(if (showFocus) 1.07f else 1f, label = "app tile focus")
     val shape = RoundedCornerShape(16.dp)
+    val artwork = remember(app.packageName) {
+        app.artwork.toBitmap(640, 360).asImageBitmap()
+    }
     DisposableEffect(Unit) {
         onDispose { selectHoldJob?.cancel() }
     }
@@ -2499,42 +2572,60 @@ private fun InstalledAppTile(
     }
     Column(
         modifier = (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-            .then(upFocusRequester?.let { requester -> Modifier.focusProperties { up = requester } } ?: Modifier)
+            .then(if (upFocusRequester != null || downFocusRequester != null || leftFocusRequester != null || rightFocusRequester != null) Modifier.focusProperties {
+                if (upFocusRequester != null) up = upFocusRequester
+                if (downFocusRequester != null) down = downFocusRequester
+                if (leftFocusRequester != null) left = leftFocusRequester
+                if (rightFocusRequester != null) right = rightFocusRequester
+            } else Modifier)
             .fillMaxWidth()
             .scale(scale)
             .onPreviewKeyEvent { event ->
                 val nativeEvent = event.nativeKeyEvent
+                val pageMoveHandled = if (nativeEvent.action == KeyEvent.ACTION_DOWN && nativeEvent.repeatCount == 0) {
+                    when (nativeEvent.keyCode) {
+                        KeyEvent.KEYCODE_DPAD_LEFT -> onPageMoveLeft?.invoke() == true
+                        KeyEvent.KEYCODE_DPAD_RIGHT -> onPageMoveRight?.invoke() == true
+                        else -> false
+                    }
+                } else {
+                    false
+                }
+                if (pageMoveHandled) {
+                    true
+                } else {
                 val isSelectKey = nativeEvent.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
                     nativeEvent.keyCode == KeyEvent.KEYCODE_ENTER ||
                     nativeEvent.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
-                if (!isSelectKey) {
-                    false
-                } else when (nativeEvent.action) {
-                    KeyEvent.ACTION_DOWN -> {
-                        if (nativeEvent.isLongPress && !longPressHandled) {
-                            selectHoldJob?.cancel()
-                            selectHoldJob = null
-                            longPressHandled = true
-                            onLongClick()
-                        } else if (nativeEvent.repeatCount == 0 && selectHoldJob == null && !longPressHandled) {
-                            selectHoldJob = scope.launch {
-                                delay(ViewConfiguration.getLongPressTimeout().toLong())
+                    if (!isSelectKey) {
+                        false
+                    } else when (nativeEvent.action) {
+                        KeyEvent.ACTION_DOWN -> {
+                            if (nativeEvent.isLongPress && !longPressHandled) {
+                                selectHoldJob?.cancel()
                                 selectHoldJob = null
                                 longPressHandled = true
                                 onLongClick()
+                            } else if (nativeEvent.repeatCount == 0 && selectHoldJob == null && !longPressHandled) {
+                                selectHoldJob = scope.launch {
+                                    delay(ViewConfiguration.getLongPressTimeout().toLong())
+                                    selectHoldJob = null
+                                    longPressHandled = true
+                                    onLongClick()
+                                }
                             }
+                            true
                         }
-                        true
+                        KeyEvent.ACTION_UP -> {
+                            val pendingClick = selectHoldJob
+                            selectHoldJob = null
+                            pendingClick?.cancel()
+                            if (pendingClick != null && !longPressHandled) onClick()
+                            longPressHandled = false
+                            true
+                        }
+                        else -> true
                     }
-                    KeyEvent.ACTION_UP -> {
-                        val pendingClick = selectHoldJob
-                        selectHoldJob = null
-                        pendingClick?.cancel()
-                        if (pendingClick != null && !longPressHandled) onClick()
-                        longPressHandled = false
-                        true
-                    }
-                    else -> true
                 }
             }
             .combinedClickable(interactionSource = source, indication = null, onLongClick = onLongClick, onClick = onClick),
@@ -2542,15 +2633,20 @@ private fun InstalledAppTile(
     ) {
         Box(
             Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(shape)
-                .background(if (showFocus) palette.accent.copy(alpha = .24f) else Color(0xFF20232A)),
+                .background(if (showFocus) palette.accent.copy(alpha = .24f) else Color(0xFF20232A))
+                .border(if (showFocus) 2.dp else 1.dp, if (showFocus) palette.accent else Color.White.copy(alpha = .10f), shape),
             contentAlignment = Alignment.Center
         ) {
-            CircularAppIcon(
-                app = app,
-                palette = palette,
-                focused = showFocus,
-                iconSize = 76.dp
-            )
+            if (app.hasLeanbackBanner) {
+                Image(
+                    painter = BitmapPainter(artwork),
+                    contentDescription = app.label,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                CircularAppIcon(app = app, palette = palette, focused = showFocus, iconSize = 76.dp)
+            }
             if (showFocus) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = .08f)))
         }
         Spacer(Modifier.height(7.dp))
