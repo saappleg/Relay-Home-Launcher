@@ -39,13 +39,17 @@ if [ "$state" != "device" ] || {
   exit 1
 fi
 
-# Pixel 2's default profile is portrait. Keep rotation locked at zero because
-# the launch skin is already landscape, then force the logical display size and
-# effective density. Poll the actual physical/logical geometry instead of
-# relying on a SurfaceOrientation line that API 34 may not expose.
+# Pixel 2's default profile is portrait and exposes phone system bars. Keep
+# rotation locked at zero because the launch skin is already landscape, force
+# the logical display size/density, and apply the same immersive policy used by
+# a fullscreen TV surface. The instrumentation Compose activity comes from the
+# test harness (not the app theme), so the policy must be applied globally
+# before connectedCheck creates that activity.
 adb -s "$serial" shell settings put system accelerometer_rotation 0
 adb -s "$serial" shell settings put system user_rotation 0
 adb -s "$serial" shell cmd window user-rotation lock 0 >/dev/null 2>&1 || true
+adb -s "$serial" shell settings put secure immersive_mode_confirmations confirmed
+adb -s "$serial" shell settings put global policy_control 'immersive.full=*'
 adb -s "$serial" shell wm size 1920x1080
 adb -s "$serial" shell wm density 320
 geometry_started="$(date +%s)"
@@ -59,6 +63,12 @@ wm_density=""
 physical_density=""
 override_density=""
 effective_density=""
+window_display_size=""
+window_content_size=""
+status_bars_visible=""
+navigation_bars_visible=""
+policy_control=""
+window_dump=""
 while [ "$now" -lt "$geometry_deadline" ]; do
   wm_size="$(adb -s "$serial" shell wm size 2>/dev/null | tr -d '\r' || true)"
   physical_size="$(printf '%s\n' "$wm_size" | sed -n 's/^[[:space:]]*Physical size:[[:space:]]*//p' | tail -1)"
@@ -102,5 +112,72 @@ if [ "$physical_size" != "1920x1080" ] || [ "$logical_size" != "1920x1080" ] \
   adb -s "$serial" shell dumpsys window displays | tail -80 || true
   exit 1
 fi
+
+# Confirm that the system bars are actually hidden and that the window policy
+# gives the test activity the full display. A matching wm size alone is not
+# sufficient: a phone AVD can report 1920x1080 while reserving top/bottom
+# insets for status/navigation bars, which changes Compose focus and layout.
+fullscreen_started="$(date +%s)"
+fullscreen_deadline=$((fullscreen_started + 30))
+now="$(date +%s)"
+window_display_size=""
+window_content_size=""
+status_bars_visible=""
+navigation_bars_visible=""
+policy_control=""
+window_dump=""
+while [ "$now" -lt "$fullscreen_deadline" ]; do
+  policy_control="$(adb -s "$serial" shell settings get global policy_control 2>/dev/null | tr -d '\r' || true)"
+  window_dump="$(adb -s "$serial" shell dumpsys window displays 2>/dev/null | tr -d '\r' || true)"
+  window_display_size="$(printf '%s\n' "$window_dump" | sed -n \
+    's/.*mDisplayFrame=Rect(0, 0 - \([0-9][0-9]*\), \([0-9][0-9]*\)).*/\1x\2/p' | head -1)"
+  window_content_size="$(printf '%s\n' "$window_dump" | sed -n \
+    's/.*mContent=Rect(0, 0 - \([0-9][0-9]*\), \([0-9][0-9]*\)).*/\1x\2/p' | head -1)"
+  status_line="$(printf '%s\n' "$window_dump" | grep -m 1 'type=statusBars' || true)"
+  navigation_line="$(printf '%s\n' "$window_dump" | grep -m 1 'type=navigationBars' || true)"
+  status_bars_visible="$(printf '%s\n' "$status_line" | sed -n \
+    's/.*visible=\([^[:space:]]*\).*/\1/p')"
+  navigation_bars_visible="$(printf '%s\n' "$navigation_line" | sed -n \
+    's/.*visible=\([^[:space:]]*\).*/\1/p')"
+  printf 'Emulator fullscreen state: policy_control=%s displayFrame=%s contentFrame=%s statusBarsVisible=%s navigationBarsVisible=%s\n' \
+    "${policy_control:-unavailable}" "${window_display_size:-unavailable}" \
+    "${window_content_size:-unavailable}" "${status_bars_visible:-unavailable}" \
+    "${navigation_bars_visible:-unavailable}"
+  if [ "$policy_control" = "immersive.full=*" ] \
+    && [ "$window_display_size" = "1920x1080" ] \
+    && [ "$window_content_size" = "1920x1080" ] \
+    && [ "$status_bars_visible" = "false" ] \
+    && [ "$navigation_bars_visible" = "false" ]; then
+    break
+  fi
+  adb -s "$serial" shell settings put secure immersive_mode_confirmations confirmed
+  adb -s "$serial" shell settings put global policy_control 'immersive.full=*'
+  sleep 2
+  now="$(date +%s)"
+done
+
+if [ "$policy_control" != "immersive.full=*" ] \
+  || [ "$window_display_size" != "1920x1080" ] \
+  || [ "$window_content_size" != "1920x1080" ] \
+  || [ "$status_bars_visible" != "false" ] \
+  || [ "$navigation_bars_visible" != "false" ]; then
+  echo "Hosted emulator did not expose a fullscreen 1920x1080 test window." >&2
+  echo "Expected immersive.full=*, full display/content frames, and hidden status/navigation bars." >&2
+  printf 'Observed policy_control=%s displayFrame=%s contentFrame=%s statusBarsVisible=%s navigationBarsVisible=%s\n' \
+    "${policy_control:-unavailable}" "${window_display_size:-unavailable}" \
+    "${window_content_size:-unavailable}" "${status_bars_visible:-unavailable}" \
+    "${navigation_bars_visible:-unavailable}" >&2
+  adb devices -l || true
+  adb -s "$serial" shell settings get global policy_control || true
+  adb -s "$serial" shell settings get secure immersive_mode_confirmations || true
+  adb -s "$serial" shell dumpsys window displays | grep -E \
+    'mDisplayFrame|mContent|mStable|nonDecorInsets|configInsets|type=(statusBars|navigationBars)' | tail -120 || true
+  adb -s "$serial" shell dumpsys window policy | tail -160 || true
+  adb -s "$serial" shell dumpsys statusbar | tail -120 || true
+  exit 1
+fi
+
+printf 'Verified fullscreen emulator window: displayFrame=%s contentFrame=%s statusBarsVisible=%s navigationBarsVisible=%s\n' \
+  "$window_display_size" "$window_content_size" "$status_bars_visible" "$navigation_bars_visible"
 
 ./gradlew :app:connectedCheck --stacktrace --console=plain

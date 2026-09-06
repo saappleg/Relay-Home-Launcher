@@ -26,7 +26,13 @@ set_config_entry hw.lcd.width 1920
 set_config_entry hw.lcd.height 1080
 set_config_entry hw.lcd.density 320
 set_config_entry hw.initialOrientation landscape
+set_config_entry hw.dPad yes
+set_config_entry hw.mainKeys yes
+set_config_entry hw.screen no-touch
 set_config_entry skin.dynamic yes
 set_config_entry skin.name 1920x1080
 
-grep -E '^(hw\.lcd\.(width|height|density)|hw\.initialOrientation|skin\.(dynamic|name))=' "$avd_config"
+# Match the local Google TV AVD's input/navigation hardware as well as its
+# framebuffer. This prevents the phone profile from adding phone-style system
+# navigation behavior to D-pad-focused Compose tests.
+grep -E '^(hw\.lcd\.(width|height|density)|hw\.initialOrientation|hw\.(dPad|mainKeys|screen)|skin\.(dynamic|name))=' "$avd_config"
