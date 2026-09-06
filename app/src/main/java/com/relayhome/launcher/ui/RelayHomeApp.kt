@@ -207,7 +207,8 @@ internal fun RelayHomeApp(
                     onProfileMappingChanged = stateHolder::setManualProfileMapping,
                     relayIsDefault = state.launcherState.relayIsDefault,
                     stockLauncherOverride = state.launcherState.stockLauncherOverride,
-                    onLauncherChanged = stateHolder::refreshLauncherState
+                    onLauncherChanged = stateHolder::refreshLauncherState,
+                    operationErrors = state.operationErrors
                 )
 
                 Destination.SEARCH -> SearchScreen(

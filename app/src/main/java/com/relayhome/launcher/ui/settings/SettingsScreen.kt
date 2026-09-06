@@ -2,6 +2,7 @@ package com.relayhome.launcher.ui.settings
 
 import com.relayhome.launcher.*
 import com.relayhome.launcher.ui.home.ActionButton
+import com.relayhome.launcher.ui.state.RelayOperationError
 import com.relayhome.launcher.ui.shared.*
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -294,7 +295,8 @@ internal fun SettingsScreen(
     onLauncherChanged: () -> Unit,
     nuvioProfiles: List<NuvioProfile> = emptyList(),
     relayTubeProfiles: List<RelayTubeProfile> = emptyList(),
-    onProfileMappingChanged: (Int, String?) -> Unit = { _, _ -> }
+    onProfileMappingChanged: (Int, String?) -> Unit = { _, _ -> },
+    operationErrors: List<RelayOperationError> = emptyList()
 ) {
     val context = LocalContext.current
     val installedApps = rememberInstalledApps(context)
@@ -569,7 +571,8 @@ internal fun SettingsScreen(
                     onApplyRelayHomeWithShizuku = ::applyRelayHomeWithShizuku,
                     onRestoreStockLauncherWithShizuku = ::restoreStockLauncherWithShizuku,
                     updateScope = updateScope,
-                    showDeviceSettings = category == SettingsCategory.DEVICE_SETTINGS
+                    showDeviceSettings = category == SettingsCategory.DEVICE_SETTINGS,
+                    operationErrors = operationErrors
                 )
             }
         }
@@ -2074,8 +2077,10 @@ private fun LauncherUpdatesSettings(
     onApplyRelayHomeWithShizuku: () -> Unit,
     onRestoreStockLauncherWithShizuku: () -> Unit,
     updateScope: kotlinx.coroutines.CoroutineScope,
+    operationErrors: List<RelayOperationError> = emptyList(),
     showDeviceSettings: Boolean = true
 ) {
+    val crashRecord = remember(context) { RelayCrashDiagnostics.load(context) }
     SettingsSectionTitle(
         if (showDeviceSettings) "Home launcher" else "Relay updates",
         if (showDeviceSettings) "Choose the default Home app and manage Android TV launcher behavior."
@@ -2223,7 +2228,7 @@ private fun LauncherUpdatesSettings(
     Text("Expand for local-only override evidence and the reversible ADB fallback. Relay marks a strategy active only when Android's Home resolver verified Relay Home.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
     Spacer(Modifier.height(12.dp))
     ActionButton(if (showAdvancedHomeSetup) "Hide advanced diagnostics" else "Show advanced diagnostics", palette, primary = false, onClick = onToggleAdvancedHomeSetup)
-    if (showAdvancedHomeSetup) {
+        if (showAdvancedHomeSetup) {
         Spacer(Modifier.height(14.dp))
         Text("Override diagnostics", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(7.dp))
@@ -2250,6 +2255,53 @@ private fun LauncherUpdatesSettings(
                 if (eventDetail.isNotBlank()) {
                     Spacer(Modifier.height(2.dp))
                     Text(eventDetail, color = muted, fontSize = 12.sp, lineHeight = 17.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+        if (operationErrors.isNotEmpty()) {
+            Spacer(Modifier.height(14.dp))
+            Text("Recoverable operation errors", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(7.dp))
+            Text("Relay kept the last known-good content when an operation failed. These entries are local to this process and contain no credentials.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+            Spacer(Modifier.height(10.dp))
+            Column(
+                Modifier.fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFF090B10))
+                    .border(1.dp, Color.White.copy(alpha = .10f), RoundedCornerShape(12.dp))
+                    .padding(16.dp)
+                    .testTag("recoverable-operation-errors")
+            ) {
+                operationErrors.takeLast(8).asReversed().forEach { error ->
+                    Text(error.operation, color = palette.accent, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                    Spacer(Modifier.height(2.dp))
+                    Text(error.message, color = ivory, fontSize = 12.sp, lineHeight = 17.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                    if (error != operationErrors.takeLast(8).last()) Spacer(Modifier.height(10.dp))
+                }
+            }
+        }
+        crashRecord?.let { record ->
+            Spacer(Modifier.height(14.dp))
+            Text("Last process crash", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(7.dp))
+            Text("Saved locally before the previous process exited. This is useful when a crash is intermittent or the TV cannot be connected to Logcat.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+            Spacer(Modifier.height(10.dp))
+            Column(
+                Modifier.fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color(0xFF090B10))
+                    .border(1.dp, Color.White.copy(alpha = .10f), RoundedCornerShape(12.dp))
+                    .padding(16.dp)
+                    .testTag("last-process-crash")
+            ) {
+                Text("${record.exception}: ${record.message.ifBlank { "(no message)" }}", color = ivory, fontSize = 14.sp, lineHeight = 20.sp)
+                Spacer(Modifier.height(4.dp))
+                Text("Thread: ${record.thread} · Device: ${record.device} · ${record.os}", color = muted, fontSize = 12.sp, lineHeight = 17.sp)
+                Spacer(Modifier.height(10.dp))
+                ActionButton("Copy crash diagnostics", palette, primary = false) {
+                    context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(
+                        ClipData.newPlainText("Relay Home crash diagnostics", record.formatForCopy())
+                    )
                 }
             }
         }
@@ -2342,13 +2394,20 @@ private fun LauncherUpdatesSettings(
                 onUpdateWorking(true)
                 onUpdateMessage(null)
                 updateScope.launch {
-                    RelayUpdater.check(includeBetaUpdates)
-                        .onSuccess { release ->
-                            onAvailableRelease(release)
-                            onUpdateMessage(if (release != null) "A newer build is ready to download (${release.tag})." else "Relay is up to date.")
-                        }
-                        .onFailure { error -> onUpdateMessage(error.message ?: "Could not check for updates.") }
-                    onUpdateWorking(false)
+                    try {
+                        RelayUpdater.check(includeBetaUpdates)
+                            .onSuccess { release ->
+                                onAvailableRelease(release)
+                                onUpdateMessage(if (release != null) "A newer build is ready to download (${release.tag})." else "Relay is up to date.")
+                            }
+                            .onFailure { error -> onUpdateMessage(error.message ?: "Could not check for updates.") }
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        throw cancelled
+                    } catch (error: Throwable) {
+                        onUpdateMessage(error.message ?: "Could not check for updates.")
+                    } finally {
+                        onUpdateWorking(false)
+                    }
                 }
             }
         }
@@ -2377,10 +2436,17 @@ private fun LauncherUpdatesSettings(
                     if (!updateWorking) {
                         onUpdateWorking(true)
                         updateScope.launch {
-                            RelayUpdater.download(context, release)
-                                .onSuccess { apkFile -> onUpdateMessage(RelayUpdater.install(context, apkFile)) }
-                                .onFailure { error -> onUpdateMessage(error.message ?: "Download failed.") }
-                            onUpdateWorking(false)
+                            try {
+                                RelayUpdater.download(context, release)
+                                    .onSuccess { apkFile -> onUpdateMessage(RelayUpdater.install(context, apkFile)) }
+                                    .onFailure { error -> onUpdateMessage(error.message ?: "Download failed.") }
+                            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                                throw cancelled
+                            } catch (error: Throwable) {
+                                onUpdateMessage(error.message ?: "Download failed.")
+                            } finally {
+                                onUpdateWorking(false)
+                            }
                         }
                     }
                 }

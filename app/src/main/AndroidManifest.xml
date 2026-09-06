@@ -36,6 +36,7 @@
         android:banner="@drawable/tv_banner"
         android:icon="@mipmap/ic_launcher"
         android:label="Relay Home"
+        android:name=".RelayHomeApplication"
         android:supportsRtl="true"
         android:theme="@style/Theme.RelayHome">
         <provider

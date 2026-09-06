@@ -55,6 +55,8 @@ import com.relayhome.launcher.ui.shared.orbitalPalette
 import com.relayhome.launcher.ui.shared.paletteFor
 import com.relayhome.launcher.ui.shared.toRelayMediaItem
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineName
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -71,6 +73,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.CoroutineContext
 
 /** System actions that must remain owned by the Activity (role/settings activity results). */
 internal interface RelayHomeSystemActions {
@@ -89,6 +92,14 @@ internal enum class HeroSource {
 private const val MAX_OMDB_ITEMS_PER_BATCH = 18
 private const val OMDB_CONCURRENT_REQUESTS = 4
 internal const val MAX_HERO_CANDIDATES_PER_SOURCE = 4
+internal const val MAX_OPERATION_DIAGNOSTICS = 24
+
+internal data class RelayOperationError(
+    val operation: String,
+    val message: String,
+    val timestampMs: Long = System.currentTimeMillis(),
+    val recoverable: Boolean = true
+)
 
 internal data class RelayHomeUiState(
     val destination: Destination = Destination.HOME,
@@ -127,6 +138,8 @@ internal data class RelayHomeUiState(
     val smartTubeInstalled: Boolean = false,
     val continueWatchingLimits: Map<Provider, Int> = emptyMap(),
     val enabledProviders: Set<Provider> = emptySet(),
+    val lastOperationError: RelayOperationError? = null,
+    val operationErrors: List<RelayOperationError> = emptyList(),
     val nuvioSession: NuvioSession? = null,
     val nuvioAuthRequired: Boolean = false,
     val nuvioProfiles: List<NuvioProfile> = emptyList(),
@@ -216,7 +229,11 @@ private fun smartTubeHeroItem(video: SmartTubeSubscriptionVideo): MediaItem = Me
 
 internal class RelayHomeStateHolder(application: Application) : AndroidViewModel(application) {
     private val appContext = application.applicationContext
-    private val stateScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val stateScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Main.immediate + CoroutineExceptionHandler { context, throwable ->
+            recordOperationFailure(context[CoroutineName]?.name ?: "state.uncategorized", throwable)
+        }
+    )
     private val _state = MutableStateFlow(RelayHomeUiState())
     val state: StateFlow<RelayHomeUiState> = _state.asStateFlow()
 
@@ -234,17 +251,82 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
     private var heroRotationJob: Job? = null
     private var lastProfilePairingSignature: Pair<Int, List<String>>? = null
 
+    private fun launchTracked(
+        operation: String,
+        dispatcher: CoroutineContext = Dispatchers.Main.immediate,
+        onFailure: (Throwable) -> Unit = {},
+        block: suspend CoroutineScope.() -> Unit
+    ): Job = stateScope.launch(dispatcher + CoroutineName(operation)) {
+        try {
+            block()
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            runCatching { onFailure(failure) }
+            recordOperationFailure(operation, failure)
+        }
+    }
+
+    private suspend fun runTracked(operation: String, block: suspend () -> Unit) {
+        try {
+            block()
+        } catch (cancelled: kotlinx.coroutines.CancellationException) {
+            throw cancelled
+        } catch (failure: Throwable) {
+            recordOperationFailure(operation, failure)
+        }
+    }
+
+    private fun recordOperationFailure(operation: String, failure: Throwable) {
+        if (failure is kotlinx.coroutines.CancellationException) return
+        val detail = failure.message?.trim()?.takeIf(String::isNotBlank)
+            ?: failure::class.java.simpleName.ifBlank { "Unknown failure" }
+        val message = "$detail. The previous data was kept where possible; try again when ready."
+            .take(320)
+        android.util.Log.e(
+            "RelayHomeState",
+            "operation=$operation failed: ${failure::class.java.name}: $detail",
+            failure
+        )
+        runCatching {
+            _state.update { current ->
+                val diagnostic = RelayOperationError(operation = operation, message = message)
+                val recovered = when (operation) {
+                    "nuvio.media.sync" -> current.copy(nuvioSyncing = false, nuvioSyncError = message)
+                    "smarttube.bootstrap" -> current.copy(smartTubeFeedLoading = false)
+                    else -> current
+                }
+                recovered.copy(
+                    lastOperationError = diagnostic,
+                    operationErrors = (recovered.operationErrors + diagnostic).takeLast(MAX_OPERATION_DIAGNOSTICS)
+                )
+            }
+        }.onFailure { stateFailure ->
+            android.util.Log.e("RelayHomeState", "Could not publish diagnostics for $operation", stateFailure)
+        }
+    }
+
+    /** Test seam for exercising the same launch/error boundary used by production operations. */
+    internal fun injectFailureForTesting(operation: String) {
+        launchTracked(operation) { error("Injected failure for $operation") }
+    }
+
+    /** Lets instrumentation dispose a holder it constructed without an Activity/ViewModelStore. */
+    internal fun closeForTesting() {
+        onCleared()
+    }
+
     init {
         MetadataApiKeyAccess.configure(appContext)
         observeSettings()
         observePersonalRatings()
         observeSmartTube()
-        stateScope.launch {
+        launchTracked("startup.session-and-settings") {
             val initial = withContext(Dispatchers.IO) {
                 NuvioSessionStore.load(appContext) to NuvioSessionStore.loadProfile(appContext)
             }
             _state.update { it.copy(nuvioSession = initial.first, activeNuvioProfile = initial.second) }
-            reloadSettings()
+            runTracked("settings.reload") { reloadSettings() }
             initial.first?.let(::startNuvioSync)
         }
         inspectLauncherState()
@@ -263,7 +345,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
 
     fun onResume() {
         refreshLauncherState()
-        stateScope.launch(Dispatchers.IO) {
+        launchTracked("resume.provider-presence-and-hero", Dispatchers.IO) {
             val installed = ProviderHandoff.isSmartTubeInstalled(appContext)
             _state.update { it.copy(smartTubeInstalled = installed) }
             refreshHeroCandidates()
@@ -327,13 +409,15 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
     fun openRelayTube() {
         returnHome()
         resetHomeOnNextResume()
-        ProviderHandoff.openSmartTube(appContext)
+        runCatching { ProviderHandoff.openSmartTube(appContext) }
+            .onFailure { recordOperationFailure("relaytube.open", it) }
     }
 
     fun playRelayTube(item: MediaItem) {
         returnHome()
         resetHomeOnNextResume()
-        ProviderHandoff.play(appContext, item)
+        runCatching { ProviderHandoff.play(appContext, item) }
+            .onFailure { recordOperationFailure("relaytube.play", it) }
     }
 
     fun openMediaDetails(item: MediaItem) {
@@ -348,7 +432,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
             )
         }
         requestOmdbRatings(listOf(item))
-        detailEnrichmentJob = stateScope.launch {
+        detailEnrichmentJob = launchTracked("details.metadata-enrichment") {
             var enriched = item
             if (Regex("(?i)S\\s*\\d+\\D{0,8}E\\s*\\d+").containsMatchIn(item.episodeInfo.orEmpty())) {
                 enriched = TmdbApi.enrichEpisodeDetails(enriched)
@@ -436,7 +520,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 tmdbRecommendations = emptyList()
             )
         }
-        stateScope.launch(Dispatchers.IO) {
+        launchTracked("nuvio.profile-selection-persist", Dispatchers.IO) {
             NuvioSessionStore.saveProfile(appContext, profileIndex)
         }
         selectRelayTubeProfile(profileIndex, allowSelectedFallback = false, force = true)
@@ -455,7 +539,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 destination = Destination.PROVIDER
             )
         }
-        stateScope.launch(Dispatchers.IO) {
+        launchTracked("nuvio.connection-persist", Dispatchers.IO) {
             NuvioSessionStore.save(appContext, session)
             com.relayhome.launcher.ProviderSettingsStore.save(appContext, enabled)
         }
@@ -479,7 +563,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 enabledProviders = enabled
             )
         }
-        stateScope.launch(Dispatchers.IO) {
+        launchTracked("nuvio.disconnect-persist", Dispatchers.IO) {
             NuvioSessionStore.clear(appContext)
             com.relayhome.launcher.ProviderSettingsStore.save(appContext, enabled)
         }
@@ -491,7 +575,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
             if (provider in it) it - provider else it + provider
         }
         _state.update { it.copy(enabledProviders = enabled) }
-        stateScope.launch(Dispatchers.IO) {
+        launchTracked("providers.persist", Dispatchers.IO) {
             com.relayhome.launcher.ProviderSettingsStore.save(appContext, enabled)
         }
         refreshHeroCandidates()
@@ -504,7 +588,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
             _state.value.favoriteApps + packageName
         }
         _state.update { it.copy(favoriteApps = next) }
-        stateScope.launch(Dispatchers.IO) {
+        launchTracked("apps.favorite-persist", Dispatchers.IO) {
             FavoriteAppsStore.toggle(appContext, packageName)
         }
     }
@@ -512,7 +596,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
     fun setPersonalRating(item: MediaItem, rating: PersonalRating) {
         val key = item.contentKey()
         _state.update { it.copy(personalRatings = it.personalRatings + (key to rating)) }
-        stateScope.launch(Dispatchers.IO) {
+        launchTracked("media.personal-rating-persist", Dispatchers.IO) {
             RelayRatingsStore.save(appContext, key, rating)
         }
     }
@@ -529,7 +613,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         if (targets.isEmpty()) return
 
         omdbJob?.cancel()
-        omdbJob = stateScope.launch {
+        omdbJob = launchTracked("omdb.ratings") {
             val fetched = targets.chunked(OMDB_CONCURRENT_REQUESTS).flatMap { batch ->
                 coroutineScope {
                     batch.map { item ->
@@ -551,57 +635,61 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
     fun setContinueWatchingLimit(provider: Provider, limit: Int) {
         val next = _state.value.continueWatchingLimits + (provider to limit)
         _state.update { it.copy(continueWatchingLimits = next) }
-        stateScope.launch(Dispatchers.IO) {
+        launchTracked("continue-watching-limit.persist", Dispatchers.IO) {
             ContinueWatchingLimits.save(appContext, provider, limit)
         }
     }
 
     fun setDateFormat(value: RelayDateFormat) {
         _state.update { it.copy(dateFormat = value) }
-        stateScope.launch(Dispatchers.IO) { DateFormatSettings.save(appContext, value) }
+        launchTracked("settings.date-format.persist", Dispatchers.IO) { DateFormatSettings.save(appContext, value) }
     }
 
     fun setAppearance(value: RelayAppearance) {
         _state.update { it.copy(appearance = value) }
-        stateScope.launch(Dispatchers.IO) { value.save(appContext) }
+        launchTracked("settings.appearance.persist", Dispatchers.IO) { value.save(appContext) }
     }
 
     fun setHomeRowOrder(order: List<HomeRow>) {
         _state.update { it.copy(homeRowOrder = order) }
-        stateScope.launch(Dispatchers.IO) { HomeRowOrderStore.save(appContext, order) }
+        launchTracked("settings.home-row-order.persist", Dispatchers.IO) { HomeRowOrderStore.save(appContext, order) }
     }
 
     fun setHomeRowVisibility(row: HomeRow, visible: Boolean) {
         val hidden = if (visible) _state.value.hiddenHomeRows - row else _state.value.hiddenHomeRows + row
         _state.update { it.copy(hiddenHomeRows = hidden) }
-        stateScope.launch(Dispatchers.IO) { HomeRowOrderStore.saveHiddenRows(appContext, hidden) }
+        launchTracked("settings.home-row-visibility.persist", Dispatchers.IO) { HomeRowOrderStore.saveHiddenRows(appContext, hidden) }
     }
 
     fun setMinimalHomeEnabled(enabled: Boolean) {
         _state.update { it.copy(minimalHomeEnabled = enabled) }
-        stateScope.launch(Dispatchers.IO) { HomeRowOrderStore.saveMinimalHomeEnabled(appContext, enabled) }
+        launchTracked("settings.minimal-home.persist", Dispatchers.IO) { HomeRowOrderStore.saveMinimalHomeEnabled(appContext, enabled) }
     }
 
     fun setWeatherCity(city: String) {
         val normalized = WeatherApi.normalizeCity(city)
         _state.update { it.copy(weatherCity = normalized) }
-        stateScope.launch(Dispatchers.IO) { WeatherCitySettings.save(appContext, normalized) }
+        launchTracked("weather.city.persist", Dispatchers.IO) { WeatherCitySettings.save(appContext, normalized) }
     }
 
     fun setShowHomeClock(enabled: Boolean) {
         _state.update { it.copy(showHomeClock = enabled) }
-        stateScope.launch(Dispatchers.IO) {
+        launchTracked("settings.home-clock.persist", Dispatchers.IO) {
             RelaySettingsRepository.saveShowHomeClock(appContext, enabled)
         }
     }
 
     fun setWeatherTemperatureUnit(unit: WeatherTemperatureUnit) {
         _state.update { it.copy(weatherTemperatureUnit = unit) }
-        stateScope.launch(Dispatchers.IO) { WeatherTemperatureSettings.save(appContext, unit) }
+        launchTracked("weather.temperature-unit.persist", Dispatchers.IO) { WeatherTemperatureSettings.save(appContext, unit) }
     }
 
     fun setManualProfileMapping(nuvioProfile: Int, relayTubeProfileId: String?) {
-        RelayProfileMappingStore.setManual(appContext, nuvioProfile, relayTubeProfileId)
+        runCatching { RelayProfileMappingStore.setManual(appContext, nuvioProfile, relayTubeProfileId) }
+            .onFailure {
+                recordOperationFailure("relaytube.profile-mapping.persist", it)
+                return
+            }
         lastProfilePairingSignature = null
         selectRelayTubeProfile(profileIndex = nuvioProfile, allowSelectedFallback = false, force = true)
     }
@@ -609,7 +697,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
     fun setHeroItemCap(cap: Int) {
         val normalized = cap.coerceIn(1, 8)
         _state.update { it.copy(heroItemCap = normalized) }
-        stateScope.launch(Dispatchers.IO) { RelaySettingsRepository.saveHeroItemCap(appContext, normalized) }
+        launchTracked("hero.item-cap.persist", Dispatchers.IO) { RelaySettingsRepository.saveHeroItemCap(appContext, normalized) }
         refreshHeroCandidates()
     }
 
@@ -628,13 +716,13 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
             HeroSource.SUBSCRIPTIONS -> "home.hero.include_subscriptions"
             HeroSource.NOW_PLAYING -> "home.hero.include_now_playing"
         }
-        stateScope.launch(Dispatchers.IO) { RelaySettingsRepository.saveHeroSourceEnabled(appContext, key, enabled) }
+        launchTracked("hero.source-toggle.persist", Dispatchers.IO) { RelaySettingsRepository.saveHeroSourceEnabled(appContext, key, enabled) }
         refreshHeroCandidates()
     }
 
     fun setHeroAutoRotate(enabled: Boolean) {
         _state.update { it.copy(heroAutoRotate = enabled) }
-        stateScope.launch(Dispatchers.IO) { RelaySettingsRepository.saveHeroAutoRotate(appContext, enabled) }
+        launchTracked("hero.auto-rotate.persist", Dispatchers.IO) { RelaySettingsRepository.saveHeroAutoRotate(appContext, enabled) }
         if (enabled) startHeroRotationIfNeeded() else heroRotationJob?.cancel()
     }
 
@@ -643,35 +731,35 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         if (normalized.isEmpty()) return
         val next = if (hidden) _state.value.hiddenApps + normalized else _state.value.hiddenApps - normalized
         _state.update { it.copy(hiddenApps = next) }
-        stateScope.launch(Dispatchers.IO) {
+        launchTracked("apps.hidden-packages.persist", Dispatchers.IO) {
             RelaySettingsRepository.saveHiddenAppPackages(appContext, next)
         }
     }
 
     fun setAppSortOrder(order: AppSortOrder) {
         _state.update { it.copy(appSortOrder = order) }
-        stateScope.launch(Dispatchers.IO) {
+        launchTracked("apps.sort-order.persist", Dispatchers.IO) {
             RelaySettingsRepository.saveAppSortOrder(appContext, order)
         }
     }
 
     fun setAppIconShape(shape: AppIconShape) {
         _state.update { it.copy(appIconShape = shape) }
-        stateScope.launch(Dispatchers.IO) {
+        launchTracked("apps.icon-shape.persist", Dispatchers.IO) {
             RelaySettingsRepository.saveAppIconShape(appContext, shape)
         }
     }
 
     fun setProfileImage(uri: String?) {
         _state.update { it.copy(profileImageUri = uri) }
-        stateScope.launch(Dispatchers.IO) {
+        launchTracked("profile-image.persist", Dispatchers.IO) {
             if (uri == null) ProfileImageSettings.clear(appContext) else ProfileImageSettings.save(appContext, uri)
         }
     }
 
     fun setWallpaperImage(uri: String?) {
         _state.update { it.copy(wallpaperImageUri = uri) }
-        stateScope.launch(Dispatchers.IO) {
+        launchTracked("wallpaper.persist", Dispatchers.IO) {
             RelaySettingsRepository.saveWallpaperImageUri(appContext, uri)
         }
     }
@@ -680,24 +768,26 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         val hidden = if (visible) _state.value.hiddenSmartTubeChannels - channelId
         else _state.value.hiddenSmartTubeChannels + channelId
         _state.update { it.copy(hiddenSmartTubeChannels = hidden) }
-        stateScope.launch(Dispatchers.IO) {
+        launchTracked("smarttube.channel-filter.persist", Dispatchers.IO) {
             SmartTubeChannelFilter.setVisible(appContext, channelId, visible)
         }
     }
 
     private fun observeSettings() {
-        stateScope.launch {
+        launchTracked("settings.observe") {
             RelaySettingsRepository.revision(appContext).collect {
-                reloadSettings()
+                runTracked("settings.reload") { reloadSettings() }
             }
         }
     }
 
     private fun observePersonalRatings() {
-        stateScope.launch {
+        launchTracked("ratings.observe") {
             RelayRatingsStore.revision(appContext).collect {
-                val ratings = withContext(Dispatchers.IO) { RelayRatingsStore.loadAll(appContext) }
-                _state.update { it.copy(personalRatings = ratings) }
+                runTracked("ratings.reload") {
+                    val ratings = withContext(Dispatchers.IO) { RelayRatingsStore.loadAll(appContext) }
+                    _state.update { it.copy(personalRatings = ratings) }
+                }
             }
         }
     }
@@ -792,7 +882,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
     )
 
     private fun observeSmartTube() {
-        stateScope.launch {
+        launchTracked("smarttube.observe") {
             snapshotFlow {
                 SmartTubeSnapshot(
                     nowPlaying = SmartTubePlaybackStore.nowPlaying,
@@ -821,11 +911,11 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                         hero = nextHero
                     )
                 }
-                refreshHeroCandidates()
-                selectRelayTubeProfile()
+                runTracked("hero.candidates.refresh") { refreshHeroCandidates() }
+                runTracked("relaytube.profile-pairing") { selectRelayTubeProfile() }
             }
         }
-        stateScope.launch {
+        launchTracked("smarttube.bootstrap") {
             val hasCachedData = withContext(Dispatchers.IO) {
                 SmartTubeChannelFilter.load(appContext)
                 SmartTubePlaybackStore.initialize(appContext)
@@ -852,7 +942,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         val activeSession = session ?: return
         profilesJob?.cancel()
         mediaJob?.cancel()
-        profilesJob = stateScope.launch {
+        profilesJob = launchTracked("nuvio.profiles") {
             NuvioApi.pullProfiles(activeSession)
                 .onSuccess { profiles ->
                     if (_state.value.nuvioSession != activeSession) return@onSuccess
@@ -880,7 +970,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         val current = _state.value
         val session = current.nuvioSession ?: return
         mediaJob?.cancel()
-        mediaJob = stateScope.launch {
+        mediaJob = launchTracked("nuvio.media.sync") {
             _state.update { it.copy(nuvioSyncing = true, nuvioSyncError = null) }
             NuvioApi.pullRelayMedia(session, current.activeNuvioProfile)
                 .onSuccess { media ->
@@ -908,7 +998,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
 
     private fun loadTmdb(media: List<MediaItem>) {
         tmdbJob?.cancel()
-        tmdbJob = stateScope.launch {
+        tmdbJob = launchTracked("tmdb.recommendations-and-calendar") {
             val upcoming = TmdbApi.upcomingEpisodes(media)
             val recommendations = TmdbApi.recommendations(media)
             if (_state.value.nuvioMedia == media) {
@@ -935,7 +1025,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 destination = Destination.NUVIO_CONNECT
             )
         }
-        stateScope.launch(Dispatchers.IO) { NuvioSessionStore.clear(appContext) }
+        launchTracked("nuvio.expired-session.clear", Dispatchers.IO) { NuvioSessionStore.clear(appContext) }
         refreshHeroCandidates()
     }
 
@@ -950,13 +1040,17 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         val signature = profileIndex to current.relayTubeProfiles.map(RelayTubeProfile::id)
         if (!force && signature == lastProfilePairingSignature) return
         lastProfilePairingSignature = signature
-        stateScope.launch(Dispatchers.IO) {
+        launchTracked(
+            operation = "relaytube.profile-pairing",
+            dispatcher = Dispatchers.IO,
+            onFailure = { lastProfilePairingSignature = null }
+        ) {
             val pairedId = RelayProfileMappingStore.resolve(
                 appContext,
                 nuvioProfile,
                 current.relayTubeProfiles,
                 allowSelectedFallback = allowSelectedFallback
-            ) ?: return@launch
+            ) ?: return@launchTracked
             if (pairedId != SmartTubePlaybackStore.activeProfileId) {
                 RelayTubeProfileBridge.selectProfile(appContext, pairedId)
             }
@@ -986,13 +1080,13 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
     private fun startHeroRotationIfNeeded() {
         if (_state.value.destination != Destination.HOME || !_state.value.heroAutoRotate || _state.value.heroCandidates.isEmpty()) return
         heroRotationJob?.cancel()
-        heroRotationJob = stateScope.launch {
+        heroRotationJob = launchTracked("hero.auto-rotation") {
             var index = _state.value.heroCandidates.indexOfFirst {
                 it.contentKey() == _state.value.hero.item?.contentKey()
             }.takeIf { it >= 0 } ?: 0
             while (isActive) {
                 val candidates = _state.value.heroCandidates
-                if (candidates.isEmpty()) return@launch
+                if (candidates.isEmpty()) return@launchTracked
                 val item = candidates[index % candidates.size]
                 val currentHero = _state.value.hero
                 _state.update { it.copy(hero = heroForCandidate(currentHero, item)) }
@@ -1015,7 +1109,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         }
 
     private fun inspectLauncherState() {
-        stateScope.launch {
+        launchTracked("launcher.inspect") {
             val inspected = withContext(Dispatchers.IO) { LauncherOverride.inspect(appContext) }
             _state.update { it.copy(launcherState = inspected) }
         }
