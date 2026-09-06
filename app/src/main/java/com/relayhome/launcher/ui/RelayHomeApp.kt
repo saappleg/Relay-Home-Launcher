@@ -16,6 +16,7 @@ import com.relayhome.launcher.ui.apps.AppsScreen
 import com.relayhome.launcher.ui.calendar.CalendarScreen
 import com.relayhome.launcher.ui.details.DetailsScreen
 import com.relayhome.launcher.ui.home.HomeScreen
+import com.relayhome.launcher.ui.home.WallpaperUriAccess
 import com.relayhome.launcher.ui.nuvioconnect.NuvioConnectScreen
 import com.relayhome.launcher.ui.providerhub.ProviderHubScreen
 import com.relayhome.launcher.ui.search.SearchScreen
@@ -107,6 +108,7 @@ internal fun RelayHomeApp(
                     activeNuvioProfile = state.activeNuvioProfile,
                     profileImageUri = state.profileImageUri,
                     wallpaperImageUri = state.wallpaperImageUri,
+                    onWallpaperInvalid = { stateHolder.setWallpaperImage(null) },
                     onRefreshNuvio = stateHolder::refreshNuvio,
                     onNuvioProfileSelected = stateHolder::selectNuvioProfile,
                     onFocusedArtworkPalette = stateHolder::onFocusedArtworkPalette,
@@ -193,7 +195,13 @@ internal fun RelayHomeApp(
                     profileImageUri = state.profileImageUri,
                     onProfileImageChanged = stateHolder::setProfileImage,
                     wallpaperImageUri = state.wallpaperImageUri,
-                    onWallpaperImageChanged = stateHolder::setWallpaperImage,
+                    onWallpaperImageChanged = { rawUri ->
+                        // SettingsScreen first attempts the persistable grant. Validate again at
+                        // the state boundary so a provider that rejects that grant cannot leave a
+                        // wallpaper that works only until the current Activity is restarted.
+                        rawUri?.let { WallpaperUriAccess.acceptedPickerUri(context, it) }
+                            ?.let(stateHolder::setWallpaperImage)
+                    },
                     nuvioProfiles = state.nuvioProfiles,
                     relayTubeProfiles = state.relayTubeProfiles,
                     onProfileMappingChanged = stateHolder::setManualProfileMapping,

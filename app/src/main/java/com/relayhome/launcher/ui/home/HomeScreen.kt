@@ -187,7 +187,7 @@ internal class NativeIconPainter(
     }
 }
 
-private data class HomeAmbientFocus(
+internal data class HomeAmbientFocus(
     val key: String,
     val artworkUrl: String?,
     val fallbackPalette: RelayPalette,
@@ -433,7 +433,7 @@ internal fun homeFocusAnchorRows(): Set<HomeRow> = HomeRow.entries.toSet()
  * low-alpha layer still provides an ambient treatment where platform blur is unavailable.
  */
 @Composable
-private fun HomeAmbientBackdrop(
+internal fun HomeAmbientBackdrop(
     focus: HomeAmbientFocus,
     onArtworkPalette: (String, RelayPalette?) -> Unit
 ) {
@@ -468,6 +468,7 @@ private fun HomeAmbientBackdrop(
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .testTag("home-ambient-backdrop")
             .background(backdrop.copy(alpha = .82f))
     ) {
         if (artworkRequest != null) {
@@ -478,6 +479,13 @@ private fun HomeAmbientBackdrop(
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
                         .fillMaxSize()
+                        .testTag(
+                            if (focus.key.startsWith("wallpaper:")) {
+                                "home-ambient-wallpaper"
+                            } else {
+                                "home-ambient-artwork"
+                            }
+                        )
                         .graphicsLayer {
                             // Overscan the blurred image so its edges never reveal a hard
                             // seam while the user scrolls the underlying LazyColumn.
@@ -580,6 +588,7 @@ internal fun HomeScreen(
     activeNuvioProfile: Int,
     profileImageUri: String?,
     wallpaperImageUri: String? = null,
+    onWallpaperInvalid: () -> Unit = {},
     onRefreshNuvio: () -> Unit,
     onNuvioProfileSelected: (Int) -> Unit,
     iconShape: AppIconShape = AppIconShape.MATCH_EACH_APP,
@@ -601,6 +610,7 @@ internal fun HomeScreen(
     var profilePickerVisible by remember { mutableStateOf(false) }
     var lastHomeFocusRequester by remember { mutableStateOf<FocusRequester?>(null) }
     var ambientFocus by remember { mutableStateOf(ambientFocusFor(hero)) }
+    val wallpaperResolution = rememberWallpaperUriResolution(wallpaperImageUri)
     val showHeroAmbient = {
         ambientFocus = ambientFocusFor(hero)
     }
@@ -610,8 +620,22 @@ internal fun HomeScreen(
     val showAppAmbient: (InstalledApp?) -> Unit = { app ->
         ambientFocus = app?.let { ambientFocusFor(it, palette) } ?: ambientFocusFor(hero)
     }
-    val displayedAmbientFocus = if (minimalHomeEnabled && !wallpaperImageUri.isNullOrBlank()) {
-        HomeAmbientFocus("wallpaper:$wallpaperImageUri", wallpaperImageUri, palette)
+    LaunchedEffect(wallpaperResolution.rawUri, wallpaperResolution.complete, wallpaperResolution.resolvedUri) {
+        if (wallpaperResolution.complete &&
+            !wallpaperResolution.rawUri.isNullOrBlank() &&
+            wallpaperResolution.resolvedUri == null
+        ) {
+            // Remove only an unreadable saved document. The state holder's repository write is
+            // idempotent, while this keeps a revoked provider grant from being retried forever.
+            onWallpaperInvalid()
+        }
+    }
+    val displayedAmbientFocus = if (minimalHomeEnabled && wallpaperResolution.resolvedUri != null) {
+        HomeAmbientFocus(
+            "wallpaper:${wallpaperResolution.resolvedUri}",
+            wallpaperResolution.resolvedUri,
+            palette
+        )
     } else {
         ambientFocus
     }
