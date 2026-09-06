@@ -764,7 +764,7 @@ internal fun HomeScreen(
         onHomeFocusRestored()
     }
     LaunchedEffect(visible) {
-        if (visible && focusResetGeneration != 0) {
+        if (visible) {
             requestHomeFocusWithRetry(lastHomeFocusRequester ?: homeFocusRequester)
         }
     }
