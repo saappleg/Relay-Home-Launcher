@@ -157,8 +157,7 @@ internal fun RelayHomeUiState.afterHomeRequest(): RelayHomeUiState = copy(
 internal fun RelayHomeUiState.afterReturnHome(): RelayHomeUiState = copy(
     destination = Destination.HOME,
     peekProvider = null,
-    suppressProviderPeek = true,
-    homeRequestGeneration = homeRequestGeneration + 1
+    suppressProviderPeek = true
 )
 
 internal fun RelayHomeUiState.afterDetailsBack(): RelayHomeUiState =

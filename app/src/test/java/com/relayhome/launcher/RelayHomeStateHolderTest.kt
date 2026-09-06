@@ -47,7 +47,7 @@ class RelayHomeStateHolderTest {
         assertEquals(Destination.HOME, home.destination)
         assertEquals(null, home.peekProvider)
         assertTrue(home.suppressProviderPeek)
-        assertEquals(5, home.homeRequestGeneration)
+        assertEquals(4, home.homeRequestGeneration)
 
         val search = state.copy(detailReturnDestination = Destination.SEARCH).afterDetailsBack()
         assertEquals(Destination.SEARCH, search.destination)
@@ -68,7 +68,7 @@ class RelayHomeStateHolderTest {
         assertEquals(Destination.HOME, next.destination)
         assertEquals(null, next.peekProvider)
         assertTrue(next.suppressProviderPeek)
-        assertEquals(3, next.homeRequestGeneration)
+        assertEquals(2, next.homeRequestGeneration)
     }
 
     @Test

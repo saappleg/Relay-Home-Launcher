@@ -196,7 +196,9 @@ private data class HomeAmbientFocus(
 
 /** Kept within Agent E's requested 3–6% range so the texture never competes with key art. */
 internal const val HOME_AMBIENT_GRAIN_ALPHA = 0.04f
-internal const val MINIMAL_HOME_TOP_INSET_DP = 52
+/** Full clearance for the overlaid top bar: 24dp top + 45dp row + 30dp bottom. */
+internal const val HOME_TOP_BAR_CLEARANCE_DP = 99
+internal const val MINIMAL_HOME_TOP_INSET_DP = HOME_TOP_BAR_CLEARANCE_DP
 
 /**
  * Focus relocation must not move the Home page while the hero action group owns focus. The
@@ -246,15 +248,15 @@ internal suspend fun requestHomeFocusWithRetry(
     requester: FocusRequester,
     attempts: Int = 4
 ): Boolean {
+    var requested = false
     repeat(attempts.coerceAtLeast(1)) {
         withFrameNanos { }
-        if (runCatching {
-                requester.requestFocus()
-                true
-            }.getOrDefault(false)
-        ) return true
+        requested = runCatching {
+            requester.requestFocus()
+            true
+        }.getOrDefault(false) || requested
     }
-    return false
+    return requested
 }
 
 /**
@@ -383,7 +385,7 @@ internal fun HomeFocusAnchorHost(
     mountedRows: Set<HomeRow>,
     fallbackRequester: FocusRequester
 ) {
-    Row(Modifier.size(1.dp)) {
+    Row(Modifier.size(1.dp).testTag("home-focus-anchor-host")) {
         homeFocusAnchorRows().forEach { row ->
             val routeRequester = routeRequesters.getValue(row)
             val entryRequester = entryRequesters.getValue(row)
@@ -402,8 +404,18 @@ internal fun HomeFocusAnchorHost(
             Box(
                 Modifier
                     .size(1.dp)
+                    .testTag("home-route-anchor-${row.name}")
                     .focusRequester(routeRequester)
                     .focusable()
+                    .onPreviewKeyEvent { event ->
+                        if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
+                            val target = if (row in mountedRows) entryRequester else fallbackRequester
+                            runCatching { target.requestFocus() }
+                            true
+                        } else {
+                            false
+                        }
+                    }
                     .onFocusChanged { focused = it.hasFocus }
             )
         }
@@ -573,7 +585,8 @@ internal fun HomeScreen(
     iconShape: AppIconShape = AppIconShape.MATCH_EACH_APP,
     showHomeClock: Boolean = false,
     onFocusedArtworkPalette: (String, RelayPalette?) -> Unit = { _, _ -> },
-    onOmdbRatingsRequested: (List<MediaItem>) -> Unit = {}
+    onOmdbRatingsRequested: (List<MediaItem>) -> Unit = {},
+    visible: Boolean = true
 ) {
     val context = LocalContext.current
     val homeFocusRequester = remember { FocusRequester() }
@@ -586,6 +599,7 @@ internal fun HomeScreen(
     val heroFocusScrollGuard = rememberHeroFocusScrollGuard(homeScrollState)
     val defaultBringIntoViewSpec = LocalBringIntoViewSpec.current
     var profilePickerVisible by remember { mutableStateOf(false) }
+    var lastHomeFocusRequester by remember { mutableStateOf<FocusRequester?>(null) }
     var ambientFocus by remember { mutableStateOf(ambientFocusFor(hero)) }
     val showHeroAmbient = {
         ambientFocus = ambientFocusFor(hero)
@@ -730,6 +744,11 @@ internal fun HomeScreen(
         activePeekProvider != null -> peekFocusRequester
         else -> heroFocusRequester
     }
+    val firstContentFocusRequester = if (activePeekProvider != null) {
+        peekFocusRequester
+    } else {
+        topContentFocusRequester
+    }
     fun previousRowEntryFocusRequester(index: Int): FocusRequester =
         if (index == 0) topContentFocusRequester else rowEntryFocusRequesters.getValue(availableHomeRows[index - 1])
     fun nextRowEntryFocusRequester(index: Int): FocusRequester? =
@@ -737,14 +756,24 @@ internal fun HomeScreen(
     fun scrollHomeToTop() {
         heroFocusScrollGuard.requestTop()
     }
-    // Do not restore a previous focus-scroll offset into the hero when returning to Home.
     LaunchedEffect(focusResetGeneration) {
+        if (!visible) return@LaunchedEffect
         heroFocusScrollGuard.requestTopAndAwait()
         homeFocusRequester.requestFocus()
         withFrameNanos { }
         onHomeFocusRestored()
     }
-    Box(modifier = Modifier.fillMaxSize()) {
+    LaunchedEffect(visible) {
+        if (visible && focusResetGeneration != 0) {
+            requestHomeFocusWithRetry(lastHomeFocusRequester ?: homeFocusRequester)
+        }
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("home-screen")
+            .then(if (visible) Modifier else Modifier.alpha(0f).focusProperties { canFocus = false })
+    ) {
         HomeAmbientBackdrop(focus = displayedAmbientFocus, onArtworkPalette = onFocusedArtworkPalette)
         CompositionLocalProvider(
             LocalBringIntoViewSpec provides if (heroFocusScrollGuard.canScroll.value) {
@@ -784,6 +813,7 @@ internal fun HomeScreen(
                         hero, palette, homeFocusRequester, heroFocusRequester, heroCandidates,
                         downFocusRequester = firstRowEntryFocusRequester,
                         onHeroFocused = {
+                            lastHomeFocusRequester = heroFocusRequester
                             showHeroAmbient()
                         },
                         onItemSelected = onItemSelected,
@@ -808,6 +838,7 @@ internal fun HomeScreen(
                             downFocusRequester = null,
                             onRailEntered = heroFocusScrollGuard.onRailEntered,
                             onRailExited = heroFocusScrollGuard.onRailExited,
+                            onFocusTarget = { lastHomeFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS) },
                             onFocusedApp = showAppAmbient
                         ) { app -> InstalledApps.launch(context, app) }
                     }
@@ -824,6 +855,7 @@ internal fun HomeScreen(
                             downFocusRequester = null,
                             onRailEntered = heroFocusScrollGuard.onRailEntered,
                             onRailExited = heroFocusScrollGuard.onRailExited,
+                            onFocusTarget = { lastHomeFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS) },
                             onFocusedApp = showAppAmbient
                         ) { app -> InstalledApps.launch(context, app) }
                         Spacer(Modifier.height(18.dp))
@@ -859,7 +891,8 @@ internal fun HomeScreen(
                                 firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.CONTINUE_WATCHING),
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
                                 onRailEntered = heroFocusScrollGuard.onRailEntered,
-                                onRailExited = heroFocusScrollGuard.onRailExited
+                                onRailExited = heroFocusScrollGuard.onRailExited,
+                                onFocusTarget = { lastHomeFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.CONTINUE_WATCHING) }
                             )
                             HomeRow.FAVORITE_APPS -> FavoriteAppsRail(
                                 apps = favoriteInstalledApps,
@@ -870,6 +903,7 @@ internal fun HomeScreen(
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
                                 onRailEntered = heroFocusScrollGuard.onRailEntered,
                                 onRailExited = heroFocusScrollGuard.onRailExited,
+                                onFocusTarget = { lastHomeFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS) },
                                 onFocusedApp = showAppAmbient
                             ) { app -> InstalledApps.launch(context, app) }
                             HomeRow.RECOMMENDATIONS -> MediaRail(
@@ -885,7 +919,8 @@ internal fun HomeScreen(
                                 firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.RECOMMENDATIONS),
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
                                 onRailEntered = heroFocusScrollGuard.onRailEntered,
-                                onRailExited = heroFocusScrollGuard.onRailExited
+                                onRailExited = heroFocusScrollGuard.onRailExited,
+                                onFocusTarget = { lastHomeFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.RECOMMENDATIONS) }
                             )
                             HomeRow.SUBSCRIPTIONS -> MediaRail(
                                 title = "New from subscriptions",
@@ -900,7 +935,8 @@ internal fun HomeScreen(
                                 firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.SUBSCRIPTIONS),
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
                                 onRailEntered = heroFocusScrollGuard.onRailEntered,
-                                onRailExited = heroFocusScrollGuard.onRailExited
+                                onRailExited = heroFocusScrollGuard.onRailExited,
+                                onFocusTarget = { lastHomeFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.SUBSCRIPTIONS) }
                             )
                             HomeRow.UPCOMING -> MediaRail(
                                 title = "Coming Up",
@@ -916,7 +952,8 @@ internal fun HomeScreen(
                                 firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.UPCOMING),
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
                                 onRailEntered = heroFocusScrollGuard.onRailEntered,
-                                onRailExited = heroFocusScrollGuard.onRailExited
+                                onRailExited = heroFocusScrollGuard.onRailExited,
+                                onFocusTarget = { lastHomeFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.UPCOMING) }
                             )
                         }
                         Spacer(Modifier.height(18.dp))
@@ -941,7 +978,7 @@ internal fun HomeScreen(
                 peekFocusRequester = peekFocusRequester,
                 providerFocusRequesters = providerFocusRequesters,
                 heroFocusRequester = if (minimalHomeEnabled) topContentFocusRequester else heroFocusRequester,
-                firstContentFocusRequester = topContentFocusRequester,
+                firstContentFocusRequester = firstContentFocusRequester,
                 onDestination = onDestination,
                 onProvider = onProvider,
                 onSettings = onSettings,
@@ -1153,7 +1190,7 @@ internal fun TopBar(
     onProfileSelect: (Int) -> Unit = {},
     onProfileDismiss: () -> Unit = {}
 ) {
-    BoxWithConstraints(Modifier.fillMaxWidth()) {
+    BoxWithConstraints(Modifier.fillMaxWidth().testTag("home-top-bar")) {
         // Android TV reports markedly different dp widths at 1080p versus 4K. Keep the
         // full navigation visible on the narrower layout instead of allowing its final
         // controls to run beyond the right safe area.
@@ -1769,7 +1806,8 @@ internal fun MediaRail(
     firstFocusRequester: FocusRequester? = null,
     downFocusRequester: FocusRequester? = null,
     onRailEntered: ((suspend () -> Unit) -> Unit),
-    onRailExited: () -> Unit
+    onRailExited: () -> Unit,
+    onFocusTarget: () -> Unit = {}
 ) {
     if (items.isEmpty()) return
     val context = LocalContext.current
@@ -1798,6 +1836,7 @@ internal fun MediaRail(
             .bringIntoViewRequester(railBringIntoViewRequester)
             .onFocusChanged { focusState ->
                 if (focusState.hasFocus && !railHasFocus[0]) {
+                    onFocusTarget()
                     onRailEntered { railBringIntoViewRequester.bringIntoView() }
                 } else if (!focusState.hasFocus && railHasFocus[0]) {
                     onRailExited()
@@ -2076,6 +2115,7 @@ internal fun FavoriteAppsRail(
     downFocusRequester: FocusRequester? = null,
     onRailEntered: ((suspend () -> Unit) -> Unit),
     onRailExited: () -> Unit,
+    onFocusTarget: () -> Unit = {},
     onFocusedApp: (InstalledApp?) -> Unit = {},
     onLaunch: (InstalledApp) -> Unit
 ) {
@@ -2094,6 +2134,7 @@ internal fun FavoriteAppsRail(
             .bringIntoViewRequester(railBringIntoViewRequester)
             .onFocusChanged { focusState ->
                 if (focusState.hasFocus && !railHasFocus[0]) {
+                    onFocusTarget()
                     onRailEntered { railBringIntoViewRequester.bringIntoView() }
                 } else if (!focusState.hasFocus && railHasFocus[0]) {
                     onRailExited()

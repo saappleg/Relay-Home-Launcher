@@ -1,6 +1,7 @@
 package com.relayhome.launcher
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
@@ -174,6 +175,46 @@ class DpadFocusTraversalTest {
         }
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("dynamic-${HomeRow.CONTINUE_WATCHING.name}").assertExists()
+    }
+
+    @Test
+    fun liveHomeTopNavigation_handsOffToMountedInteractiveRow() {
+        val entryRequesters = HomeRow.entries.associateWith { FocusRequester() }
+        val topNavigationRequester = FocusRequester()
+
+        composeRule.setContent {
+            Box(Modifier.fillMaxSize()) {
+                Box(
+                    Modifier
+                        .width(260.dp)
+                        .height(70.dp)
+                        .testTag("live-top-navigation")
+                        .focusRequester(topNavigationRequester)
+                        .focusProperties { down = entryRequesters.getValue(HomeRow.CONTINUE_WATCHING) }
+                        .focusable()
+                )
+                Box(
+                    Modifier
+                        .width(260.dp)
+                        .height(90.dp)
+                        .testTag("live-continue-watching-row")
+                        .focusRequester(entryRequesters.getValue(HomeRow.CONTINUE_WATCHING))
+                        .focusable()
+                        .onPreviewKeyEvent { event ->
+                            event.type == KeyEventType.KeyDown && event.key == Key.Enter
+                        }
+                )
+            }
+        }
+        composeRule.waitForIdle()
+        composeRule.runOnIdle {
+            topNavigationRequester.requestFocus()
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("live-top-navigation").assertIsFocused()
+            .performKeyInput { pressKey(Key.DirectionDown) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("live-continue-watching-row").assertIsFocused()
     }
 
     @Test

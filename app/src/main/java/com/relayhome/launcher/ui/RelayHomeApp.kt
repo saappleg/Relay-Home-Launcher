@@ -66,8 +66,7 @@ internal fun RelayHomeApp(
                 .fillMaxSize()
                 .background(Brush.verticalGradient(listOf(palette.backdrop, midnight), endY = 1000f))
         ) {
-            when (state.destination) {
-                Destination.HOME -> HomeScreen(
+            HomeScreen(
                     hero = state.hero,
                     palette = palette,
                     focusResetGeneration = state.homeRequestGeneration,
@@ -111,9 +110,12 @@ internal fun RelayHomeApp(
                     onRefreshNuvio = stateHolder::refreshNuvio,
                     onNuvioProfileSelected = stateHolder::selectNuvioProfile,
                     onFocusedArtworkPalette = stateHolder::onFocusedArtworkPalette,
-                    onOmdbRatingsRequested = stateHolder::requestOmdbRatings
+                    onOmdbRatingsRequested = stateHolder::requestOmdbRatings,
+                    visible = state.destination == Destination.HOME
                 )
 
+            if (state.destination != Destination.HOME) when (state.destination) {
+                Destination.HOME -> Unit
                 Destination.DETAIL -> DetailsScreen(
                     item = state.selectedMedia,
                     palette = palette,

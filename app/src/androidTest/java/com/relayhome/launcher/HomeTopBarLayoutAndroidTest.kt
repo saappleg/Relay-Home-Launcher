@@ -3,15 +3,19 @@ package com.relayhome.launcher
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.requiredWidth
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.relayhome.launcher.ui.home.TopBar
+import com.relayhome.launcher.ui.home.MINIMAL_HOME_TOP_INSET_DP
 import com.relayhome.launcher.ui.shared.orbitalPalette
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -35,6 +39,36 @@ class HomeTopBarLayoutAndroidTest {
         assertStatusContainsClockAndWeather()
     }
 
+    @Test
+    fun minimalHomeContent_startsBelowTheRenderedTopBar() {
+        composeRule.setContent {
+            MaterialTheme(colorScheme = darkColorScheme()) {
+                Box(Modifier.requiredWidth(960.dp).requiredHeight(540.dp)) {
+                    androidx.compose.foundation.layout.Column {
+                        androidx.compose.foundation.layout.Spacer(
+                            Modifier.requiredHeight(MINIMAL_HOME_TOP_INSET_DP.dp)
+                                .testTag("minimal-home-top-inset")
+                        )
+                        Box(
+                            Modifier.requiredWidth(960.dp).requiredHeight(180.dp)
+                                .testTag("minimal-home-first-content")
+                        )
+                    }
+                    Box(Modifier.fillMaxWidth()) { topBarForTest() }
+                }
+            }
+        }
+        composeRule.waitForIdle()
+        val topBar = composeRule.onNodeWithTag("home-top-bar", useUnmergedTree = true)
+            .getUnclippedBoundsInRoot()
+        val inset = composeRule.onNodeWithTag("minimal-home-first-content", useUnmergedTree = true)
+            .getUnclippedBoundsInRoot()
+        assertTrue(
+            "minimal content must clear the rendered top bar: contentTop=${inset.top}, topBarBottom=${topBar.bottom}",
+            inset.top >= topBar.bottom
+        )
+    }
+
     private fun assertStatusContainsClockAndWeather() {
         val status = composeRule.onNodeWithTag("top-bar-status").assertExists()
             .fetchSemanticsNode().boundsInRoot
@@ -54,7 +88,16 @@ class HomeTopBarLayoutAndroidTest {
         composeRule.setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 Box(Modifier.requiredWidth(width).requiredHeight(height)) {
-                    TopBar(
+                    topBarForTest()
+                }
+            }
+        }
+        composeRule.waitForIdle()
+    }
+
+    @androidx.compose.runtime.Composable
+    private fun topBarForTest() {
+        TopBar(
                         providers = emptySet(),
                         palette = orbitalPalette,
                         peekProvider = null,
@@ -75,10 +118,6 @@ class HomeTopBarLayoutAndroidTest {
                         weatherCity = "New York",
                         showHomeClock = true,
                         onProfileClick = {}
-                    )
-                }
-            }
-        }
-        composeRule.waitForIdle()
+        )
     }
 }
