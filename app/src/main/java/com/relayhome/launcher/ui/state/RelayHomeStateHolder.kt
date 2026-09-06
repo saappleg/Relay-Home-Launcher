@@ -34,6 +34,8 @@ import com.relayhome.launcher.WeatherTemperatureUnit
 import com.relayhome.launcher.data.RelaySettingsRepository
 import com.relayhome.launcher.data.PersonalRating
 import com.relayhome.launcher.data.RelayRatingsStore
+import com.relayhome.launcher.data.AdditionalMetadataApi
+import com.relayhome.launcher.data.withAdditionalMetadata
 import com.relayhome.launcher.ui.shared.Destination
 import com.relayhome.launcher.ui.shared.AppIconShape
 import com.relayhome.launcher.ui.shared.AppSortOrder
@@ -347,13 +349,16 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
             )
         }
         requestOmdbRatings(listOf(item))
-        if (Regex("(?i)S\\s*\\d+\\D{0,8}E\\s*\\d+").containsMatchIn(item.episodeInfo.orEmpty())) {
-            detailEnrichmentJob = stateScope.launch {
-                val enriched = TmdbApi.enrichEpisodeDetails(item)
-                val current = _state.value
-                if (current.destination == Destination.DETAIL && current.selectedMedia == item) {
-                    _state.update { it.copy(selectedMedia = enriched) }
-                }
+        detailEnrichmentJob = stateScope.launch {
+            var enriched = item
+            if (Regex("(?i)S\\s*\\d+\\D{0,8}E\\s*\\d+").containsMatchIn(item.episodeInfo.orEmpty())) {
+                enriched = TmdbApi.enrichEpisodeDetails(enriched)
+            }
+            AdditionalMetadataApi.lookup(appContext, enriched).getOrNull()?.takeIf { !it.isEmpty }
+                ?.let { enriched = enriched.withAdditionalMetadata(it) }
+            val current = _state.value
+            if (current.destination == Destination.DETAIL && current.selectedMedia.contentKey() == item.contentKey()) {
+                _state.update { it.copy(selectedMedia = enriched) }
             }
         }
     }

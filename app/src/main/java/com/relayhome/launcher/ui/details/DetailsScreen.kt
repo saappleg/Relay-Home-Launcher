@@ -278,6 +278,14 @@ internal fun DetailsScreen(
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
+                    item.additionalMetadata?.artwork?.logoUrl?.let { logoUrl ->
+                        AsyncImage(
+                            model = ImageRequest.Builder(context).data(logoUrl).size(560, 180).crossfade(true).build(),
+                            contentDescription = "${item.title} logo",
+                            contentScale = ContentScale.Fit,
+                            modifier = Modifier.padding(top = 8.dp).widthIn(max = 280.dp).heightIn(max = 64.dp)
+                        )
+                    }
                     MediaScoreBadges(
                         tmdbRating = mediaScores?.tmdbRating,
                         omdbRatings = mediaScores?.omdbRatings,
@@ -294,6 +302,25 @@ internal fun DetailsScreen(
                         item.infoProgress().takeIf { it > 0f }?.let { "${(it * 100).toInt()}% complete" }
                     ).joinToString("  •  ").takeIf { it.isNotBlank() }?.let { metadata ->
                         Text(metadata, color = ivory.copy(alpha = .82f), fontSize = 14.sp, lineHeight = 20.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                    item.additionalMetadata?.tvdb?.let { tvdb ->
+                        val providerMetadata = listOfNotNull(
+                            tvdb.status,
+                            tvdb.network,
+                            tvdb.seasonCount?.takeIf { it > 0 }?.let { "$it seasons" },
+                            tvdb.episodeCount?.takeIf { it > 0 }?.let { "$it episodes" }
+                        ).joinToString("  •  ")
+                        if (providerMetadata.isNotBlank()) {
+                            Text(
+                                "TheTVDB  •  $providerMetadata",
+                                color = muted,
+                                fontSize = 13.sp,
+                                lineHeight = 18.sp,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(top = 4.dp)
+                            )
+                        }
                     }
                     Spacer(Modifier.height(12.dp))
                     Text("About this title", color = ivory.copy(alpha = .9f), fontSize = 14.sp, fontWeight = FontWeight.Medium)

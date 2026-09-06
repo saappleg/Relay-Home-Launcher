@@ -161,18 +161,27 @@ internal object RelayMetadataApiKeyRemoteValidation : MetadataKeyRemoteValidatio
                 MetadataKeyService.OMDB -> {
                     "$OMDB_LOOKUP_URL?apikey=${encode(apiKey)}&i=$OMDB_VALIDATION_IMDB_ID&plot=short"
                 }
-                MetadataKeyService.FANART -> {
-                    "https://webservice.fanart.tv/v3/movies/tt0111161?api_key=${encode(apiKey)}"
-                }
-                MetadataKeyService.TVDB -> {
-                    "https://api4.thetvdb.com/v4/movies/tt0111161?apikey=${encode(apiKey)}"
-                }
+                // Fanart personal keys are credentials, not project query parameters. Use the
+                // current v3.2 path and client-key header so they are not leaked into URLs/logs.
+                MetadataKeyService.FANART -> "https://webservice.fanart.tv/v3.2/movies/550"
+                // TheTVDB v4 does not accept an API key on metadata endpoints: login first and
+                // use the returned bearer token. This probe validates only the credential.
+                MetadataKeyService.TVDB -> "https://api4.thetvdb.com/v4/login"
             }
             val connection = (URL(url).openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = VALIDATION_TIMEOUT_MS
                 readTimeout = VALIDATION_TIMEOUT_MS
                 instanceFollowRedirects = false
+                if (service == MetadataKeyService.FANART) {
+                    setRequestProperty("client-key", apiKey)
+                }
+                if (service == MetadataKeyService.TVDB) {
+                    requestMethod = "POST"
+                    doOutput = true
+                    setRequestProperty("Content-Type", "application/json")
+                    outputStream.use { it.write(JSONObject().put("apikey", apiKey).toString().toByteArray(Charsets.UTF_8)) }
+                }
             }
             try {
                 val statusCode = connection.responseCode

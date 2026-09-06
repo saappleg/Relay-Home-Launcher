@@ -2,6 +2,7 @@ package com.relayhome.launcher.ui.shared
 
 import com.relayhome.launcher.SmartTubeNowPlaying
 import com.relayhome.launcher.data.RelaySettingsRepository
+import com.relayhome.launcher.data.AdditionalMetadata
 import android.content.Context
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.ui.graphics.Color
@@ -47,7 +48,9 @@ internal data class MediaItem(
     /** Exact provider playback position when the item came from an active SmartTube session. */
     val playbackPositionMs: Long = 0L,
     /** Null means this is a feed/resume item rather than an active media session snapshot. */
-    val playbackPlaying: Boolean? = null
+    val playbackPlaying: Boolean? = null,
+    /** Parsed optional Fanart.tv/TheTVDB data used by Details; null preserves the TMDB-only path. */
+    val additionalMetadata: AdditionalMetadata? = null
 )
 
 internal fun SmartTubeNowPlaying.toRelayMediaItem() = MediaItem(
