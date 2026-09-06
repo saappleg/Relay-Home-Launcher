@@ -3,6 +3,7 @@ package com.relayhome.launcher
 import android.graphics.drawable.ColorDrawable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.platform.testTag
@@ -76,43 +77,49 @@ class AppsScreenAndroidTest {
 
     @Test
     fun installedAppTiles_keepArtworkAndLabelInsideRows_acrossColumnAndHeightMatrix() {
+        val apps = List(24) { index ->
+            InstalledApp(
+                label = "A deliberately long app label $index",
+                packageName = "com.example.matrix_$index",
+                activityName = "MainActivity",
+                artwork = ColorDrawable(0xFF20232A.toInt()),
+                icon = ColorDrawable(0xFF6B9FFF.toInt()),
+                hasRoundIcon = false,
+                useCircularMask = false,
+                hasLeanbackBanner = false
+            )
+        }
+        val focusRequesters = apps.associate { it.packageName to FocusRequester() }
+        val appColumnsState = mutableStateOf(5)
+        val compactHeightState = mutableStateOf(false)
+
+        composeRule.setContent {
+            val appColumns = appColumnsState.value
+            val compactHeight = compactHeightState.value
+            Box(Modifier.fillMaxSize().testTag("matrix-viewport")) {
+                AllAppsGrid(
+                    pageRows = apps.chunked(appColumns),
+                    pageApps = apps,
+                    appColumns = appColumns,
+                    appPage = 0,
+                    pageCount = 1,
+                    compactHeight = compactHeight,
+                    palette = orbitalPalette,
+                    appFocusRequesters = focusRequesters,
+                    backFocusRequester = FocusRequester(),
+                    menuOpen = false,
+                    onPageMoveLeft = { false },
+                    onPageMoveRight = { false },
+                    onLongClick = {},
+                    onClick = {}
+                )
+            }
+        }
+
         for (compactHeight in listOf(false, true)) {
             for (appColumns in 5..8) {
-                val apps = List(appColumns * 3) { index ->
-                    InstalledApp(
-                        label = "A deliberately long app label $index",
-                        packageName = "com.example.matrix${compactHeight}_$index",
-                        activityName = "MainActivity",
-                        artwork = ColorDrawable(0xFF20232A.toInt()),
-                        icon = ColorDrawable(0xFF6B9FFF.toInt()),
-                        hasRoundIcon = false,
-                        useCircularMask = false,
-                        hasLeanbackBanner = false
-                    )
-                }
-                val pageRows = apps.chunked(appColumns)
-                val focusRequesters = apps.associate { it.packageName to FocusRequester() }
-
-                composeRule.setContent {
-                    Box(Modifier.fillMaxSize().testTag("matrix-viewport")) {
-                        AllAppsGrid(
-                            pageRows = pageRows,
-                            pageApps = apps,
-                            appColumns = appColumns,
-                            appPage = 0,
-                            pageCount = 1,
-                            compactHeight = compactHeight,
-                            palette = orbitalPalette,
-                            appFocusRequesters = focusRequesters,
-                            backFocusRequester = FocusRequester(),
-                            menuOpen = false,
-                            onPageMoveLeft = { false },
-                            onPageMoveRight = { false },
-                            onLongClick = {},
-                            onClick = {}
-                        )
-                    }
-                }
+                compactHeightState.value = compactHeight
+                appColumnsState.value = appColumns
                 composeRule.waitForIdle()
 
                 val viewport = composeRule.onNodeWithTag("matrix-viewport")
@@ -123,8 +130,10 @@ class AppsScreenAndroidTest {
                     val rowBounds = row.fetchSemanticsNode().boundsInRoot
                     for (column in 0 until appColumns) {
                         val app = apps[rowIndex * appColumns + column]
-                        val label = composeRule.onNodeWithTag("installed-app-label-${app.packageName}")
-                        label.assertIsDisplayed()
+                        val label = composeRule.onNodeWithTag(
+                            "installed-app-label-${app.packageName}",
+                            useUnmergedTree = true
+                        )
                         val labelBounds = label.fetchSemanticsNode().boundsInRoot
                         assertTrue(
                             "label must remain visible: compact=$compactHeight columns=$appColumns app=${app.packageName}",
