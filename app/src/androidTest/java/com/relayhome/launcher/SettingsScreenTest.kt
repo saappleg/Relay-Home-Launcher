@@ -10,6 +10,10 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.assertIsNotSelected
+import androidx.compose.ui.test.assertIsOff
+import androidx.compose.ui.test.assertIsOn
+import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -260,6 +264,51 @@ class SettingsScreenTest {
     }
 
     @Test
+    fun launcherUpdates_controls_followExplicitVerticalDpadChain_andExposeReadableSelectionState() {
+        setSettings()
+
+        composeRule.onNodeWithText(SettingsCategory.LAUNCHER_UPDATES.label).performScrollTo().performClick()
+        val stable = composeRule.onNodeWithTag("launcher-update-channel-stable", useUnmergedTree = true)
+        val beta = composeRule.onNodeWithTag("launcher-update-channel-beta", useUnmergedTree = true)
+        val check = composeRule.onNodeWithTag("launcher-update-check", useUnmergedTree = true)
+
+        stable.performSemanticsAction(SemanticsActions.RequestFocus)
+        composeRule.awaitFocused(stable)
+        stable.performClick()
+        composeRule.waitForIdle()
+        stable.assertIsSelected()
+        beta.assertIsNotSelected()
+        stable.performKeyInput { pressKey(Key.DirectionDown) }
+        composeRule.awaitFocused(beta)
+
+        beta.performClick()
+        composeRule.waitForIdle()
+        beta.assertIsSelected()
+        stable.assertIsNotSelected()
+        beta.performKeyInput { pressKey(Key.DirectionDown) }
+        composeRule.awaitFocused(check)
+        check.performKeyInput { pressKey(Key.DirectionUp) }
+        composeRule.awaitFocused(beta)
+    }
+
+    @Test
+    fun settingsSwitches_exposeOnOffStateWhileRemainingVisiblyContrasted() {
+        val minimalHomeEnabled = mutableStateOf(false)
+        setSettings(
+            minimalHomeEnabled = minimalHomeEnabled,
+            onMinimalHomeEnabledChanged = { minimalHomeEnabled.value = it }
+        )
+
+        composeRule.onNodeWithText(SettingsCategory.HOME_LAYOUT.label).performClick()
+        val minimalHome = composeRule.onNodeWithTag("minimal-home-switch", useUnmergedTree = true)
+        minimalHome.performScrollTo()
+        minimalHome.assertIsOff()
+        minimalHome.performClick()
+        composeRule.waitForIdle()
+        minimalHome.assertIsOn()
+    }
+
+    @Test
     fun deviceSettings_andLauncherUpdates_areDistinctDestinations() {
         setSettings()
 
@@ -409,6 +458,8 @@ class SettingsScreenTest {
         onManageProvider: (Provider) -> Unit = {},
         onWeatherCityChanged: (String) -> Unit = {},
         onShowHomeClockChanged: (Boolean) -> Unit = {},
+        minimalHomeEnabled: androidx.compose.runtime.State<Boolean> = mutableStateOf(false),
+        onMinimalHomeEnabledChanged: (Boolean) -> Unit = {},
         onHeroItemCapChanged: (Int) -> Unit = {},
         onHeroSourceEnabledChanged: (HeroSource, Boolean) -> Unit = { _, _ -> },
         onHeroAutoRotateChanged: (Boolean) -> Unit = {},
@@ -450,8 +501,8 @@ class SettingsScreenTest {
                     onHomeRowOrderChanged = onHomeRowOrderChanged,
                     hiddenHomeRows = emptySet(),
                     onHomeRowVisibilityChanged = { _, _ -> },
-                    minimalHomeEnabled = false,
-                    onMinimalHomeEnabledChanged = {},
+                    minimalHomeEnabled = minimalHomeEnabled.value,
+                    onMinimalHomeEnabledChanged = onMinimalHomeEnabledChanged,
                     heroItemCap = 4,
                     heroIncludeNuvio = true,
                     heroIncludeContinueWatching = true,

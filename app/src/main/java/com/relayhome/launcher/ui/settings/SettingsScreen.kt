@@ -66,11 +66,13 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
@@ -117,6 +119,7 @@ import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.Key as ComposeKey
@@ -1539,17 +1542,121 @@ private fun RelaySettingsSwitch(
             .focusable()
             .scale(focusedScale)
             .clip(shape)
-            .background(if (focused) palette.accent.copy(alpha = .18f) else Color.Transparent)
-            .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .10f), shape)
+            .background(
+                when {
+                    focused -> palette.accent.copy(alpha = .24f)
+                    checked -> palette.accent.copy(alpha = .12f)
+                    else -> Color(0xFF202A36)
+                }
+            )
+            .border(
+                if (focused) 2.dp else 1.dp,
+                when {
+                    focused -> palette.accent
+                    checked -> palette.accent.copy(alpha = .78f)
+                    else -> Color.White.copy(alpha = .34f)
+                },
+                shape
+            )
             .toggleable(value = checked, role = Role.Switch, onValueChange = onCheckedChange)
+            .semantics { stateDescription = if (checked) "On" else "Off" }
             .padding(horizontal = 4.dp, vertical = 2.dp)
             .testTag(testTag)
     ) {
         androidx.compose.material3.Switch(
             checked = checked,
             onCheckedChange = null,
-            enabled = false
+            enabled = true,
+            colors = SwitchDefaults.colors(
+                checkedThumbColor = Color(0xFF08131F),
+                checkedTrackColor = palette.accent,
+                checkedBorderColor = palette.accent,
+                uncheckedThumbColor = Color(0xFFF1F5FA),
+                uncheckedTrackColor = Color(0xFF465466),
+                uncheckedBorderColor = Color(0xFFB8C6D8)
+            )
         )
+    }
+}
+
+@Composable
+private fun LauncherUpdateChannelOption(
+    label: String,
+    selected: Boolean,
+    palette: RelayPalette,
+    focusRequester: FocusRequester,
+    upFocusRequester: FocusRequester,
+    downFocusRequester: FocusRequester,
+    onClick: () -> Unit,
+    testTag: String
+) {
+    val interactionSource = remember { MutableInteractionSource() }
+    val focused by interactionSource.collectIsFocusedAsState()
+    val shape = RoundedCornerShape(22.dp)
+    Box(
+        Modifier
+            .widthIn(min = 190.dp)
+            .heightIn(min = 58.dp)
+            .focusRequester(focusRequester)
+            .focusProperties {
+                up = upFocusRequester
+                down = downFocusRequester
+            }
+            .clip(shape)
+            .background(
+                when {
+                    selected && focused -> palette.accent
+                    selected -> palette.accent.copy(alpha = .82f)
+                    focused -> palette.accent.copy(alpha = .24f)
+                    else -> Color(0xFF293544)
+                }
+            )
+            .border(
+                if (focused) 3.dp else 1.dp,
+                when {
+                    focused -> Color.White
+                    selected -> palette.accent
+                    else -> Color.White.copy(alpha = .38f)
+                },
+                shape
+            )
+            .selectable(
+                selected = selected,
+                onClick = onClick,
+                role = Role.RadioButton,
+                indication = null,
+                interactionSource = interactionSource
+            )
+            .semantics {
+                stateDescription = if (selected) "Selected" else "Not selected"
+            }
+            .padding(horizontal = 16.dp, vertical = 10.dp)
+            .testTag(testTag),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+            Box(
+                Modifier
+                    .size(20.dp)
+                    .clip(CircleShape)
+                    .background(if (selected) Color(0xFF08131F) else Color.Transparent)
+                    .border(2.dp, if (selected) Color(0xFF08131F) else Color(0xFFE4ECF5), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                if (selected) {
+                    Box(Modifier.size(8.dp).clip(CircleShape).background(palette.accent))
+                }
+            }
+            Text(
+                label,
+                color = if (selected) Color(0xFF08131F) else ivory,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
     }
 }
 
@@ -2191,30 +2298,61 @@ private fun LauncherUpdatesSettings(
     Spacer(Modifier.height(7.dp))
     Text("Beta builds receive newer Relay features first. Stable builds update only on tagged production releases.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
     Spacer(Modifier.height(12.dp))
+    val stableChannelFocusRequester = firstFocusRequester
+    val betaChannelFocusRequester = remember { FocusRequester() }
+    val checkForUpdatesFocusRequester = remember { FocusRequester() }
+    val installUpdateFocusRequester = remember { FocusRequester() }
     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        ActionButton("Stable", palette, primary = !includeBetaUpdates, onClick = { onIncludeBetaUpdates(false) })
-        ActionButton("Beta & pre-releases", palette, primary = includeBetaUpdates, onClick = { onIncludeBetaUpdates(true) })
+        LauncherUpdateChannelOption(
+            label = "Stable",
+            selected = !includeBetaUpdates,
+            palette = palette,
+            focusRequester = stableChannelFocusRequester,
+            upFocusRequester = backFocusRequester,
+            downFocusRequester = betaChannelFocusRequester,
+            onClick = { onIncludeBetaUpdates(false) },
+            testTag = "launcher-update-channel-stable"
+        )
+        LauncherUpdateChannelOption(
+            label = "Beta & pre-releases",
+            selected = includeBetaUpdates,
+            palette = palette,
+            focusRequester = betaChannelFocusRequester,
+            upFocusRequester = stableChannelFocusRequester,
+            downFocusRequester = checkForUpdatesFocusRequester,
+            onClick = { onIncludeBetaUpdates(true) },
+            testTag = "launcher-update-channel-beta"
+        )
     }
     Spacer(Modifier.height(24.dp))
     Text("Check for updates", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
     Spacer(Modifier.height(7.dp))
     Text("Relay checks the open GitHub repository releases for a newer APK.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
     Spacer(Modifier.height(12.dp))
-    ActionButton(if (updateWorking) "Checking GitHub…" else "Check now", palette, primary = true, onClick = {
-        if (!updateWorking) {
-            onUpdateWorking(true)
-            onUpdateMessage(null)
-            updateScope.launch {
-                RelayUpdater.check(includeBetaUpdates)
-                    .onSuccess { release ->
-                        onAvailableRelease(release)
-                        onUpdateMessage(if (release != null) "A newer build is ready to download (${release.tag})." else "Relay is up to date.")
-                    }
-                    .onFailure { error -> onUpdateMessage(error.message ?: "Could not check for updates.") }
-                onUpdateWorking(false)
+    ActionButton(
+        if (updateWorking) "Checking GitHub…" else "Check now",
+        palette,
+        primary = true,
+        modifier = Modifier.testTag("launcher-update-check"),
+        focusRequester = checkForUpdatesFocusRequester,
+        upFocusRequester = betaChannelFocusRequester,
+        downFocusRequester = if (availableRelease != null) installUpdateFocusRequester else null,
+        onClick = {
+            if (!updateWorking) {
+                onUpdateWorking(true)
+                onUpdateMessage(null)
+                updateScope.launch {
+                    RelayUpdater.check(includeBetaUpdates)
+                        .onSuccess { release ->
+                            onAvailableRelease(release)
+                            onUpdateMessage(if (release != null) "A newer build is ready to download (${release.tag})." else "Relay is up to date.")
+                        }
+                        .onFailure { error -> onUpdateMessage(error.message ?: "Could not check for updates.") }
+                    onUpdateWorking(false)
+                }
             }
         }
-    })
+    )
     updateMessage?.let { message ->
         Spacer(Modifier.height(10.dp))
         Text(message, color = palette.accent, fontSize = 14.sp, lineHeight = 20.sp)
@@ -2228,17 +2366,25 @@ private fun LauncherUpdatesSettings(
                 Text(release.notes, color = muted, fontSize = 13.sp, lineHeight = 18.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
             }
             Spacer(Modifier.height(12.dp))
-            ActionButton(if (updateWorking) "Downloading update…" else "Download and install", palette, primary = true, onClick = {
-                if (!updateWorking) {
-                    onUpdateWorking(true)
-                    updateScope.launch {
-                        RelayUpdater.download(context, release)
-                            .onSuccess { apkFile -> onUpdateMessage(RelayUpdater.install(context, apkFile)) }
-                            .onFailure { error -> onUpdateMessage(error.message ?: "Download failed.") }
-                        onUpdateWorking(false)
+            ActionButton(
+                if (updateWorking) "Downloading update…" else "Download and install",
+                palette,
+                primary = true,
+                modifier = Modifier.testTag("launcher-update-install"),
+                focusRequester = installUpdateFocusRequester,
+                upFocusRequester = checkForUpdatesFocusRequester,
+                onClick = {
+                    if (!updateWorking) {
+                        onUpdateWorking(true)
+                        updateScope.launch {
+                            RelayUpdater.download(context, release)
+                                .onSuccess { apkFile -> onUpdateMessage(RelayUpdater.install(context, apkFile)) }
+                                .onFailure { error -> onUpdateMessage(error.message ?: "Download failed.") }
+                            onUpdateWorking(false)
+                        }
                     }
                 }
-            })
+            )
         }
     }
         }
