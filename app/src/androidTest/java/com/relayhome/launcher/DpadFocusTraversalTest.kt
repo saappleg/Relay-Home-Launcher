@@ -46,6 +46,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import com.relayhome.launcher.ui.home.MediaRail
 import com.relayhome.launcher.ui.home.ProfileSwitcher
 import com.relayhome.launcher.ui.home.TopBar
+import com.relayhome.launcher.ui.home.requestHomeFocusWithRetry
 import com.relayhome.launcher.ui.home.rememberHeroFocusScrollGuard
 import com.relayhome.launcher.ui.home.HomeFocusAnchorHost
 import com.relayhome.launcher.ui.home.homeFocusAnchorRows
@@ -110,7 +111,7 @@ class DpadFocusTraversalTest {
                     weatherCity = "",
                     onProfileClick = {}
                 )
-                LaunchedEffect(Unit) { homeRequester.requestFocus() }
+                LaunchedEffect(Unit) { requestHomeFocusWithRetry(homeRequester, attempts = 8) }
             }
         }
         composeRule.waitForIdle()
@@ -171,11 +172,19 @@ class DpadFocusTraversalTest {
     fun homeMediaRails_moveBetweenRows_withoutLeavingAHiddenEntryFocused() {
         val firstEntryRequester = FocusRequester()
         val secondEntryRequester = FocusRequester()
+        val topRequester = FocusRequester()
         val firstItem = MediaItem("First row item", Provider.NUVIO, 0f, emptyList(), "")
         val secondItem = MediaItem("Second row item", Provider.NUVIO, 0f, emptyList(), "")
 
         composeRule.setContent {
             Column {
+                Box(
+                    Modifier
+                        .width(1.dp)
+                        .height(1.dp)
+                        .focusRequester(topRequester)
+                        .focusable()
+                )
                 MediaRail(
                     title = "First row",
                     items = listOf(firstItem),
@@ -183,7 +192,7 @@ class DpadFocusTraversalTest {
                     dateFormat = RelayDateFormat.LOCAL,
                     onHeroChanged = {},
                     onItemSelected = {},
-                    upFocusRequester = FocusRequester(),
+                    upFocusRequester = topRequester,
                     firstFocusRequester = firstEntryRequester,
                     downFocusRequester = secondEntryRequester,
                     onRailEntered = {},
@@ -202,7 +211,7 @@ class DpadFocusTraversalTest {
                     onRailExited = {}
                 )
             }
-            LaunchedEffect(Unit) { firstEntryRequester.requestFocus() }
+            LaunchedEffect(Unit) { requestHomeFocusWithRetry(firstEntryRequester, attempts = 8) }
         }
         composeRule.waitForIdle()
 

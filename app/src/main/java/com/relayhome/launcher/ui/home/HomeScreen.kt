@@ -1925,13 +1925,23 @@ internal fun MediaRail(
         stableItems.associate { it.contentKey() to FocusRequester() }
     }
     var entryFocused by remember { mutableStateOf(false) }
+    var firstCardFocused by remember { mutableStateOf(false) }
     LaunchedEffect(entryFocused) {
         if (entryFocused && firstFocusRequester != null) {
             // The entry target is always mounted, even when LazyRow has recycled its first card.
             // Resetting the row before handing focus to that card makes the transfer deterministic
             // after a vertical D-pad move from a far-scrolled row.
+            firstCardFocused = false
             listState.scrollToItem(0)
-            requestHomeFocusWithRetry(firstCardFocusRequester)
+            repeat(12) {
+                withFrameNanos { }
+                val firstItemIsMounted = listState.layoutInfo.visibleItemsInfo.any { it.index == 0 }
+                if (firstItemIsMounted) {
+                    requestHomeFocusWithRetry(firstCardFocusRequester, attempts = 1)
+                }
+                withFrameNanos { }
+                if (firstCardFocused) return@LaunchedEffect
+            }
         }
     }
     Column(
@@ -1957,8 +1967,10 @@ internal fun MediaRail(
                     .testTag("home-row-entry")
                     .focusRequester(firstFocusRequester)
                     .focusProperties { up = upFocusRequester }
+                    .onFocusChanged {
+                        entryFocused = it.hasFocus
+                    }
                     .focusable()
-                    .onFocusChanged { entryFocused = it.hasFocus }
             )
         }
         Text(title, color = ivory, fontSize = 19.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = RelayTvMargins.screenHorizontal, bottom = 10.dp))
@@ -2010,6 +2022,9 @@ internal fun MediaRail(
                         }
                         }
                     ) { isFocused ->
+                        if (itemKey == stableItems.firstOrNull()?.contentKey()) {
+                            firstCardFocused = isFocused
+                        }
                         if (isFocused) {
                             onFocusTarget(cardFocusRequester)
                             onFocusedItem(item)
