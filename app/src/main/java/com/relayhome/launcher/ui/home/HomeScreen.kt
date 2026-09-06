@@ -33,6 +33,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.BringIntoViewSpec
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.verticalScroll
@@ -79,12 +81,14 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.State
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
@@ -146,9 +150,12 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.MultiFormatWriter
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.time.LocalTime
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -190,6 +197,16 @@ private data class HomeAmbientFocus(
 
 /** Kept within Agent E's requested 3–6% range so the texture never competes with key art. */
 internal const val HOME_AMBIENT_GRAIN_ALPHA = 0.04f
+
+/**
+ * Focus relocation must not move the Home page while the hero action group owns focus. The
+ * scroll container stays mounted so Compose's focus tree remains stable, but this spec rejects
+ * automatic bring-into-view requests until the coordinator explicitly grants rail ownership.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+internal object HeroLockedBringIntoViewSpec : BringIntoViewSpec {
+    override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float = 0f
+}
 
 private fun ambientFocusFor(hero: Hero): HomeAmbientFocus = HomeAmbientFocus(
     key = "hero:${hero.item?.contentKey() ?: hero.artworkUrl}:${hero.artworkUrl}",
@@ -243,45 +260,114 @@ internal suspend fun requestHomeFocusWithRetry(
 /**
  * Hero actions are part of the fixed top section even though Home's rails share one scroll
  * container. Compose's automatic focus relocation can otherwise nudge that container when a
- * hero action is reacquired after a rail. The scroll lock is released only after hero focus is
- * gone, while the settling loop keeps a delayed relocation from leaving the hero cropped.
+ * hero action is reacquired after a rail. The stable hero subtree keeps the lock across action
+ * changes, while HomeScrollCoordinator serializes and invalidates the remaining relocations.
  */
 internal class HeroFocusScrollGuard internal constructor(
     val hasFocus: State<Boolean>,
-    val onFocusChanged: (Boolean) -> Unit
+    val canScroll: State<Boolean>,
+    val onFocusChanged: (Boolean) -> Unit,
+    val requestTop: () -> Unit,
+    val requestTopAndAwait: suspend () -> Unit,
+    val onRailEntered: ((suspend () -> Unit) -> Unit),
+    val onRailExited: () -> Unit
 )
 
 @Composable
 internal fun rememberHeroFocusScrollGuard(scrollState: ScrollState): HeroFocusScrollGuard {
     val scope = rememberCoroutineScope()
-    val heroHasFocus = remember { mutableStateOf(false) }
-    val pendingSettle = remember { arrayOfNulls<kotlinx.coroutines.Job>(1) }
-    val onFocusChanged = remember(scrollState) {
-        { focused: Boolean ->
-            heroHasFocus.value = focused
-            pendingSettle[0]?.cancel()
-            pendingSettle[0] = if (focused) {
-                scope.launch {
-                    // Correct once immediately, then once per frame while focus is still in
-                    // the hero. This covers both directions: entering Details and returning to
-                    // Resume from a rail can each schedule a different relocation pass. Keep the
-                    // window bounded so this is a settle operation, not a permanent frame loop.
-                    repeat(8) {
-                        if (!heroHasFocus.value) return@launch
-                        if (scrollState.value != 0) scrollState.scrollTo(0)
-                        withFrameNanos { }
-                    }
-                }
-            } else {
-                null
+    val coordinator = remember(scrollState) { HomeScrollCoordinator(scrollState, scope) }
+    DisposableEffect(coordinator) {
+        onDispose { coordinator.cancel() }
+    }
+    return remember(coordinator) {
+        HeroFocusScrollGuard(
+            hasFocus = coordinator.heroHasFocus,
+            canScroll = coordinator.canScroll,
+            onFocusChanged = coordinator::onHeroFocusChanged,
+            requestTop = coordinator::requestTop,
+            requestTopAndAwait = coordinator::requestTopAndAwait,
+            onRailEntered = coordinator::onRailEntered,
+            onRailExited = coordinator::onRailExited
+        )
+    }
+}
+
+/**
+ * Home has one vertical scroll owner. Top restoration and rail entry requests are serialized so
+ * a late BringIntoView operation cannot write an old rail position after the hero has reacquired
+ * focus. The generation is advanced for every ownership change and checked inside the serialized
+ * command, which makes cancellation safe even if a platform relocation is already in flight.
+ */
+internal class HomeScrollCoordinator internal constructor(
+    private val scrollState: ScrollState,
+    private val scope: kotlinx.coroutines.CoroutineScope
+) {
+    val heroHasFocus = mutableStateOf(false)
+    val canScroll = mutableStateOf(false)
+
+    private val scrollMutex = Mutex()
+    private var generation = 0L
+    private var pendingCommand: Job? = null
+
+    fun onHeroFocusChanged(focused: Boolean) {
+        if (heroHasFocus.value == focused) return
+        heroHasFocus.value = focused
+        if (focused) requestTop() else onRailExited()
+    }
+
+    fun requestTop() {
+        canScroll.value = false
+        val token = invalidatePendingCommand()
+        pendingCommand = scope.launch {
+            scrollMutex.withLock {
+                if (token == generation) scrollState.scrollTo(0)
             }
         }
     }
-    DisposableEffect(scrollState) {
-        onDispose { pendingSettle[0]?.cancel() }
+
+    suspend fun requestTopAndAwait() {
+        canScroll.value = false
+        val token = invalidatePendingCommand()
+        scrollMutex.withLock {
+            if (token == generation) scrollState.scrollTo(0)
+        }
     }
-    return remember(scrollState, onFocusChanged) {
-        HeroFocusScrollGuard(heroHasFocus, onFocusChanged)
+
+    fun onRailEntered(request: suspend () -> Unit) {
+        if (heroHasFocus.value) return
+        val token = invalidatePendingCommand()
+        pendingCommand = scope.launch {
+            // Let the focus transaction finish before adding the scroll modifier. Changing the
+            // ancestor modifier chain from inside onFocusChanged can leave Compose's two-
+            // dimensional focus parent active without its child during the same key event.
+            withFrameNanos { }
+            if (token != generation || heroHasFocus.value) return@launch
+            canScroll.value = true
+            // The modifier is attached by the recomposition above; only then may the rail's
+            // bring-into-view request run.
+            withFrameNanos { }
+            scrollMutex.withLock {
+                if (token != generation || heroHasFocus.value) return@withLock
+                request()
+            }
+        }
+    }
+
+    fun onRailExited() {
+        canScroll.value = false
+        invalidatePendingCommand()
+    }
+
+    fun cancel() {
+        invalidatePendingCommand()
+    }
+
+    private fun invalidatePendingCommand(): Long {
+        generation += 1
+        pendingCommand?.cancel()
+        pendingCommand = null
+        return generation
     }
 }
 
@@ -437,6 +523,7 @@ private fun HomeAmbientBackdrop(
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 internal fun HomeScreen(
     hero: Hero,
@@ -494,6 +581,7 @@ internal fun HomeScreen(
     val heroFocusRequester = remember { FocusRequester() }
     val homeScrollState = rememberScrollState()
     val heroFocusScrollGuard = rememberHeroFocusScrollGuard(homeScrollState)
+    val defaultBringIntoViewSpec = LocalBringIntoViewSpec.current
     var profilePickerVisible by remember { mutableStateOf(false) }
     var ambientFocus by remember { mutableStateOf(ambientFocusFor(hero)) }
     val showHeroAmbient = {
@@ -638,30 +726,33 @@ internal fun HomeScreen(
         if (index == 0) topContentFocusRequester else rowEntryFocusRequesters.getValue(availableHomeRows[index - 1])
     fun nextRowEntryFocusRequester(index: Int): FocusRequester? =
         availableHomeRows.getOrNull(index + 1)?.let { rowEntryFocusRequesters.getValue(it) }
-    val homeScope = rememberCoroutineScope()
     fun scrollHomeToTop() {
-        if (homeScrollState.value != 0) {
-            homeScope.launch { homeScrollState.scrollTo(0) }
-        }
+        heroFocusScrollGuard.requestTop()
     }
     // Do not restore a previous focus-scroll offset into the hero when returning to Home.
     LaunchedEffect(focusResetGeneration) {
-        homeScrollState.scrollTo(0)
+        heroFocusScrollGuard.requestTopAndAwait()
         homeFocusRequester.requestFocus()
         withFrameNanos { }
         onHomeFocusRestored()
     }
     Box(modifier = Modifier.fillMaxSize()) {
         HomeAmbientBackdrop(focus = ambientFocus, onArtworkPalette = onFocusedArtworkPalette)
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                // The hero is the stable top composition. Once either hero action owns focus,
-                // prevent the parent from answering focus relocation by moving that composition
-                // under the overlaid top bar. The guard settles the offset before this lock is
-                // released when focus enters a rail.
-                .verticalScroll(homeScrollState, enabled = !heroFocusScrollGuard.hasFocus.value)
+        CompositionLocalProvider(
+            LocalBringIntoViewSpec provides if (heroFocusScrollGuard.canScroll.value) {
+                defaultBringIntoViewSpec
+            } else {
+                HeroLockedBringIntoViewSpec
+            }
         ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    // Keep the scroll/focus node mounted for the entire Home lifetime. The
+                    // composition-local spec above, rather than modifier removal, locks focus
+                    // relocation while the hero is active without destabilizing the focus tree.
+                    .verticalScroll(homeScrollState, enabled = heroFocusScrollGuard.canScroll.value)
+            ) {
             HomeContentItem {
                 if (!minimalHomeEnabled) {
                     val peek = activePeekProvider
@@ -686,12 +777,11 @@ internal fun HomeScreen(
                         downFocusRequester = firstRowEntryFocusRequester,
                         onHeroFocused = {
                             showHeroAmbient()
-                            scrollHomeToTop()
                         },
                         onItemSelected = onItemSelected,
                         onNavigateHero = onHeroNavigate,
                         onHeroFocusChanged = heroFocusScrollGuard.onFocusChanged
-                    ) { accent ->
+                    ) { _, accent ->
                         if (accent != null) onHeroChanged(hero.copy(palette = hero.palette.copy(accent = accent, glow = accent.copy(alpha = .32f))))
                     }
                     Spacer(Modifier.height(18.dp))
@@ -707,6 +797,8 @@ internal fun HomeScreen(
                             focusRequester = rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS),
                             upFocusRequester = homeFocusRequester,
                             downFocusRequester = null,
+                            onRailEntered = heroFocusScrollGuard.onRailEntered,
+                            onRailExited = heroFocusScrollGuard.onRailExited,
                             onFocusedApp = showAppAmbient
                         ) { app -> InstalledApps.launch(context, app) }
                     }
@@ -721,6 +813,8 @@ internal fun HomeScreen(
                             focusRequester = rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS),
                             upFocusRequester = heroFocusRequester,
                             downFocusRequester = null,
+                            onRailEntered = heroFocusScrollGuard.onRailEntered,
+                            onRailExited = heroFocusScrollGuard.onRailExited,
                             onFocusedApp = showAppAmbient
                         ) { app -> InstalledApps.launch(context, app) }
                         Spacer(Modifier.height(18.dp))
@@ -756,7 +850,9 @@ internal fun HomeScreen(
                                 largeCards = true,
                                 upFocusRequester = previousRowEntryFocusRequester(rowIndex),
                                 firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.CONTINUE_WATCHING),
-                                downFocusRequester = nextRowEntryFocusRequester(rowIndex)
+                                downFocusRequester = nextRowEntryFocusRequester(rowIndex),
+                                onRailEntered = heroFocusScrollGuard.onRailEntered,
+                                onRailExited = heroFocusScrollGuard.onRailExited
                             )
                             HomeRow.FAVORITE_APPS -> FavoriteAppsRail(
                                 apps = favoriteInstalledApps,
@@ -765,6 +861,8 @@ internal fun HomeScreen(
                                 focusRequester = rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS),
                                 upFocusRequester = previousRowEntryFocusRequester(rowIndex),
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
+                                onRailEntered = heroFocusScrollGuard.onRailEntered,
+                                onRailExited = heroFocusScrollGuard.onRailExited,
                                 onFocusedApp = showAppAmbient
                             ) { app -> InstalledApps.launch(context, app) }
                             HomeRow.RECOMMENDATIONS -> MediaRail(
@@ -780,7 +878,9 @@ internal fun HomeScreen(
                                 posters = true,
                                 upFocusRequester = previousRowEntryFocusRequester(rowIndex),
                                 firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.RECOMMENDATIONS),
-                                downFocusRequester = nextRowEntryFocusRequester(rowIndex)
+                                downFocusRequester = nextRowEntryFocusRequester(rowIndex),
+                                onRailEntered = heroFocusScrollGuard.onRailEntered,
+                                onRailExited = heroFocusScrollGuard.onRailExited
                             )
                             HomeRow.SUBSCRIPTIONS -> MediaRail(
                                 title = "New from subscriptions",
@@ -795,7 +895,9 @@ internal fun HomeScreen(
                                 largeCards = true,
                                 upFocusRequester = previousRowEntryFocusRequester(rowIndex),
                                 firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.SUBSCRIPTIONS),
-                                downFocusRequester = nextRowEntryFocusRequester(rowIndex)
+                                downFocusRequester = nextRowEntryFocusRequester(rowIndex),
+                                onRailEntered = heroFocusScrollGuard.onRailEntered,
+                                onRailExited = heroFocusScrollGuard.onRailExited
                             )
                             HomeRow.UPCOMING -> MediaRail(
                                 title = "Coming Up",
@@ -811,7 +913,9 @@ internal fun HomeScreen(
                                 largeCards = true,
                                 upFocusRequester = previousRowEntryFocusRequester(rowIndex),
                                 firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.UPCOMING),
-                                downFocusRequester = nextRowEntryFocusRequester(rowIndex)
+                                downFocusRequester = nextRowEntryFocusRequester(rowIndex),
+                                onRailEntered = heroFocusScrollGuard.onRailEntered,
+                                onRailExited = heroFocusScrollGuard.onRailExited
                             )
                         }
                         Spacer(Modifier.height(18.dp))
@@ -819,6 +923,7 @@ internal fun HomeScreen(
                 }
             }
             Spacer(Modifier.height(52.dp))
+            }
         }
         // The navigation lives over the artwork, keeping the visual field continuous from the top edge.
         Box(
@@ -1362,11 +1467,13 @@ internal fun HeroPanel(
     onHeroFocusChanged: (Boolean) -> Unit = {},
     onItemSelected: (MediaItem) -> Unit,
     onNavigateHero: (HeroNavigationDirection) -> Unit = {},
-    onArtworkColor: (Color?) -> Unit
+    onArtworkColor: (String, Color?) -> Unit
 ) {
     val context = LocalContext.current
     val paletteScope = rememberCoroutineScope()
     val detailsFocusRequester = remember { FocusRequester() }
+    val heroIdentity = hero.item?.contentKey() ?: "${hero.title}|${hero.artworkUrl}"
+    val latestOnArtworkColor by rememberUpdatedState(onArtworkColor)
     val heroImageRequest = remember(hero.artworkUrl) {
         ImageRequest.Builder(context)
             .data(hero.artworkUrl)
@@ -1380,6 +1487,13 @@ internal fun HeroPanel(
             .height(420.dp)
             .background(midnight)
             .testTag("hero-panel")
+            // Observe the whole hero focus subtree rather than either action independently. The
+            // Resume -> Details handoff, and a candidate rotation while an action is focused,
+            // must not briefly release the parent scroll lock between two stable targets.
+            .onFocusChanged { focusState ->
+                onHeroFocusChanged(focusState.hasFocus)
+                if (focusState.hasFocus) onHeroFocused()
+            }
             .onPreviewKeyEvent { event ->
                 val direction = when (event.key) {
                     Key.DirectionLeft -> HeroNavigationDirection.PREVIOUS
@@ -1399,22 +1513,29 @@ internal fun HeroPanel(
                 }
             }
     ) {
-        AsyncImage(
-            model = heroImageRequest,
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize().alpha(.86f),
-            onSuccess = { success ->
-                // SmartTube artwork may be replaced mid-session. Keep its accent stable and
-                // provider-owned, just as App Peek does, instead of extracting from a moving
-                // media-session bitmap.
-                if (hero.item?.provider != Provider.SMARTTUBE) {
-                    paletteScope.launch {
-                        relayArtworkAccent(success.result.drawable)?.let(onArtworkColor)
+        // Recreate only the artwork node for a new candidate. The focusable action group below
+        // remains outside this key, and an old image extraction can identify itself so it cannot
+        // repaint or reset the currently focused candidate after rotation.
+        key(heroIdentity) {
+            AsyncImage(
+                model = heroImageRequest,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize().alpha(.86f),
+                onSuccess = { success ->
+                    // SmartTube artwork may be replaced mid-session. Keep its accent stable and
+                    // provider-owned, just as App Peek does, instead of extracting from a moving
+                    // media-session bitmap.
+                    if (hero.item?.provider != Provider.SMARTTUBE) {
+                        paletteScope.launch {
+                            relayArtworkAccent(success.result.drawable)?.let { accent ->
+                                latestOnArtworkColor(heroIdentity, accent)
+                            }
+                        }
                     }
                 }
-            }
-        )
+            )
+        }
         Box(
             Modifier.fillMaxSize().background(
                 Brush.horizontalGradient(
@@ -1498,17 +1619,19 @@ internal fun HeroPanel(
                 )
             }
             Spacer(Modifier.height(12.dp))
-            Column(
-                horizontalAlignment = Alignment.Start,
-                verticalArrangement = Arrangement.spacedBy(10.dp),
-                modifier = Modifier.testTag("hero-action-column")
-            ) {
-                val heroContentKey = hero.item?.contentKey() ?: "${hero.title}|${hero.subtitle}"
+            // Keep this keyed to the hero action group, never to the rotating candidate. The
+            // focusable/clickable action nodes therefore retain their identity while only their
+            // labels and click lambdas are rebound to the current candidate.
+            key("hero-action-group") {
+                Column(
+                    horizontalAlignment = Alignment.Start,
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                    modifier = Modifier.testTag("hero-action-column")
+                ) {
                 ActionButton(
                     if ((hero.item?.progress ?: 0f) > 0f) "▶  Resume" else "▶  Play",
                     palette,
                     primary = true,
-                    contentKey = heroContentKey,
                     modifier = Modifier
                         // Resume is the longest hero action label. Give only this button the
                         // extra 16dp needed at TV density and during the focused 1.06x scale;
@@ -1522,16 +1645,11 @@ internal fun HeroPanel(
                     // path vertical so Details remains reachable without competing with hero
                     // item navigation: Resume -> Details -> first Home rail.
                     downFocusRequester = detailsFocusRequester,
-                    onFocused = {
-                        onHeroFocusChanged(it)
-                        if (it) onHeroFocused()
-                    }
                 ) { hero.item?.let { ProviderHandoff.play(context, it) } }
                 ActionButton(
                     "ⓘ  Details",
                     palette,
                     primary = false,
-                    contentKey = heroContentKey,
                     modifier = Modifier
                         .width(122.dp)
                         .height(44.dp)
@@ -1539,11 +1657,8 @@ internal fun HeroPanel(
                     focusRequester = detailsFocusRequester,
                     downFocusRequester = downFocusRequester,
                     upFocusRequester = resumeFocusRequester,
-                    onFocused = {
-                        onHeroFocusChanged(it)
-                        if (it) onHeroFocused()
-                    }
                 ) { hero.item?.let(onItemSelected) }
+                }
             }
         }
     }
@@ -1581,7 +1696,6 @@ internal fun ActionButton(
     label: String,
     palette: RelayPalette,
     primary: Boolean,
-    contentKey: Any? = null,
     modifier: Modifier = Modifier,
     focusRequester: FocusRequester? = null,
     upFocusRequester: FocusRequester? = null,
@@ -1614,20 +1728,18 @@ internal fun ActionButton(
             .padding(horizontal = 14.dp),
         contentAlignment = Alignment.Center
     ) {
-        // Keep the action label as a single measured line. Re-key only the text child when the
-        // hero item changes: the focusable/clickable button stays mounted, while a rotated hero
-        // gets a fresh text measurement even when both items use the same Resume label.
-        key(contentKey ?: label) {
-            Text(
-                text = label,
-                color = if (primary) Color(0xFF111318) else ivory,
-                fontSize = 17.sp,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                softWrap = false,
-                overflow = TextOverflow.Clip
-            )
-        }
+        // Keep the action label as a single measured line while the surrounding focus target
+        // stays mounted across hero candidate rotation. Text updates in place; re-keying this
+        // child on every candidate change can create an avoidable focus/relocation pulse.
+        Text(
+            text = label,
+            color = if (primary) Color(0xFF111318) else ivory,
+            fontSize = 17.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            softWrap = false,
+            overflow = TextOverflow.Clip
+        )
     }
 }
 
@@ -1648,7 +1760,9 @@ internal fun MediaRail(
     mediaScores: Map<String, MediaScores> = emptyMap(),
     upFocusRequester: FocusRequester,
     firstFocusRequester: FocusRequester? = null,
-    downFocusRequester: FocusRequester? = null
+    downFocusRequester: FocusRequester? = null,
+    onRailEntered: ((suspend () -> Unit) -> Unit),
+    onRailExited: () -> Unit
 ) {
     if (items.isEmpty()) return
     val context = LocalContext.current
@@ -1677,7 +1791,9 @@ internal fun MediaRail(
             .bringIntoViewRequester(railBringIntoViewRequester)
             .onFocusChanged { focusState ->
                 if (focusState.hasFocus && !railHasFocus[0]) {
-                    railScope.launch { railBringIntoViewRequester.bringIntoView() }
+                    onRailEntered { railBringIntoViewRequester.bringIntoView() }
+                } else if (!focusState.hasFocus && railHasFocus[0]) {
+                    onRailExited()
                 }
                 railHasFocus[0] = focusState.hasFocus
             }
@@ -1972,17 +2088,17 @@ internal fun FavoriteAppsRail(
     focusRequester: FocusRequester? = null,
     upFocusRequester: FocusRequester? = null,
     downFocusRequester: FocusRequester? = null,
+    onRailEntered: ((suspend () -> Unit) -> Unit),
+    onRailExited: () -> Unit,
     onFocusedApp: (InstalledApp?) -> Unit = {},
     onLaunch: (InstalledApp) -> Unit
 ) {
     if (apps.isEmpty()) return
-    val railScope = rememberCoroutineScope()
     val railBringIntoViewRequester = remember { BringIntoViewRequester() }
     val firstCardFocusRequester = remember { FocusRequester() }
     var entryFocused by remember { mutableStateOf(false) }
     LaunchedEffect(entryFocused) {
         if (entryFocused && focusRequester != null) {
-            railBringIntoViewRequester.bringIntoView()
             requestHomeFocusWithRetry(firstCardFocusRequester)
         }
     }
@@ -1992,7 +2108,9 @@ internal fun FavoriteAppsRail(
             .bringIntoViewRequester(railBringIntoViewRequester)
             .onFocusChanged { focusState ->
                 if (focusState.hasFocus && !railHasFocus[0]) {
-                    railScope.launch { railBringIntoViewRequester.bringIntoView() }
+                    onRailEntered { railBringIntoViewRequester.bringIntoView() }
+                } else if (!focusState.hasFocus && railHasFocus[0]) {
+                    onRailExited()
                 }
                 railHasFocus[0] = focusState.hasFocus
             }

@@ -1,7 +1,9 @@
 package com.relayhome.launcher
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.focusable
+import androidx.compose.foundation.gestures.LocalBringIntoViewSpec
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +17,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -46,6 +49,7 @@ import com.relayhome.launcher.ui.home.rememberHeroFocusScrollGuard
 import com.relayhome.launcher.ui.home.HomeFocusAnchorHost
 import com.relayhome.launcher.ui.home.ActionButton
 import com.relayhome.launcher.ui.home.HeroPanel
+import com.relayhome.launcher.ui.home.HeroLockedBringIntoViewSpec
 import com.relayhome.launcher.ui.shared.HomeRow
 import com.relayhome.launcher.ui.shared.Hero
 import com.relayhome.launcher.ui.shared.HeroNavigationDirection
@@ -66,7 +70,7 @@ import org.junit.Test
  * FocusRequester/focusProperties D-pad contract and keeps the Up/Down/Left/Right/Back/Select
  * acceptance intent executable while those entry points evolve.
  */
-@OptIn(ExperimentalTestApi::class)
+@OptIn(ExperimentalTestApi::class, ExperimentalFoundationApi::class)
 class DpadFocusTraversalTest {
     @get:Rule
     val composeRule = createComposeRule()
@@ -302,7 +306,7 @@ class DpadFocusTraversalTest {
                 heroCandidates = listOf(firstItem, nextItem),
                 onHeroFocused = {},
                 onItemSelected = {},
-                onArtworkColor = {}
+                onArtworkColor = { _, _ -> }
             )
             LaunchedEffect(hero.item?.contentKey()) { resumeRequester.requestFocus() }
         }
@@ -318,6 +322,198 @@ class DpadFocusTraversalTest {
         composeRule.onNodeWithText("S01 • E06").assertIsDisplayed()
         composeRule.onNodeWithText("▶  Resume").assertIsDisplayed().assertIsFocused()
         composeRule.onNodeWithText("ⓘ  Details").assertIsDisplayed()
+    }
+
+    @Test
+    fun rotatingHero_whileDetailsFocused_keepsHeroFocusSessionAndAnchor() {
+        val firstItem = MediaItem(
+            title = "Warhammer",
+            provider = Provider.NUVIO,
+            progress = 0.3f,
+            colors = emptyList(),
+            artworkUrl = "warhammer-art"
+        )
+        val rotatedItem = MediaItem(
+            title = "September Nintendo Direct",
+            provider = Provider.NUVIO,
+            progress = 0f,
+            colors = emptyList(),
+            artworkUrl = "nintendo-art"
+        )
+        val heroState = mutableStateOf(heroForTest(firstItem))
+        val resumeRequester = FocusRequester()
+        val firstRowRequester = FocusRequester()
+
+        composeRule.setContent {
+            val scrollState = rememberScrollState()
+            val guard = rememberHeroFocusScrollGuard(scrollState)
+            val defaultBringIntoViewSpec = LocalBringIntoViewSpec.current
+            Box(Modifier.height(520.dp)) {
+                CompositionLocalProvider(
+                    LocalBringIntoViewSpec provides if (guard.canScroll.value) {
+                        defaultBringIntoViewSpec
+                    } else {
+                        HeroLockedBringIntoViewSpec
+                    }
+                ) {
+                    Column(Modifier.verticalScroll(scrollState, enabled = guard.canScroll.value)) {
+                    HeroPanel(
+                        hero = heroState.value,
+                        palette = orbitalPalette,
+                        homeFocusRequester = FocusRequester(),
+                        resumeFocusRequester = resumeRequester,
+                        heroCandidates = listOf(firstItem, rotatedItem),
+                        downFocusRequester = firstRowRequester,
+                        onHeroFocused = {},
+                        onHeroFocusChanged = guard.onFocusChanged,
+                        onItemSelected = {},
+                        onArtworkColor = { _, _ -> }
+                    )
+                    Spacer(Modifier.height(18.dp))
+                    MediaRail(
+                        title = "Continue Watching",
+                        items = listOf(firstItem),
+                        palette = orbitalPalette,
+                        dateFormat = RelayDateFormat.LOCAL,
+                        onHeroChanged = {},
+                        onItemSelected = {},
+                        firstFocusRequester = firstRowRequester,
+                        upFocusRequester = resumeRequester,
+                        onRailEntered = guard.onRailEntered,
+                        onRailExited = guard.onRailExited
+                    )
+                    }
+                }
+            }
+            LaunchedEffect(Unit) { resumeRequester.requestFocus() }
+        }
+        composeRule.waitForIdle()
+
+        val initialHeroTop = composeRule.onNodeWithTag("hero-panel", useUnmergedTree = true).getUnclippedBoundsInRoot().top.value
+        composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionDown) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).assertIsFocused()
+
+        // This is the state-holder's timer changing the candidate while the user is still in the
+        // hero action group. The focused action must remain the same mounted target.
+        composeRule.runOnIdle { heroState.value = heroForTest(rotatedItem) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).assertIsFocused()
+        composeRule.onNodeWithText("September Nintendo Direct").assertIsDisplayed()
+
+        composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionUp) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true).assertIsFocused()
+        assertEquals("Candidate rotation must not move the hero during action focus", initialHeroTop,
+            composeRule.onNodeWithTag("hero-panel", useUnmergedTree = true).getUnclippedBoundsInRoot().top.value, 0.5f)
+        assertEquals("Candidate rotation must preserve the rotated hero", rotatedItem.contentKey(), heroState.value.item?.contentKey())
+        assertEquals("Candidate rotation must preserve the rotated artwork", rotatedItem.artworkUrl, heroState.value.artworkUrl)
+    }
+
+    @Test
+    fun longHeroTitle_detailsAndRailReturn_keepStableHeroAnchor() {
+        val longItem = MediaItem(
+            title = "A Very Long Movie Title That Must Stay Inside The Bounded Hero Information Region",
+            provider = Provider.NUVIO,
+            progress = 0.35f,
+            colors = emptyList(),
+            artworkUrl = "long-title-art",
+            description = "2025  •  Drama  •  1h 48m  •  Long provider metadata that must not move the actions"
+        )
+        val rotatedLongItem = longItem.copy(
+            title = "Another Long Rotated Movie Title That Keeps Its Focusable Action Group",
+            artworkUrl = "rotated-long-title-art",
+            providerContentId = "rotated-long-title"
+        )
+        val heroState = mutableStateOf(heroForTest(longItem))
+        val resumeRequester = FocusRequester()
+        val firstRowRequester = FocusRequester()
+        val observedScrollOffset = AtomicInteger(-1)
+
+        composeRule.setContent {
+            val scrollState = rememberScrollState()
+            val guard = rememberHeroFocusScrollGuard(scrollState)
+            val defaultBringIntoViewSpec = LocalBringIntoViewSpec.current
+            LaunchedEffect(scrollState.value) { observedScrollOffset.set(scrollState.value) }
+            CompositionLocalProvider(
+                LocalBringIntoViewSpec provides if (guard.canScroll.value) {
+                    defaultBringIntoViewSpec
+                } else {
+                    HeroLockedBringIntoViewSpec
+                }
+            ) {
+                Box(Modifier.height(520.dp)) {
+                    Column(Modifier.verticalScroll(scrollState, enabled = guard.canScroll.value)) {
+                        HeroPanel(
+                            hero = heroState.value,
+                            palette = orbitalPalette,
+                            homeFocusRequester = FocusRequester(),
+                            resumeFocusRequester = resumeRequester,
+                            heroCandidates = listOf(longItem, rotatedLongItem),
+                            downFocusRequester = firstRowRequester,
+                            onHeroFocused = {},
+                            onHeroFocusChanged = guard.onFocusChanged,
+                            onItemSelected = {},
+                            onArtworkColor = { _, _ -> }
+                        )
+                        Spacer(Modifier.height(18.dp))
+                        MediaRail(
+                            title = "Continue Watching",
+                            items = listOf(longItem),
+                            palette = orbitalPalette,
+                            dateFormat = RelayDateFormat.LOCAL,
+                            onHeroChanged = {},
+                            onItemSelected = {},
+                            firstFocusRequester = firstRowRequester,
+                            upFocusRequester = resumeRequester,
+                            onRailEntered = guard.onRailEntered,
+                            onRailExited = guard.onRailExited
+                        )
+                    }
+                }
+            }
+            LaunchedEffect(Unit) { resumeRequester.requestFocus() }
+        }
+        composeRule.waitForIdle()
+
+        val initialPanelBounds = composeRule.onNodeWithTag("hero-panel", useUnmergedTree = true).getUnclippedBoundsInRoot()
+        val initialHeadingBounds = composeRule.onNodeWithTag("hero-heading", useUnmergedTree = true).getUnclippedBoundsInRoot()
+        val initialActionBounds = composeRule.onNodeWithTag("hero-action-column", useUnmergedTree = true).getUnclippedBoundsInRoot()
+        composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true).assertIsFocused()
+
+        // Long-title Resume -> Details -> Resume must not let automatic relocation reposition the
+        // bounded hero composition or clip its heading under the top navigation.
+        composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionDown) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).assertIsFocused()
+        composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionUp) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true).assertIsFocused()
+        assertEquals(initialPanelBounds.top.value, composeRule.onNodeWithTag("hero-panel", useUnmergedTree = true).getUnclippedBoundsInRoot().top.value, 0.5f)
+        assertEquals(initialHeadingBounds.top.value, composeRule.onNodeWithTag("hero-heading", useUnmergedTree = true).getUnclippedBoundsInRoot().top.value, 0.5f)
+        assertEquals(initialActionBounds.top.value, composeRule.onNodeWithTag("hero-action-column", useUnmergedTree = true).getUnclippedBoundsInRoot().top.value, 0.5f)
+
+        // Repeat through actual rail ownership with a candidate rotation in flight. Returning Up
+        // must restore the same long-title baseline and retain the rotated candidate identity.
+        composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionDown) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionDown) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true).assertIsFocused()
+        check(observedScrollOffset.get() > 0) {
+            "Continue Watching entry must own the first downward scroll for the long-title hero"
+        }
+        composeRule.runOnIdle { heroState.value = heroForTest(rotatedLongItem) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true).assertIsFocused()
+        composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionUp) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true).assertIsFocused()
+        assertEquals(initialPanelBounds.top.value, composeRule.onNodeWithTag("hero-panel", useUnmergedTree = true).getUnclippedBoundsInRoot().top.value, 0.5f)
+        assertEquals(initialHeadingBounds.top.value, composeRule.onNodeWithTag("hero-heading", useUnmergedTree = true).getUnclippedBoundsInRoot().top.value, 0.5f)
+        assertEquals(initialActionBounds.top.value, composeRule.onNodeWithTag("hero-action-column", useUnmergedTree = true).getUnclippedBoundsInRoot().top.value, 0.5f)
+        assertEquals(rotatedLongItem.contentKey(), heroState.value.item?.contentKey())
+        assertEquals(rotatedLongItem.artworkUrl, heroState.value.artworkUrl)
     }
 
     @Test
@@ -368,7 +564,7 @@ class DpadFocusTraversalTest {
                         heroState.value = heroForTest(candidates[nextIndex])
                     }
                 },
-                onArtworkColor = {}
+                onArtworkColor = { _, _ -> }
             )
             LaunchedEffect(Unit) { resumeRequester.requestFocus() }
         }
@@ -439,7 +635,7 @@ class DpadFocusTraversalTest {
                 heroCandidates = listOfNotNull(shortHero.item, longHero.item),
                 onHeroFocused = {},
                 onItemSelected = {},
-                onArtworkColor = {}
+                onArtworkColor = { _, _ -> }
             )
             LaunchedEffect(Unit) { resumeRequester.requestFocus() }
         }
@@ -495,7 +691,7 @@ class DpadFocusTraversalTest {
                     downFocusRequester = firstRowRequester,
                     onHeroFocused = {},
                     onItemSelected = {},
-                    onArtworkColor = {}
+                    onArtworkColor = { _, _ -> }
                 )
                 Box(
                     Modifier
@@ -537,27 +733,38 @@ class DpadFocusTraversalTest {
             colors = emptyList(),
             artworkUrl = ""
         )
+        val rotatedItem = item.copy(
+            title = "Rotated Hero Movie",
+            artworkUrl = "rotated-hero-art",
+            providerContentId = "rotated-hero"
+        )
         val heroState = mutableStateOf(heroForTest(item))
-        val expectedHeroKey = item.contentKey()
-        val expectedHeroArtwork = item.artworkUrl
 
         composeRule.setContent {
             val scrollState = rememberScrollState()
             val heroFocusGuard = rememberHeroFocusScrollGuard(scrollState)
+            val defaultBringIntoViewSpec = LocalBringIntoViewSpec.current
             LaunchedEffect(scrollState.value) { observedScrollOffset.set(scrollState.value) }
             Box(Modifier.height(520.dp)) {
-                Column(Modifier.verticalScroll(scrollState, enabled = !heroFocusGuard.hasFocus.value)) {
+                CompositionLocalProvider(
+                    LocalBringIntoViewSpec provides if (heroFocusGuard.canScroll.value) {
+                        defaultBringIntoViewSpec
+                    } else {
+                        HeroLockedBringIntoViewSpec
+                    }
+                ) {
+                    Column(Modifier.verticalScroll(scrollState, enabled = heroFocusGuard.canScroll.value)) {
                     HeroPanel(
                         hero = heroState.value,
                         palette = orbitalPalette,
                         homeFocusRequester = FocusRequester(),
                         resumeFocusRequester = resumeRequester,
-                        heroCandidates = listOf(item),
+                        heroCandidates = listOf(item, rotatedItem),
                         downFocusRequester = firstRowRequester,
                         onHeroFocused = {},
                         onHeroFocusChanged = heroFocusGuard.onFocusChanged,
                         onItemSelected = {},
-                        onArtworkColor = {}
+                        onArtworkColor = { _, _ -> }
                     )
                     Spacer(Modifier.height(18.dp))
                     MediaRail(
@@ -568,8 +775,11 @@ class DpadFocusTraversalTest {
                         onHeroChanged = {},
                         onItemSelected = {},
                         firstFocusRequester = firstRowRequester,
-                        upFocusRequester = resumeRequester
+                        upFocusRequester = resumeRequester,
+                        onRailEntered = heroFocusGuard.onRailEntered,
+                        onRailExited = heroFocusGuard.onRailExited
                     )
+                    }
                 }
             }
             LaunchedEffect(Unit) { resumeRequester.requestFocus() }
@@ -616,6 +826,12 @@ class DpadFocusTraversalTest {
             "Entering Continue Watching should be the first transition that scrolls Home"
         }
 
+        // Rotation can occur while the row owns focus. It must not queue a stale relocation that
+        // wins after Up returns focus to the still-mounted hero action group.
+        composeRule.runOnIdle { heroState.value = heroForTest(rotatedItem) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true).assertIsFocused()
+
         // Returning upward is the TV reproduction that exposed the race: the row has already
         // scrolled the parent, and focus relocation can otherwise leave the hero permanently
         // cropped under the top bar.
@@ -636,8 +852,8 @@ class DpadFocusTraversalTest {
         )
         val returnedHeadingBounds = composeRule.onNodeWithTag("hero-heading", useUnmergedTree = true).getUnclippedBoundsInRoot()
         assertEquals("Hero heading must return to its initial vertical position", initialHeadingBounds.top.value, returnedHeadingBounds.top.value, 0.5f)
-        assertEquals("Resume -> Details -> rail -> Resume must not replace the hero candidate", expectedHeroKey, heroState.value.item?.contentKey())
-        assertEquals("Resume -> Details -> rail -> Resume must not reset hero artwork", expectedHeroArtwork, heroState.value.artworkUrl)
+        assertEquals("Resume -> Details -> rail -> Resume must preserve the rotated hero", rotatedItem.contentKey(), heroState.value.item?.contentKey())
+        assertEquals("Resume -> Details -> rail -> Resume must preserve rotated artwork", rotatedItem.artworkUrl, heroState.value.artworkUrl)
     }
 
     private fun assertTwoByTwoTraversal(screen: String) {
