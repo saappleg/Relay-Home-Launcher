@@ -174,6 +174,35 @@ internal data class Hero(
     val item: MediaItem? = null
 )
 
+/** The two directions exposed by the focused Home hero carousel. */
+internal enum class HeroNavigationDirection {
+    PREVIOUS,
+    NEXT
+}
+
+/**
+ * Returns the candidate selected by a manual hero move. An empty candidate list is a no-op;
+ * otherwise the carousel wraps, including when the current hero is temporarily not present in
+ * the refreshed candidate list.
+ */
+internal fun heroNavigationIndex(
+    currentIndex: Int,
+    candidateCount: Int,
+    direction: HeroNavigationDirection
+): Int? {
+    if (candidateCount <= 0) return null
+    val anchor = if (currentIndex in 0 until candidateCount) currentIndex else {
+        when (direction) {
+            HeroNavigationDirection.PREVIOUS -> 0
+            HeroNavigationDirection.NEXT -> -1
+        }
+    }
+    return Math.floorMod(
+        anchor + if (direction == HeroNavigationDirection.NEXT) 1 else -1,
+        candidateCount
+    )
+}
+
 internal data class RelayPalette(val accent: Color, val glow: Color, val backdrop: Color)
 
 internal val midnight = Color(0xFF050608)

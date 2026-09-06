@@ -70,9 +70,12 @@ class SmartTubeNowPlayingServiceTest {
     }
 
     @Test
-    fun feedPayload_requiresAnExactReturnedProfileEcho() {
+    fun feedPayload_acceptsMissingEcho_butRejectsMismatchedEcho() {
         assertTrue(relayTubeFeedProfileMatchesForTest(" profile-1 ", "profile-1"))
-        assertFalse(relayTubeFeedProfileMatchesForTest("profile-1", null))
+        // RelayTube beta scopes the response by the requested provider-call argument but does
+        // not currently echo profile_id in its feeds Bundle.
+        assertTrue(relayTubeFeedProfileMatchesForTest("profile-1", null))
+        assertTrue(relayTubeFeedProfileMatchesForTest("profile-1", ""))
         assertFalse(relayTubeFeedProfileMatchesForTest("profile-1", "profile-2"))
         assertFalse(relayTubeFeedProfileMatchesForTest(null, "profile-1"))
     }

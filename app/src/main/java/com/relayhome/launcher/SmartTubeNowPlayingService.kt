@@ -379,8 +379,13 @@ private fun normalizeRelayTubeArtwork(value: String?): String? {
 
 private fun relayTubeFeedProfileMatches(requestedProfileId: String?, returnedProfileId: String?): Boolean {
     val requested = normalizeRelayTubeProfileId(requestedProfileId) ?: return false
-    val returned = normalizeRelayTubeProfileId(returnedProfileId) ?: return false
-    return requested == returned
+    // RelayTube beta's current provider scopes feeds by the requested `call` argument but does
+    // not echo profile_id in the returned Bundle. The provider URI is package-scoped and the
+    // caller already verifies both the active profile and refresh generation before this check,
+    // so an absent echo is safe. If a future/provider variant does return an id, never accept a
+    // response for a different profile.
+    val returned = normalizeRelayTubeProfileId(returnedProfileId)
+    return returned == null || requested == returned
 }
 
 private fun JSONObject.firstText(vararg names: String): String? = names

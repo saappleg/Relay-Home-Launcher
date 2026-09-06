@@ -117,6 +117,10 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.vectorResource
@@ -398,6 +402,7 @@ internal fun HomeScreen(
     onPeekProvider: (Provider?) -> Unit,
     onSettings: () -> Unit,
     onHeroChanged: (Hero) -> Unit,
+    onHeroNavigate: (HeroNavigationDirection) -> Unit = {},
     onItemSelected: (MediaItem) -> Unit,
     heroCandidates: List<MediaItem>,
     nuvioItems: List<MediaItem>,
@@ -631,7 +636,8 @@ internal fun HomeScreen(
                             showHeroAmbient()
                             scrollHomeToTop()
                         },
-                        onItemSelected = onItemSelected
+                        onItemSelected = onItemSelected,
+                        onNavigateHero = onHeroNavigate
                     ) { accent ->
                         if (accent != null) onHeroChanged(hero.copy(palette = hero.palette.copy(accent = accent, glow = accent.copy(alpha = .32f))))
                     }
@@ -1301,6 +1307,7 @@ internal fun HeroPanel(
     downFocusRequester: FocusRequester? = null,
     onHeroFocused: () -> Unit,
     onItemSelected: (MediaItem) -> Unit,
+    onNavigateHero: (HeroNavigationDirection) -> Unit = {},
     onArtworkColor: (Color?) -> Unit
 ) {
     val context = LocalContext.current
@@ -1318,6 +1325,24 @@ internal fun HeroPanel(
             .fillMaxWidth()
             .height(420.dp)
             .background(midnight)
+            .onPreviewKeyEvent { event ->
+                val direction = when (event.key) {
+                    Key.DirectionLeft -> HeroNavigationDirection.PREVIOUS
+                    Key.DirectionRight -> HeroNavigationDirection.NEXT
+                    else -> null
+                }
+                if (direction == null || heroCandidates.size <= 1) {
+                    false
+                } else {
+                    // Consume both phases so a directional event cannot fall through to the
+                    // action button's ordinary focus graph. Only KeyDown changes the candidate;
+                    // repeated KeyDown events remain valid rapid carousel navigation.
+                    if (event.type == KeyEventType.KeyDown) {
+                        onNavigateHero(direction)
+                    }
+                    true
+                }
+            }
     ) {
         AsyncImage(
             model = heroImageRequest,
@@ -1353,6 +1378,7 @@ internal fun HeroPanel(
                 accent = palette.accent,
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
+                    .testTag("hero-pagination")
                     .padding(end = RelayTvMargins.screenHorizontal, bottom = 24.dp)
             )
         }

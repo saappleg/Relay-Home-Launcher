@@ -42,9 +42,12 @@ import com.relayhome.launcher.ui.home.ActionButton
 import com.relayhome.launcher.ui.home.HeroPanel
 import com.relayhome.launcher.ui.shared.HomeRow
 import com.relayhome.launcher.ui.shared.Hero
+import com.relayhome.launcher.ui.shared.HeroNavigationDirection
 import com.relayhome.launcher.ui.shared.MediaItem
 import com.relayhome.launcher.ui.shared.Provider
 import com.relayhome.launcher.ui.shared.contentKey
+import com.relayhome.launcher.ui.shared.heroSubtitle
+import com.relayhome.launcher.ui.shared.heroNavigationIndex
 import com.relayhome.launcher.ui.shared.orbitalPalette
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -255,6 +258,112 @@ class DpadFocusTraversalTest {
         composeRule.onNodeWithText("▶  Resume").assertIsDisplayed().assertIsFocused()
         composeRule.onNodeWithText("ⓘ  Details").assertIsDisplayed()
     }
+
+    @Test
+    fun heroCarousel_leftRightWraps_rebindsActions_andKeepsFocusTargetMounted() {
+        val firstItem = MediaItem(
+            title = "First Movie",
+            provider = Provider.NUVIO,
+            progress = 0f,
+            colors = emptyList(),
+            artworkUrl = ""
+        )
+        val resumeItem = MediaItem(
+            title = "Resume Show",
+            provider = Provider.NUVIO,
+            progress = 0.45f,
+            colors = emptyList(),
+            artworkUrl = "",
+            episodeInfo = "S01 • E02"
+        )
+        val lastItem = MediaItem(
+            title = "Last Movie",
+            provider = Provider.NUVIO,
+            progress = 0f,
+            colors = emptyList(),
+            artworkUrl = ""
+        )
+        val candidates = listOf(firstItem, resumeItem, lastItem)
+        val heroState = mutableStateOf(heroForTest(firstItem))
+        val resumeRequester = FocusRequester()
+        val directions = mutableListOf<HeroNavigationDirection>()
+
+        composeRule.setContent {
+            val hero = heroState.value
+            HeroPanel(
+                hero = hero,
+                palette = orbitalPalette,
+                homeFocusRequester = FocusRequester(),
+                resumeFocusRequester = resumeRequester,
+                heroCandidates = candidates,
+                onHeroFocused = {},
+                onItemSelected = {},
+                onNavigateHero = { direction ->
+                    directions += direction
+                    val currentIndex = candidates.indexOfFirst {
+                        it.contentKey() == heroState.value.item?.contentKey()
+                    }
+                    heroNavigationIndex(currentIndex, candidates.size, direction)?.let { nextIndex ->
+                        heroState.value = heroForTest(candidates[nextIndex])
+                    }
+                },
+                onArtworkColor = {}
+            )
+            LaunchedEffect(Unit) { resumeRequester.requestFocus() }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText("▶  Play").assertIsFocused()
+        composeRule.onNodeWithTag("hero-pagination").assertIsDisplayed()
+
+        // Left from the first candidate wraps to the final candidate. The action button itself
+        // stays focused while only its label/content is rebound.
+        composeRule.onNodeWithText("▶  Play").performKeyInput { pressKey(Key.DirectionLeft) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Last Movie").assertIsDisplayed()
+        composeRule.onNodeWithText("▶  Play").assertIsFocused()
+
+        // Move to the middle item and verify Play -> Resume is a real rebinding, not stale text.
+        composeRule.onNodeWithText("▶  Play").performKeyInput { pressKey(Key.DirectionRight) }
+        composeRule.onNodeWithText("▶  Play").performKeyInput { pressKey(Key.DirectionRight) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("Resume Show").assertIsDisplayed()
+        composeRule.onNodeWithText("▶  Resume").assertIsDisplayed().assertIsFocused()
+        composeRule.onNodeWithText("▶  Play").assertDoesNotExist()
+
+        // A burst of repeated input must remain deterministic and never strand the focused
+        // action while the candidate state changes on every event.
+        composeRule.onNodeWithText("▶  Resume").performKeyInput {
+            repeat(8) { pressKey(Key.DirectionRight) }
+        }
+        composeRule.waitForIdle()
+        assertEquals(
+            listOf(
+                HeroNavigationDirection.PREVIOUS,
+                HeroNavigationDirection.NEXT,
+                HeroNavigationDirection.NEXT,
+                HeroNavigationDirection.NEXT,
+                HeroNavigationDirection.NEXT,
+                HeroNavigationDirection.NEXT,
+                HeroNavigationDirection.NEXT,
+                HeroNavigationDirection.NEXT,
+                HeroNavigationDirection.NEXT,
+                HeroNavigationDirection.NEXT,
+                HeroNavigationDirection.NEXT
+            ),
+            directions
+        )
+        composeRule.onNodeWithText("First Movie").assertIsDisplayed()
+        composeRule.onNodeWithText("▶  Play").assertIsFocused()
+    }
+
+    private fun heroForTest(item: MediaItem): Hero = Hero(
+        title = item.title,
+        subtitle = item.heroSubtitle(),
+        palette = orbitalPalette,
+        artworkUrl = item.artworkUrl,
+        item = item
+    )
 
     private fun assertLongNuvioMovieHero(title: String, progress: Float, expectedAction: String) {
         // These are the two production titles that exposed the clipping: their provider

@@ -36,6 +36,7 @@ import com.relayhome.launcher.ui.shared.Destination
 import com.relayhome.launcher.ui.shared.AppIconShape
 import com.relayhome.launcher.ui.shared.AppSortOrder
 import com.relayhome.launcher.ui.shared.Hero
+import com.relayhome.launcher.ui.shared.HeroNavigationDirection
 import com.relayhome.launcher.ui.shared.HomeRow
 import com.relayhome.launcher.ui.shared.MediaItem
 import com.relayhome.launcher.ui.shared.Provider
@@ -44,6 +45,7 @@ import com.relayhome.launcher.ui.shared.RelayAppearance
 import com.relayhome.launcher.ui.shared.RelayPalette
 import com.relayhome.launcher.ui.shared.contentKey
 import com.relayhome.launcher.ui.shared.heroSubtitle
+import com.relayhome.launcher.ui.shared.heroNavigationIndex
 import com.relayhome.launcher.ui.shared.midnight
 import com.relayhome.launcher.ui.shared.orbitalPalette
 import com.relayhome.launcher.ui.shared.paletteFor
@@ -277,6 +279,35 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
 
     fun onHeroChanged(hero: Hero) {
         _state.update { it.copy(hero = hero) }
+    }
+
+    /**
+     * Moves the focused Home hero without changing focus targets. Keeping the action buttons
+     * mounted while only rebinding their content avoids the rapid-D-pad focus crashes that can
+     * happen when a carousel replaces its entire subtree for every key event.
+     */
+    fun navigateHero(direction: HeroNavigationDirection) {
+        val current = _state.value
+        val candidates = current.heroCandidates
+        val currentIndex = current.hero.item?.let { active ->
+            candidates.indexOfFirst { it.contentKey() == active.contentKey() }
+        } ?: -1
+        if (heroNavigationIndex(currentIndex, candidates.size, direction) == null) return
+
+        heroRotationJob?.cancel()
+        _state.update { latest ->
+            // This method runs on the holder's immediate Main scope. Derive the Hero from the
+            // latest state inside the atomic update so a burst of key repeats cannot apply a
+            // stale index after a provider refresh.
+            val latestCandidates = latest.heroCandidates
+            val latestIndex = latest.hero.item?.let { active ->
+                latestCandidates.indexOfFirst { it.contentKey() == active.contentKey() }
+            } ?: -1
+            val resolvedIndex = heroNavigationIndex(latestIndex, latestCandidates.size, direction)
+            val resolvedItem = resolvedIndex?.let(latestCandidates::get)
+            if (resolvedItem == null) latest else latest.copy(hero = heroForCandidate(latest.hero, resolvedItem))
+        }
+        startHeroRotationIfNeeded()
     }
 
     /**
@@ -817,22 +848,24 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 if (candidates.isEmpty()) return@launch
                 val item = candidates[index % candidates.size]
                 val currentHero = _state.value.hero
-                val nextHero = if (currentHero.item?.contentKey() == item.contentKey()) {
-                    currentHero.copy(
-                        title = item.showTitle ?: item.title,
-                        subtitle = item.heroSubtitle(),
-                        artworkUrl = item.artworkUrl,
-                        item = item
-                    )
-                } else {
-                    Hero(item.showTitle ?: item.title, item.heroSubtitle(), paletteFor(item), item.artworkUrl, item)
-                }
-                _state.update { it.copy(hero = nextHero) }
+                _state.update { it.copy(hero = heroForCandidate(currentHero, item)) }
                 delay(11_000)
                 index = (index + 1) % _state.value.heroCandidates.size.coerceAtLeast(1)
             }
         }
     }
+
+    private fun heroForCandidate(currentHero: Hero, item: MediaItem): Hero =
+        if (currentHero.item?.contentKey() == item.contentKey()) {
+            currentHero.copy(
+                title = item.showTitle ?: item.title,
+                subtitle = item.heroSubtitle(),
+                artworkUrl = item.artworkUrl,
+                item = item
+            )
+        } else {
+            Hero(item.showTitle ?: item.title, item.heroSubtitle(), paletteFor(item), item.artworkUrl, item)
+        }
 
     private fun inspectLauncherState() {
         stateScope.launch {

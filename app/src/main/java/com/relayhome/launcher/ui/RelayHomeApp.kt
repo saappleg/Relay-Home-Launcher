@@ -82,6 +82,7 @@ internal fun RelayHomeApp(
                     onPeekProvider = stateHolder::setPeekProvider,
                     onSettings = { stateHolder.navigate(Destination.SETTINGS) },
                     onHeroChanged = stateHolder::onHeroChanged,
+                    onHeroNavigate = stateHolder::navigateHero,
                     onItemSelected = stateHolder::openMediaDetails,
                     heroCandidates = state.heroCandidates,
                     nuvioItems = state.nuvioMedia,
