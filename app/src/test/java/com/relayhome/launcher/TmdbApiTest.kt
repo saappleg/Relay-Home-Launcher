@@ -44,12 +44,6 @@ class TmdbApiTest {
     }
 
     @Test
-    fun publicMetadataCalls_emptyInputShortCircuitsWithoutNetwork() {
-        // Empty input is a no-network smoke check even if a developer has a local TMDB key.
-        assertEquals(emptyList<MediaItem>(), TmdbApi.enrichEpisodes(emptyList()))
-    }
-
-    @Test
     fun upcomingEnrichment_isCappedToAReasonableRailSizedBatch() {
         val items = List(40) { index ->
             MediaItem(

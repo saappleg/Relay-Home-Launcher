@@ -6,7 +6,6 @@ import org.json.JSONObject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.graphics.Color
 import com.relayhome.launcher.ui.shared.MediaItem
@@ -200,20 +199,6 @@ internal object TmdbTitleMatcher {
 internal object TmdbApi {
     private const val baseUrl = "https://api.themoviedb.org/3"
     private val apiKey get() = MetadataApiKeyAccess.tmdbApiKey()
-
-    fun enrichEpisodes(items: List<MediaItem>): List<MediaItem> =
-        enrichEpisodesResult(items).getOrDefault(items)
-
-    internal fun enrichEpisodesResult(items: List<MediaItem>): Result<List<MediaItem>> {
-        if (apiKey.isBlank()) return Result.failure(TmdbNotConfiguredException())
-        return runBlocking(Dispatchers.IO) {
-            tmdbCall {
-                buildList {
-                    for (item in items) add(isolateTmdbItemFailure { enrichEpisode(item) } ?: item)
-                }
-            }
-        }
-    }
 
     suspend fun enrichEpisodeDetails(item: MediaItem): MediaItem = withContext(Dispatchers.IO) {
         enrichEpisodeDetailsResult(item).getOrDefault(item)
