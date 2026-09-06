@@ -39,32 +39,49 @@ if [ "$state" != "device" ] || {
   exit 1
 fi
 
-# Pixel 2's default profile is portrait. Lock rotation after boot and poll the
-# actual input surface so focus/display tests run against a TV-shaped landscape
-# surface without assuming that one settings write took effect immediately.
+# Pixel 2's default profile is portrait. Keep rotation locked at zero because
+# the launch skin is already landscape, then force the logical display size and
+# poll the actual physical/logical geometry instead of relying on a
+# SurfaceOrientation line that API 34 may not expose.
 adb -s "$serial" shell settings put system accelerometer_rotation 0
-adb -s "$serial" shell settings put system user_rotation 1
-adb -s "$serial" shell cmd window user-rotation lock 1 >/dev/null 2>&1 || true
-orientation_started="$(date +%s)"
-orientation_deadline=$((orientation_started + 45))
+adb -s "$serial" shell settings put system user_rotation 0
+adb -s "$serial" shell cmd window user-rotation lock 0 >/dev/null 2>&1 || true
+adb -s "$serial" shell wm size 1920x1080
+geometry_started="$(date +%s)"
+geometry_deadline=$((geometry_started + 45))
 now="$(date +%s)"
-orientation=""
-while [ "$now" -lt "$orientation_deadline" ]; do
-  orientation="$(adb -s "$serial" shell dumpsys input 2>/dev/null | sed -n 's/.*SurfaceOrientation: \([0-3]\).*/\1/p' | tr -d '\r' | tail -1 || true)"
-  printf 'Emulator surface orientation: %s\n' "${orientation:-unavailable}"
-  if [ "$orientation" = "1" ] || [ "$orientation" = "3" ]; then
+physical_size=""
+logical_size=""
+display_size=""
+wm_size=""
+while [ "$now" -lt "$geometry_deadline" ]; do
+  wm_size="$(adb -s "$serial" shell wm size 2>/dev/null | tr -d '\r' || true)"
+  physical_size="$(printf '%s\n' "$wm_size" | sed -n 's/^[[:space:]]*Physical size:[[:space:]]*//p' | tail -1)"
+  logical_size="$(printf '%s\n' "$wm_size" | sed -n 's/^[[:space:]]*Override size:[[:space:]]*//p' | tail -1)"
+  if [ -z "$logical_size" ]; then
+    logical_size="$physical_size"
+  fi
+  display_dump="$(adb -s "$serial" shell dumpsys display 2>/dev/null | tr -d '\r' || true)"
+  display_size="$(printf '%s\n' "$display_dump" | sed -n \
+    -e 's/.*real \([0-9][0-9]*\) x \([0-9][0-9]*\).*/\1x\2/p' \
+    -e 's/.*DisplayDeviceInfo{[^,]*, \([0-9][0-9]*\) x \([0-9][0-9]*\),.*/\1x\2/p' | head -1)"
+  printf 'Emulator display geometry: physical=%s logical=%s display=%s\n' \
+    "${physical_size:-unavailable}" "${logical_size:-unavailable}" "${display_size:-unavailable}"
+  if [ "$physical_size" = "1920x1080" ] && [ "$logical_size" = "1920x1080" ]; then
     break
   fi
-  adb -s "$serial" shell settings put system user_rotation 1 || true
+  adb -s "$serial" shell wm size 1920x1080 || true
   sleep 2
   now="$(date +%s)"
 done
 
-adb -s "$serial" shell wm size | tr -d '\r'
-if [ "$orientation" != "1" ] && [ "$orientation" != "3" ]; then
-  echo "Expected a landscape emulator surface, got orientation ${orientation:-unavailable}." >&2
+printf 'Final emulator wm size:\n%s\n' "$wm_size"
+if [ "$physical_size" != "1920x1080" ] || [ "$logical_size" != "1920x1080" ] || [ "$display_size" != "1920x1080" ]; then
+  echo "Expected a 1920x1080 physical, logical, and display-service surface." >&2
   adb devices -l || true
-  adb -s "$serial" shell dumpsys input | tail -80 || true
+  adb -s "$serial" shell wm size || true
+  adb -s "$serial" shell wm density || true
+  adb -s "$serial" shell dumpsys display | tail -120 || true
   adb -s "$serial" shell dumpsys window displays | tail -80 || true
   exit 1
 fi

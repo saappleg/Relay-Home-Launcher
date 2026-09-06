@@ -166,16 +166,15 @@ jobs:
           # animations disabled for deterministic focus and semantics assertions.
           disable-animations: true
           disable-linux-hw-accel: false
-          # The runner creates the AVD before launching it. Set the AVD's initial orientation
-          # at that point instead of passing `-screen landscape`: on current emulator builds
-          # `-screen` controls touch input and rejects orientation values, which leaves no ADB
-          # device for the runner to boot (run 34031458509).
+          # The runner creates the AVD before launching it. Configure its LCD as a TV-shaped
+          # fallback before launch; the explicit -skin option below makes the framebuffer size
+          # deterministic even when the hosted Pixel 2 profile supplies portrait skin values.
           # The action splits this input at newlines and executes each result
           # separately, so invoke the complete pre-launch helper on one line.
           pre-emulator-launch-script: sh .github/workflows/prepare-emulator.sh
           # Avoid the hosted runner's intermittent SwiftShader ColorBuffer loss during
           # Compose semantics tests; the suite does not require a rendered GPU surface.
-          emulator-options: "-no-window -noaudio -no-boot-anim -gpu off -no-snapshot"
+          emulator-options: "-no-window -noaudio -no-boot-anim -gpu off -no-snapshot -skin 1920x1080"
           # Leave enough time for image installation and first boot, but keep the action
           # bounded well inside the job timeout so a broken hosted image fails diagnostically.
           emulator-boot-timeout: 900
