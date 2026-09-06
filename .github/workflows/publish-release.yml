@@ -27,6 +27,7 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     permissions:
       contents: write
 
@@ -151,7 +152,7 @@ jobs:
           ram-size: 2048M
           heap-size: 512M
           disable-animations: true
-          script: ./gradlew :app:connectedCheck
+          script: ./gradlew :app:connectedCheck --stacktrace --console=plain
 
       - name: Configure release signing
         env:
