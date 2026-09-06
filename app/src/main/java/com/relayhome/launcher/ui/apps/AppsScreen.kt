@@ -22,7 +22,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -90,7 +89,6 @@ import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -371,11 +369,28 @@ internal fun allAppsRowHeight(
     ).coerceAtLeast(0.dp) / rowCount
 }
 
-internal fun allAppsTileArtworkHeight(rowHeight: Dp, compactHeight: Boolean): Dp {
-    val labelHeight = if (compactHeight) 18.dp else 20.dp
+internal fun allAppsTileArtworkHeight(
+    rowHeight: Dp,
+    compactHeight: Boolean,
+    tileWidth: Dp? = null
+): Dp {
+    val labelHeight = allAppsTileLabelHeight(compactHeight)
     val labelSpacing = if (compactHeight) 4.dp else 7.dp
-    return (rowHeight - labelSpacing - labelHeight).coerceAtLeast(0.dp)
+    val availableHeight = (rowHeight - labelSpacing - labelHeight).coerceAtLeast(0.dp)
+    val preferredAspectHeight = tileWidth?.let { it * (9f / 16f) }
+    return if (preferredAspectHeight != null && preferredAspectHeight <= availableHeight) {
+        preferredAspectHeight
+    } else {
+        availableHeight
+    }
 }
+
+/**
+ * A single-line TV label is measured by Compose, but reserving its estimated line height keeps
+ * the measured text and the artwork inside the fixed row even when the label is ellipsized.
+ */
+internal fun allAppsTileLabelHeight(compactHeight: Boolean): Dp =
+    if (compactHeight) 18.dp else 20.dp
 
 @Composable
 @OptIn(ExperimentalComposeUiApi::class)
@@ -407,6 +422,9 @@ internal fun AllAppsGrid(
             rowSpacing = rowSpacing,
             bottomPadding = bottomPadding
         )
+        val tileWidth = (
+            maxWidth - columnSpacing * (appColumns - 1)
+        ).coerceAtLeast(0.dp) / appColumns
         fun requesterFor(localIndex: Int?): FocusRequester? = localIndex
             ?.takeIf { it in pageApps.indices }
             ?.let { appFocusRequesters[pageApps[it].packageName] }
@@ -440,7 +458,9 @@ internal fun AllAppsGrid(
                                     app = app,
                                     palette = palette,
                                     iconShape = iconShape,
+                                    compactHeight = compactHeight,
                                     rowHeight = rowHeight,
+                                    tileWidth = tileWidth,
                                     modifier = Modifier.fillMaxHeight(),
                                     focusRequester = appFocusRequesters[app.packageName],
                                     upFocusRequester = requesterFor(upIndex) ?: backFocusRequester,
@@ -484,6 +504,8 @@ internal fun InstalledAppTile(
     palette: RelayPalette,
     iconShape: AppIconShape = AppIconShape.MATCH_EACH_APP,
     rowHeight: Dp? = null,
+    compactHeight: Boolean? = null,
+    tileWidth: Dp? = null,
     modifier: Modifier = Modifier,
     focusRequester: FocusRequester? = null,
     upFocusRequester: FocusRequester? = null,
@@ -502,8 +524,7 @@ internal fun InstalledAppTile(
     var selectHoldJob by remember { mutableStateOf<Job?>(null) }
     var longPressHandled by remember { mutableStateOf(false) }
     val showFocus = focused && !menuOpen
-    val scale by animateFloatAsState(if (showFocus) 1.04f else 1f, label = "app tile focus")
-    val compactHeight = LocalConfiguration.current.screenHeightDp < 500
+    val isCompactHeight = compactHeight ?: (LocalConfiguration.current.screenHeightDp < 500)
     val shape = RoundedCornerShape(16.dp)
     val artwork = if (app.hasLeanbackBanner || app.hasLeanbackLogo) {
         rememberDrawableBitmap(
@@ -526,9 +547,11 @@ internal fun InstalledAppTile(
             longPressHandled = false
         }
     }
-    val labelHeight = if (compactHeight) 18.dp else 20.dp
-    val labelSpacing = if (compactHeight) 4.dp else 7.dp
-    val artworkHeight = rowHeight?.let { allAppsTileArtworkHeight(it, compactHeight) }
+    val labelHeight = allAppsTileLabelHeight(isCompactHeight)
+    val labelSpacing = if (isCompactHeight) 4.dp else 7.dp
+    val artworkHeight = rowHeight?.let { allAppsTileArtworkHeight(it, isCompactHeight, tileWidth) }
+    val iconSize = artworkHeight?.let { (it - 12.dp).coerceAtLeast(0.dp).coerceAtMost(76.dp) } ?: 76.dp
+    val logoPadding = artworkHeight?.let { (it / 4f).coerceAtMost(18.dp).coerceAtLeast(0.dp) } ?: 18.dp
     Column(
         modifier = modifier.then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .then(if (upFocusRequester != null || downFocusRequester != null || leftFocusRequester != null || rightFocusRequester != null) Modifier.focusProperties {
@@ -538,7 +561,6 @@ internal fun InstalledAppTile(
                 if (rightFocusRequester != null) right = rightFocusRequester
             } else Modifier)
             .fillMaxWidth()
-            .scale(scale)
             .onPreviewKeyEvent { event ->
                 val nativeEvent = event.nativeKeyEvent
                 val pageMoveHandled = if (nativeEvent.action == KeyEvent.ACTION_DOWN && nativeEvent.repeatCount == 0) {
@@ -593,6 +615,7 @@ internal fun InstalledAppTile(
         Box(
             Modifier
                 .fillMaxWidth()
+            .testTag("installed-app-tile-${app.packageName}")
                 .then(if (artworkHeight != null) Modifier.height(artworkHeight) else Modifier.aspectRatio(16f / 9f))
                 .clip(shape)
                 .background(if (showFocus) palette.accent.copy(alpha = .24f) else Color(0xFF20232A))
@@ -611,10 +634,10 @@ internal fun InstalledAppTile(
                     painter = BitmapPainter(artwork),
                     contentDescription = app.label,
                     contentScale = ContentScale.Fit,
-                    modifier = Modifier.fillMaxSize().padding(18.dp)
+                    modifier = Modifier.fillMaxSize().padding(logoPadding)
                 )
             } else {
-                LauncherAppIcon(app = app, palette = palette, focused = showFocus, iconSize = 76.dp, shapePreference = iconShape)
+                LauncherAppIcon(app = app, palette = palette, focused = showFocus, iconSize = iconSize, shapePreference = iconShape)
             }
             if (showFocus) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = .08f)))
         }
@@ -622,11 +645,11 @@ internal fun InstalledAppTile(
         Text(
             app.label,
             color = if (showFocus) ivory else muted,
-            fontSize = if (compactHeight) 12.sp else 13.sp,
+            fontSize = if (isCompactHeight) 12.sp else 13.sp,
             fontWeight = if (showFocus) FontWeight.SemiBold else FontWeight.Normal,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.fillMaxWidth().height(labelHeight)
+            modifier = Modifier.fillMaxWidth().height(labelHeight).testTag("installed-app-label-${app.packageName}")
         )
     }
 }

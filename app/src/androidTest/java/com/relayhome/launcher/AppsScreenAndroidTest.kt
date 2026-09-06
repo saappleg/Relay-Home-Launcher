@@ -75,6 +75,76 @@ class AppsScreenAndroidTest {
     }
 
     @Test
+    fun installedAppTiles_keepArtworkAndLabelInsideRows_acrossColumnAndHeightMatrix() {
+        for (compactHeight in listOf(false, true)) {
+            for (appColumns in 5..8) {
+                val apps = List(appColumns * 3) { index ->
+                    InstalledApp(
+                        label = "A deliberately long app label $index",
+                        packageName = "com.example.matrix${compactHeight}_$index",
+                        activityName = "MainActivity",
+                        artwork = ColorDrawable(0xFF20232A.toInt()),
+                        icon = ColorDrawable(0xFF6B9FFF.toInt()),
+                        hasRoundIcon = false,
+                        useCircularMask = false,
+                        hasLeanbackBanner = false
+                    )
+                }
+                val pageRows = apps.chunked(appColumns)
+                val focusRequesters = apps.associate { it.packageName to FocusRequester() }
+
+                composeRule.setContent {
+                    Box(Modifier.fillMaxSize().testTag("matrix-viewport")) {
+                        AllAppsGrid(
+                            pageRows = pageRows,
+                            pageApps = apps,
+                            appColumns = appColumns,
+                            appPage = 0,
+                            pageCount = 1,
+                            compactHeight = compactHeight,
+                            palette = orbitalPalette,
+                            appFocusRequesters = focusRequesters,
+                            backFocusRequester = FocusRequester(),
+                            menuOpen = false,
+                            onPageMoveLeft = { false },
+                            onPageMoveRight = { false },
+                            onLongClick = {},
+                            onClick = {}
+                        )
+                    }
+                }
+                composeRule.waitForIdle()
+
+                val viewport = composeRule.onNodeWithTag("matrix-viewport")
+                    .fetchSemanticsNode().boundsInRoot
+                for (rowIndex in 0 until 3) {
+                    val row = composeRule.onNodeWithTag("all-apps-row-$rowIndex")
+                    row.assertIsDisplayed()
+                    val rowBounds = row.fetchSemanticsNode().boundsInRoot
+                    for (column in 0 until appColumns) {
+                        val app = apps[rowIndex * appColumns + column]
+                        val label = composeRule.onNodeWithTag("installed-app-label-${app.packageName}")
+                        label.assertIsDisplayed()
+                        val labelBounds = label.fetchSemanticsNode().boundsInRoot
+                        assertTrue(
+                            "label must remain visible: compact=$compactHeight columns=$appColumns app=${app.packageName}",
+                            labelBounds.height > 0f && labelBounds.top >= rowBounds.top - 0.5f
+                        )
+                        assertTrue(
+                            "label must fit its row: compact=$compactHeight columns=$appColumns app=${app.packageName} label=$labelBounds row=$rowBounds",
+                            labelBounds.bottom <= rowBounds.bottom + 0.5f
+                        )
+                    }
+                }
+                assertTrue(
+                    "last row must remain inside the viewport: compact=$compactHeight columns=$appColumns",
+                    composeRule.onNodeWithTag("all-apps-row-2").fetchSemanticsNode().boundsInRoot.bottom <= viewport.bottom + 0.5f
+                )
+            }
+        }
+    }
+
+    @Test
     fun appActionsDialog_exposesHideFromAllAppsToggle() {
         val app = InstalledApp(
             label = "Example app",
