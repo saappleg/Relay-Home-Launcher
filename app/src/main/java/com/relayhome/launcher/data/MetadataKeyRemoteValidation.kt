@@ -119,6 +119,13 @@ internal object RelayMetadataApiKeyRemoteValidation : MetadataKeyRemoteValidatio
                     MetadataKeyValidationResult.invalid(rejectionMessage(service))
                 }
             }
+            MetadataKeyService.FANART, MetadataKeyService.TVDB -> {
+                // These providers expose different auth handshakes and are optional data
+                // sources. A successful bounded JSON response is sufficient for the generic
+                // credential probe; their typed lookup clients perform provider-specific parsing.
+                if (payload.length() > 0) MetadataKeyValidationResult.valid()
+                else MetadataKeyValidationResult.invalid(rejectionMessage(service))
+            }
         }
     }
 
@@ -137,6 +144,8 @@ internal object RelayMetadataApiKeyRemoteValidation : MetadataKeyRemoteValidatio
     private fun MetadataKeyService.displayName(): String = when (this) {
         MetadataKeyService.TMDB -> "TMDB"
         MetadataKeyService.OMDB -> "OMDb"
+        MetadataKeyService.FANART -> "Fanart.tv"
+        MetadataKeyService.TVDB -> "TheTVDB"
     }
 
     private object AndroidMetadataKeyValidationTransport : MetadataKeyValidationTransport {
@@ -151,6 +160,12 @@ internal object RelayMetadataApiKeyRemoteValidation : MetadataKeyRemoteValidatio
 
                 MetadataKeyService.OMDB -> {
                     "$OMDB_LOOKUP_URL?apikey=${encode(apiKey)}&i=$OMDB_VALIDATION_IMDB_ID&plot=short"
+                }
+                MetadataKeyService.FANART -> {
+                    "https://webservice.fanart.tv/v3/movies/tt0111161?api_key=${encode(apiKey)}"
+                }
+                MetadataKeyService.TVDB -> {
+                    "https://api4.thetvdb.com/v4/movies/tt0111161?apikey=${encode(apiKey)}"
                 }
             }
             val connection = (URL(url).openConnection() as HttpURLConnection).apply {

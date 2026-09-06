@@ -40,10 +40,18 @@ private const val enabledProvidersKey = "providers.enabled_names"
 private const val searchProviderKey = "search.default_provider"
 private const val dateFormatKey = "display.date_format"
 private const val profileImageUriKey = "profile.custom_image_uri"
+private const val wallpaperImageUriKey = "home.wallpaper_image_uri"
 private const val hiddenHomeRowsKey = "home.hidden_rows"
 private const val minimalHomeEnabledKey = "home.minimal_enabled"
 private const val weatherCityKey = "weather.city"
 private const val showHomeClockKey = "weather.show_home_clock"
+private const val temperatureUnitKey = "weather.temperature_unit"
+private const val heroCapKey = "home.hero.cap"
+private const val heroNuvioKey = "home.hero.include_nuvio"
+private const val heroContinueWatchingKey = "home.hero.include_continue_watching"
+private const val heroSubscriptionsKey = "home.hero.include_subscriptions"
+private const val heroNowPlayingKey = "home.hero.include_now_playing"
+private const val heroAutoRotateKey = "home.hero.auto_rotate"
 private const val hiddenAppPackagesKey = "apps.hidden_packages"
 private const val appSortOrderKey = "apps.sort_order"
 private const val appIconShapeKey = "apps.icon_shape"
@@ -51,8 +59,11 @@ private const val appLastUsedPrefix = "apps.last_used."
 private const val appInstalledAtPrefix = "apps.installed_at."
 private const val tmdbApiKey = "data_sources.tmdb_api_key"
 private const val omdbApiKey = "data_sources.omdb_api_key"
+private const val fanartApiKey = "data_sources.fanart_api_key"
+private const val tvdbApiKey = "data_sources.tvdb_api_key"
 private const val continueWatchingLimitPrefix = "continue_watching.provider_limit_"
 private const val profileMappingPrefix = "profile_mapping."
+private const val manualProfileMappingPrefix = "manual_nuvio_"
 private const val resolvedProfileMappingPrefix = "resolved_nuvio_"
 private const val candidateProfileMappingPrefix = "candidate_nuvio_"
 private const val legacyProfileMappingPrefix = "nuvio_"
@@ -144,6 +155,18 @@ internal object RelaySettingsRepository {
         updateSnapshotAndPersist(context) { it.remove(stringPreferencesKey(profileImageUriKey)) }
     }
 
+    fun loadWallpaperImageUri(context: Context): String? {
+        initialize(context)
+        return snapshot.get().values[stringPreferencesKey(wallpaperImageUriKey)]
+    }
+
+    fun saveWallpaperImageUri(context: Context, uri: String?) {
+        updateSnapshotAndPersist(context) {
+            val key = stringPreferencesKey(wallpaperImageUriKey)
+            if (uri.isNullOrBlank()) it.remove(key) else it[key] = uri
+        }
+    }
+
     fun loadHiddenHomeRows(context: Context): Set<HomeRow> {
         initialize(context)
         val stored = snapshot.get().values[stringSetPreferencesKey(hiddenHomeRowsKey)]
@@ -190,6 +213,44 @@ internal object RelaySettingsRepository {
         updateSnapshotAndPersist(context) {
             it[booleanPreferencesKey(showHomeClockKey)] = enabled
         }
+    }
+
+    fun loadTemperatureUnit(context: Context): String? {
+        initialize(context)
+        return snapshot.get().values[stringPreferencesKey(temperatureUnitKey)]
+    }
+
+    fun saveTemperatureUnit(context: Context, unit: String) {
+        updateSnapshotAndPersist(context) {
+            it[stringPreferencesKey(temperatureUnitKey)] = unit
+        }
+    }
+
+    fun loadHeroItemCap(context: Context): Int {
+        initialize(context)
+        return (snapshot.get().values[intPreferencesKey(heroCapKey)] ?: 4).coerceIn(1, 8)
+    }
+
+    fun saveHeroItemCap(context: Context, cap: Int) {
+        updateSnapshotAndPersist(context) { it[intPreferencesKey(heroCapKey)] = cap.coerceIn(1, 8) }
+    }
+
+    fun loadHeroSourceEnabled(context: Context, key: String, default: Boolean = true): Boolean {
+        initialize(context)
+        return snapshot.get().values[booleanPreferencesKey(key)] ?: default
+    }
+
+    fun saveHeroSourceEnabled(context: Context, key: String, enabled: Boolean) {
+        updateSnapshotAndPersist(context) { it[booleanPreferencesKey(key)] = enabled }
+    }
+
+    fun loadHeroAutoRotate(context: Context): Boolean {
+        initialize(context)
+        return snapshot.get().values[booleanPreferencesKey(heroAutoRotateKey)] ?: true
+    }
+
+    fun saveHeroAutoRotate(context: Context, enabled: Boolean) {
+        updateSnapshotAndPersist(context) { it[booleanPreferencesKey(heroAutoRotateKey)] = enabled }
     }
 
     fun loadHiddenAppPackages(context: Context): Set<String> {
@@ -318,6 +379,36 @@ internal object RelaySettingsRepository {
         updateSnapshotAndPersist(context) { it.remove(stringPreferencesKey(omdbApiKey)) }
     }
 
+    fun loadAdditionalMetadataApiKey(context: Context, service: MetadataKeyService): String? {
+        initialize(context)
+        val key = when (service) {
+            MetadataKeyService.FANART -> fanartApiKey
+            MetadataKeyService.TVDB -> tvdbApiKey
+            else -> return null
+        }
+        return snapshot.get().values[stringPreferencesKey(key)]
+    }
+
+    fun saveAdditionalMetadataApiKey(context: Context, service: MetadataKeyService, value: String): Boolean {
+        if (!RelayMetadataApiKeyValidationHook.validate(service, value).isValid) return false
+        val key = when (service) {
+            MetadataKeyService.FANART -> fanartApiKey
+            MetadataKeyService.TVDB -> tvdbApiKey
+            else -> return false
+        }
+        updateSnapshotAndPersist(context) { it[stringPreferencesKey(key)] = value.trim() }
+        return true
+    }
+
+    fun clearAdditionalMetadataApiKey(context: Context, service: MetadataKeyService) {
+        val key = when (service) {
+            MetadataKeyService.FANART -> fanartApiKey
+            MetadataKeyService.TVDB -> tvdbApiKey
+            else -> return
+        }
+        updateSnapshotAndPersist(context) { it.remove(stringPreferencesKey(key)) }
+    }
+
     fun loadContinueWatchingLimit(
         context: Context,
         provider: Provider,
@@ -347,6 +438,18 @@ internal object RelaySettingsRepository {
         return snapshot.get().values[stringPreferencesKey(profileMappingKey(resolvedProfileMappingPrefix, nuvioProfile))]
     }
 
+    fun getManualProfileMapping(context: Context, nuvioProfile: Int): String? {
+        initialize(context)
+        return snapshot.get().values[stringPreferencesKey(profileMappingKey(manualProfileMappingPrefix, nuvioProfile))]
+    }
+
+    fun saveManualProfileMapping(context: Context, nuvioProfile: Int, value: String?) {
+        updateSnapshotAndPersist(context) {
+            val key = stringPreferencesKey(profileMappingKey(manualProfileMappingPrefix, nuvioProfile))
+            if (value.isNullOrBlank()) it.remove(key) else it[key] = value
+        }
+    }
+
     fun saveProfileMappingCandidate(context: Context, nuvioProfile: Int, value: String?) {
         updateSnapshotAndPersist(context) {
             val key = stringPreferencesKey(profileMappingKey(candidateProfileMappingPrefix, nuvioProfile))
@@ -356,6 +459,7 @@ internal object RelaySettingsRepository {
 
     fun clearProfileMapping(context: Context, nuvioProfile: Int) {
         updateSnapshotAndPersist(context) {
+            it.remove(stringPreferencesKey(profileMappingKey(manualProfileMappingPrefix, nuvioProfile)))
             it.remove(stringPreferencesKey(profileMappingKey(candidateProfileMappingPrefix, nuvioProfile)))
             it.remove(stringPreferencesKey(profileMappingKey(resolvedProfileMappingPrefix, nuvioProfile)))
             it.remove(stringPreferencesKey(profileMappingKey(legacyProfileMappingPrefix, nuvioProfile)))
@@ -588,7 +692,9 @@ private fun safeAllKeys(preferences: SharedPreferences): Set<String> = runCatchi
 /** The two metadata services whose keys can be configured by the user. */
 internal enum class MetadataKeyService {
     TMDB,
-    OMDB
+    OMDB,
+    FANART,
+    TVDB
 }
 
 /** Result deliberately contains no candidate value, so accidental logging cannot print a key. */
@@ -612,9 +718,11 @@ internal fun interface MetadataKeyValidationHook {
 internal object RelayMetadataApiKeyRules {
     private val tmdbPattern = Regex("^[A-Za-z0-9]{32}$")
     private val omdbPattern = Regex("^[A-Za-z0-9]{8}$")
+    private val additionalPattern = Regex("^[A-Za-z0-9][A-Za-z0-9._-]{7,127}$")
 
     fun isValidTmdb(value: String): Boolean = tmdbPattern.matches(value.trim())
     fun isValidOmdb(value: String): Boolean = omdbPattern.matches(value.trim())
+    fun isValidAdditional(value: String): Boolean = additionalPattern.matches(value.trim())
 }
 
 /**
@@ -650,6 +758,11 @@ internal object RelayMetadataApiKeyValidationHook : MetadataKeyValidationHook {
                 MetadataKeyValidationResult.valid()
             } else {
                 MetadataKeyValidationResult.invalid("Enter the 8-character OMDb API key from your account.")
+            }
+            MetadataKeyService.FANART, MetadataKeyService.TVDB -> if (RelayMetadataApiKeyRules.isValidAdditional(normalized)) {
+                MetadataKeyValidationResult.valid()
+            } else {
+                MetadataKeyValidationResult.invalid("Enter a valid ${if (service == MetadataKeyService.FANART) "Fanart.tv" else "TheTVDB"} API key.")
             }
         }
     }

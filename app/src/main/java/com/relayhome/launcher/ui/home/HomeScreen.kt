@@ -75,6 +75,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
@@ -140,8 +141,6 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
 import androidx.core.graphics.drawable.toBitmap
 import androidx.palette.graphics.Palette
 import coil.compose.AsyncImage
@@ -197,6 +196,7 @@ private data class HomeAmbientFocus(
 
 /** Kept within Agent E's requested 3–6% range so the texture never competes with key art. */
 internal const val HOME_AMBIENT_GRAIN_ALPHA = 0.04f
+internal const val MINIMAL_HOME_TOP_INSET_DP = 52
 
 /**
  * Focus relocation must not move the Home page while the hero action group owns focus. The
@@ -384,7 +384,7 @@ internal fun HomeFocusAnchorHost(
     fallbackRequester: FocusRequester
 ) {
     Row(Modifier.size(1.dp)) {
-        HomeRow.entries.forEach { row ->
+        homeFocusAnchorRows().forEach { row ->
             val routeRequester = routeRequesters.getValue(row)
             val entryRequester = entryRequesters.getValue(row)
             var focused by remember(row) { mutableStateOf(false) }
@@ -410,6 +410,9 @@ internal fun HomeFocusAnchorHost(
     }
 }
 
+/** Every logical Home row gets a stable route endpoint, including rows hidden for this user. */
+internal fun homeFocusAnchorRows(): Set<HomeRow> = HomeRow.entries.toSet()
+
 /**
  * Google TV keeps the page visually tied to the focused content instead of switching to a
  * flat page color between rows. The request is intentionally the same 640x360 size used by a
@@ -430,7 +433,7 @@ private fun HomeAmbientBackdrop(
                 .data(artworkUrl)
                 .size(640, 360)
                 .crossfade(false)
-            .build()
+                .build()
         }
     }
     LaunchedEffect(focus.key) {
@@ -549,6 +552,7 @@ internal fun HomeScreen(
     hiddenHomeRows: Set<HomeRow>,
     minimalHomeEnabled: Boolean,
     weatherCity: String,
+    weatherTemperatureUnit: WeatherTemperatureUnit = WeatherTemperatureUnit.defaultForLocale(),
     smartTubeNowPlaying: SmartTubeNowPlaying?,
     smartTubeFeedLoading: Boolean,
     smartTubeSubscriptions: List<SmartTubeSubscriptionVideo>,
@@ -556,8 +560,6 @@ internal fun HomeScreen(
     hiddenSmartTubeChannels: Set<String>,
     continueWatchingLimits: Map<Provider, Int>,
     favoriteApps: Set<String>,
-    personalRatings: Map<String, PersonalRating>,
-    mediaScores: Map<String, MediaScores> = emptyMap(),
     onOpenRelayTube: () -> Unit,
     onPlayRelayTube: (MediaItem) -> Unit,
     suppressProviderPeek: Boolean,
@@ -565,6 +567,7 @@ internal fun HomeScreen(
     nuvioProfiles: List<NuvioProfile>,
     activeNuvioProfile: Int,
     profileImageUri: String?,
+    wallpaperImageUri: String? = null,
     onRefreshNuvio: () -> Unit,
     onNuvioProfileSelected: (Int) -> Unit,
     iconShape: AppIconShape = AppIconShape.MATCH_EACH_APP,
@@ -592,6 +595,11 @@ internal fun HomeScreen(
     }
     val showAppAmbient: (InstalledApp?) -> Unit = { app ->
         ambientFocus = app?.let { ambientFocusFor(it, palette) } ?: ambientFocusFor(hero)
+    }
+    val displayedAmbientFocus = if (minimalHomeEnabled && !wallpaperImageUri.isNullOrBlank()) {
+        HomeAmbientFocus("wallpaper:$wallpaperImageUri", wallpaperImageUri, palette)
+    } else {
+        ambientFocus
     }
 
     // Hero rotation and live-session updates are allowed to refresh the backdrop only while
@@ -737,7 +745,7 @@ internal fun HomeScreen(
         onHomeFocusRestored()
     }
     Box(modifier = Modifier.fillMaxSize()) {
-        HomeAmbientBackdrop(focus = ambientFocus, onArtworkPalette = onFocusedArtworkPalette)
+        HomeAmbientBackdrop(focus = displayedAmbientFocus, onArtworkPalette = onFocusedArtworkPalette)
         CompositionLocalProvider(
             LocalBringIntoViewSpec provides if (heroFocusScrollGuard.canScroll.value) {
                 defaultBringIntoViewSpec
@@ -788,6 +796,7 @@ internal fun HomeScreen(
                 }
             }
             if (minimalHomeEnabled) {
+                Spacer(Modifier.height(MINIMAL_HOME_TOP_INSET_DP.dp).testTag("minimal-home-top-inset"))
                 if (favoriteAppsVisible) {
                     HomeContentItem {
                         FavoriteAppsRail(
@@ -845,8 +854,6 @@ internal fun HomeScreen(
                                 onHeroChanged = onHeroChanged,
                                 onFocusedItem = showMediaAmbient,
                                 onItemSelected = onItemSelected,
-                                personalRatings = personalRatings,
-                                mediaScores = mediaScores,
                                 largeCards = true,
                                 upFocusRequester = previousRowEntryFocusRequester(rowIndex),
                                 firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.CONTINUE_WATCHING),
@@ -873,8 +880,6 @@ internal fun HomeScreen(
                                 onHeroChanged = onHeroChanged,
                                 onFocusedItem = showMediaAmbient,
                                 onItemSelected = onItemSelected,
-                                personalRatings = personalRatings,
-                                mediaScores = mediaScores,
                                 posters = true,
                                 upFocusRequester = previousRowEntryFocusRequester(rowIndex),
                                 firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.RECOMMENDATIONS),
@@ -890,8 +895,6 @@ internal fun HomeScreen(
                                 onHeroChanged = onHeroChanged,
                                 onFocusedItem = showMediaAmbient,
                                 onItemSelected = onItemSelected,
-                                personalRatings = personalRatings,
-                                mediaScores = mediaScores,
                                 largeCards = true,
                                 upFocusRequester = previousRowEntryFocusRequester(rowIndex),
                                 firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.SUBSCRIPTIONS),
@@ -907,8 +910,6 @@ internal fun HomeScreen(
                                 onHeroChanged = onHeroChanged,
                                 onFocusedItem = showMediaAmbient,
                                 onItemSelected = onItemSelected,
-                                personalRatings = personalRatings,
-                                mediaScores = mediaScores,
                                 showPremiereDate = true,
                                 largeCards = true,
                                 upFocusRequester = previousRowEntryFocusRequester(rowIndex),
@@ -951,23 +952,15 @@ internal fun HomeScreen(
                 activeNuvioProfile = activeNuvioProfile,
                 profileImageUri = profileImageUri,
                 weatherCity = weatherCity,
-                showHomeClock = showHomeClock
-            ) {
-                profilePickerVisible = true
-            }
-        }
-        if (profilePickerVisible) {
-            ProfileSwitcher(
-                palette = palette,
-                profiles = nuvioProfiles,
-                relayTubeProfiles = SmartTubePlaybackStore.profiles,
-                activeProfile = activeNuvioProfile,
-                profileImageUri = profileImageUri,
-                onSelect = {
+                temperatureUnit = weatherTemperatureUnit,
+                showHomeClock = showHomeClock,
+                profilePickerVisible = profilePickerVisible,
+                onProfileSelect = {
                     onNuvioProfileSelected(it)
                     profilePickerVisible = false
                 },
-                onDismiss = { profilePickerVisible = false }
+                onProfileDismiss = { profilePickerVisible = false },
+                onProfileClick = { profilePickerVisible = true }
             )
         }
     }
@@ -1010,13 +1003,18 @@ internal fun EmptyHomeState(palette: RelayPalette, onSettings: () -> Unit) {
 }
 
 @Composable
-private fun WeatherReadout(city: String, palette: RelayPalette, compact: Boolean = false) {
+private fun WeatherReadout(
+    city: String,
+    palette: RelayPalette,
+    temperatureUnit: WeatherTemperatureUnit = WeatherTemperatureUnit.defaultForLocale(),
+    compact: Boolean = false
+) {
     if (city.isBlank()) return
     var weatherState by remember(city) { mutableStateOf<WeatherReadoutState>(WeatherReadoutState.Loading) }
-    LaunchedEffect(city) {
+    LaunchedEffect(city, temperatureUnit) {
         weatherState = WeatherReadoutState.Loading
         weatherState = withContext(Dispatchers.IO) {
-            WeatherApi.current(city).fold(
+            WeatherApi.current(city, temperatureUnit).fold(
                 onSuccess = { WeatherReadoutState.Available(it) },
                 onFailure = { WeatherReadoutState.Unavailable }
             )
@@ -1046,7 +1044,7 @@ private fun WeatherReadout(city: String, palette: RelayPalette, compact: Boolean
                 )
                 if (compact) {
                     Text(
-                        text = "${current.temperatureCelsius.roundToInt()}°",
+                        text = "${current.displayTemperature(temperatureUnit)}${temperatureUnit.symbol()}",
                         color = ivory,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.Medium,
@@ -1054,7 +1052,7 @@ private fun WeatherReadout(city: String, palette: RelayPalette, compact: Boolean
                     )
                 } else Column {
                     Text(
-                        text = "${current.temperatureCelsius.roundToInt()}°",
+                        text = "${current.displayTemperature(temperatureUnit)}${temperatureUnit.symbol()}",
                         color = ivory,
                         fontSize = 15.sp,
                         fontWeight = FontWeight.Medium,
@@ -1148,8 +1146,12 @@ internal fun TopBar(
     activeNuvioProfile: Int,
     profileImageUri: String?,
     weatherCity: String,
+    temperatureUnit: WeatherTemperatureUnit = WeatherTemperatureUnit.defaultForLocale(),
     showHomeClock: Boolean = false,
-    onProfileClick: () -> Unit
+    onProfileClick: () -> Unit,
+    profilePickerVisible: Boolean = false,
+    onProfileSelect: (Int) -> Unit = {},
+    onProfileDismiss: () -> Unit = {}
 ) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         // Android TV reports markedly different dp widths at 1080p versus 4K. Keep the
@@ -1174,7 +1176,7 @@ internal fun TopBar(
                         HomeClock(palette)
                         Spacer(Modifier.width(12.dp))
                     }
-                    WeatherReadout(city = weatherCity, palette = palette)
+                    WeatherReadout(city = weatherCity, palette = palette, temperatureUnit = temperatureUnit)
                 }
                 Spacer(Modifier.width(18.dp))
             }
@@ -1241,22 +1243,35 @@ internal fun TopBar(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         if (showHomeClock) HomeClock(palette, compact = true)
-                        WeatherReadout(city = weatherCity, palette = palette, compact = true)
+                        WeatherReadout(city = weatherCity, palette = palette, temperatureUnit = temperatureUnit, compact = true)
                     }
                     Spacer(Modifier.width(8.dp))
                 }
             }
             Spacer(Modifier.width(if (compact) 8.dp else 16.dp))
             if (nuvioProfiles.isNotEmpty()) {
-                ProfileAvatarButton(
-                    profile = nuvioProfiles.firstOrNull { it.index == activeNuvioProfile },
-                    imageUri = profileImageUri,
-                    palette = palette,
-                    compact = compact,
-                    downFocusRequester = firstContentFocusRequester,
-                    onFocused = { if (it) { onPeekProvider(null); onTopFocused() } },
-                    onClick = onProfileClick
-                )
+                Box {
+                    ProfileAvatarButton(
+                        profile = nuvioProfiles.firstOrNull { it.index == activeNuvioProfile },
+                        imageUri = profileImageUri,
+                        palette = palette,
+                        compact = compact,
+                        downFocusRequester = firstContentFocusRequester,
+                        onFocused = { if (it) { onPeekProvider(null); onTopFocused() } },
+                        onClick = onProfileClick
+                    )
+                    if (profilePickerVisible) {
+                        ProfileSwitcher(
+                            palette = palette,
+                            profiles = nuvioProfiles,
+                            relayTubeProfiles = SmartTubePlaybackStore.profiles,
+                            activeProfile = activeNuvioProfile,
+                            profileImageUri = profileImageUri,
+                            onSelect = onProfileSelect,
+                            onDismiss = onProfileDismiss
+                        )
+                    }
+                }
                 Spacer(Modifier.width(if (compact) 7.dp else 12.dp))
             }
             TopDestination(
@@ -1335,13 +1350,11 @@ internal fun ProfileSwitcher(
     onDismiss: () -> Unit
 ) {
     val initialFocusRequester = remember(activeProfile, profiles) { FocusRequester() }
-    Dialog(
+    DropdownMenu(
+        expanded = true,
         onDismissRequest = onDismiss,
-        properties = DialogProperties(
-            dismissOnBackPress = false,
-            dismissOnClickOutside = false,
-            usePlatformDefaultWidth = false
-        )
+        properties = androidx.compose.ui.window.PopupProperties(focusable = true),
+        modifier = Modifier.width(430.dp).background(Color(0xFF15121C))
     ) {
         BackHandler(onBack = onDismiss)
         LaunchedEffect(activeProfile, profiles) {
@@ -1350,10 +1363,7 @@ internal fun ProfileSwitcher(
                 initialFocusRequester.requestFocus()
             }
         }
-        Box(Modifier.fillMaxSize().background(midnight.copy(alpha = .82f)), contentAlignment = Alignment.Center) {
-            Column(
-                Modifier.width(430.dp).clip(RoundedCornerShape(22.dp)).background(Color(0xFF15121C)).border(1.dp, palette.accent.copy(alpha = .6f), RoundedCornerShape(22.dp)).padding(28.dp)
-            ) {
+            Column(Modifier.padding(22.dp)) {
                 Text("Who’s watching?", color = ivory, fontSize = 26.sp, fontWeight = FontWeight.Light)
                 Spacer(Modifier.height(8.dp))
                 Text("Each Relay profile keeps its own Nuvio and RelayTube viewing feeds.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
@@ -1402,7 +1412,6 @@ internal fun ProfileSwitcher(
                 }
                 Spacer(Modifier.height(8.dp))
                 ActionButton("Cancel", palette, primary = false, onClick = onDismiss)
-            }
         }
     }
 }
@@ -1756,8 +1765,6 @@ internal fun MediaRail(
     posters: Boolean = false,
     showPremiereDate: Boolean = false,
     largeCards: Boolean = false,
-    personalRatings: Map<String, PersonalRating> = emptyMap(),
-    mediaScores: Map<String, MediaScores> = emptyMap(),
     upFocusRequester: FocusRequester,
     firstFocusRequester: FocusRequester? = null,
     downFocusRequester: FocusRequester? = null,
@@ -1844,8 +1851,6 @@ internal fun MediaRail(
                         dateFormat = dateFormat,
                         showEpisodeInfo = title == "Continue Watching" || title == "Coming Up",
                         showPremiereDate = showPremiereDate,
-                        personalRating = personalRatings[item.contentKey()],
-                        mediaScores = mediaScores[item.contentKey()],
                         focusRequester = if (item.contentKey() == stableItems.firstOrNull()?.contentKey() && firstFocusRequester != null) firstCardFocusRequester else null,
                         upFocusRequester = upFocusRequester,
                         downFocusRequester = downFocusRequester,
@@ -1953,8 +1958,6 @@ internal fun MediaCard(
     dateFormat: RelayDateFormat = RelayDateFormat.LOCAL,
     showEpisodeInfo: Boolean = false,
     showPremiereDate: Boolean = false,
-    personalRating: PersonalRating? = null,
-    mediaScores: MediaScores? = null,
     focusRequester: FocusRequester? = null,
     upFocusRequester: FocusRequester? = null,
     downFocusRequester: FocusRequester? = null,
@@ -2025,23 +2028,6 @@ internal fun MediaCard(
                 Box(modifier = Modifier.fillMaxWidth(item.infoProgress()).height(4.dp).background(item.provider.accent))
             }
         }
-        personalRating?.let { rating ->
-            Text(
-                rating.badge,
-                color = ivory,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.align(Alignment.TopStart).padding(top = 8.dp, start = 8.dp)
-                    .clip(RoundedCornerShape(8.dp)).background(Color(0xCC20252F))
-                    .padding(horizontal = 7.dp, vertical = 4.dp)
-            )
-        }
-        MediaScoreBadges(
-            tmdbRating = mediaScores?.tmdbRating,
-            omdbRatings = mediaScores?.omdbRatings,
-            palette = palette,
-            modifier = Modifier.align(Alignment.BottomEnd).padding(end = 10.dp, bottom = 10.dp)
-        )
         if (showEpisodeInfo && !poster) {
             Column(
                 modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth()

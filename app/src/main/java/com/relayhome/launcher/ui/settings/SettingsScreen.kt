@@ -141,6 +141,7 @@ import com.relayhome.launcher.data.MetadataKeyValidationHook
 import com.relayhome.launcher.data.RelayMetadataApiKeyValidationHook
 import com.relayhome.launcher.data.RelayMetadataApiKeyRemoteValidation
 import com.relayhome.launcher.data.RelaySettingsRepository
+import com.relayhome.launcher.ui.state.HeroSource
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.MultiFormatWriter
@@ -161,7 +162,8 @@ internal enum class SettingsCategory(val label: String, val description: String)
     PROVIDERS_ACCOUNTS("Providers & Accounts", "Connections, profiles, and subscriptions"),
     WEATHER_WIDGETS("Weather & Widgets", "Local weather shown on Home"),
     DATA_SOURCES("Data Sources", "Metadata services and API keys"),
-    LAUNCHER_UPDATES("Launcher & Updates", "Home role, diagnostics, and releases")
+    DEVICE_SETTINGS("Device Settings", "Home role, override mode, and diagnostics"),
+    LAUNCHER_UPDATES("Launcher Updates", "Update channel and installed releases")
 }
 
 internal enum class LauncherSetupMode(val label: String) {
@@ -254,8 +256,18 @@ internal fun SettingsScreen(
     onHomeRowVisibilityChanged: (HomeRow, Boolean) -> Unit,
     minimalHomeEnabled: Boolean,
     onMinimalHomeEnabledChanged: (Boolean) -> Unit,
+    heroItemCap: Int = 4,
+    heroIncludeNuvio: Boolean = true,
+    heroIncludeContinueWatching: Boolean = true,
+    heroIncludeSubscriptions: Boolean = true,
+    heroIncludeNowPlaying: Boolean = true,
+    heroAutoRotate: Boolean = true,
+    onHeroItemCapChanged: (Int) -> Unit = {},
+    onHeroSourceEnabledChanged: (HeroSource, Boolean) -> Unit = { _, _ -> },
+    onHeroAutoRotateChanged: (Boolean) -> Unit = {},
     weatherCity: String,
     onWeatherCityChanged: (String) -> Unit,
+    onWeatherTemperatureUnitChanged: (WeatherTemperatureUnit) -> Unit = {},
     showHomeClock: Boolean = false,
     onShowHomeClockChanged: (Boolean) -> Unit = {},
     hiddenApps: Set<String> = emptySet(),
@@ -266,9 +278,14 @@ internal fun SettingsScreen(
     onAppIconShapeChanged: (AppIconShape) -> Unit = {},
     profileImageUri: String?,
     onProfileImageChanged: (String?) -> Unit,
+    wallpaperImageUri: String? = null,
+    onWallpaperImageChanged: (String?) -> Unit = {},
     relayIsDefault: Boolean,
     stockLauncherOverride: StockLauncherOverride?,
-    onLauncherChanged: () -> Unit
+    onLauncherChanged: () -> Unit,
+    nuvioProfiles: List<NuvioProfile> = emptyList(),
+    relayTubeProfiles: List<RelayTubeProfile> = emptyList(),
+    onProfileMappingChanged: (Int, String?) -> Unit = { _, _ -> }
 ) {
     val context = LocalContext.current
     val installedApps = rememberInstalledApps(context)
@@ -352,6 +369,14 @@ internal fun SettingsScreen(
             onProfileImageChanged(it.toString())
         }
     }
+    val wallpaperImagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let {
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(it, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            onWallpaperImageChanged(it.toString())
+        }
+    }
     val rootFocusRequesters = remember {
         SettingsCategory.entries.associateWith { FocusRequester() }
     }
@@ -417,6 +442,18 @@ internal fun SettingsScreen(
                     onHomeRowOrderChanged = onHomeRowOrderChanged,
                     onHomeRowVisibilityChanged = onHomeRowVisibilityChanged,
                     onMinimalHomeEnabledChanged = onMinimalHomeEnabledChanged,
+                    heroItemCap = heroItemCap,
+                    heroIncludeNuvio = heroIncludeNuvio,
+                    heroIncludeContinueWatching = heroIncludeContinueWatching,
+                    heroIncludeSubscriptions = heroIncludeSubscriptions,
+                    heroIncludeNowPlaying = heroIncludeNowPlaying,
+                    heroAutoRotate = heroAutoRotate,
+                    onHeroItemCapChanged = onHeroItemCapChanged,
+                    onHeroSourceEnabledChanged = onHeroSourceEnabledChanged,
+                    onHeroAutoRotateChanged = onHeroAutoRotateChanged,
+                    wallpaperImageUri = wallpaperImageUri,
+                    onPickWallpaper = { wallpaperImagePicker.launch(arrayOf("image/*")) },
+                    onClearWallpaper = { onWallpaperImageChanged(null) },
                     moveHomeRow = ::moveHomeRow
                 )
                 SettingsCategory.APPS -> AppsSettings(
@@ -456,11 +493,15 @@ internal fun SettingsScreen(
                     onProfileImageChanged = onProfileImageChanged,
                     onPickProfileImage = { profileImagePicker.launch(arrayOf("image/*")) },
                     onWebProfileUrlChanged = { webProfileUrl = it; profileUrlError = null },
-                    onProfileUrlError = { profileUrlError = it }
+                    onProfileUrlError = { profileUrlError = it },
+                    nuvioProfiles = nuvioProfiles,
+                    relayTubeProfiles = relayTubeProfiles,
+                    onProfileMappingChanged = onProfileMappingChanged
                 )
                 SettingsCategory.WEATHER_WIDGETS -> WeatherWidgetsSettings(
                     palette = palette,
                     weatherCityDraft = weatherCityDraft,
+                    temperatureUnit = WeatherTemperatureSettings.load(context),
                     showHomeClock = showHomeClock,
                     firstFocusRequester = detailFirstFocusRequester,
                     backFocusRequester = detailBackFocusRequester,
@@ -470,6 +511,7 @@ internal fun SettingsScreen(
                         weatherCityDraft = normalized
                         onWeatherCityChanged(normalized)
                     },
+                    onTemperatureUnitChanged = onWeatherTemperatureUnitChanged,
                     onClear = {
                         weatherCityDraft = ""
                         onWeatherCityChanged("")
@@ -483,7 +525,7 @@ internal fun SettingsScreen(
                     firstFocusRequester = detailFirstFocusRequester,
                     backFocusRequester = detailBackFocusRequester
                 )
-                SettingsCategory.LAUNCHER_UPDATES -> LauncherUpdatesSettings(
+                SettingsCategory.DEVICE_SETTINGS, SettingsCategory.LAUNCHER_UPDATES -> LauncherUpdatesSettings(
                     context = context,
                     palette = palette,
                     relayIsDefault = relayIsDefault,
@@ -517,7 +559,8 @@ internal fun SettingsScreen(
                     onToggleAdvancedHomeSetup = { showAdvancedHomeSetup = !showAdvancedHomeSetup },
                     onApplyRelayHomeWithShizuku = ::applyRelayHomeWithShizuku,
                     onRestoreStockLauncherWithShizuku = ::restoreStockLauncherWithShizuku,
-                    updateScope = updateScope
+                    updateScope = updateScope,
+                    showDeviceSettings = category == SettingsCategory.DEVICE_SETTINGS
                 )
             }
         }
@@ -701,6 +744,7 @@ private fun AppearanceSettings(
 }
 
 @Composable
+@OptIn(ExperimentalComposeUiApi::class)
 private fun HomeLayoutSettings(
     palette: RelayPalette,
     homeRowOrder: List<HomeRow>,
@@ -711,8 +755,23 @@ private fun HomeLayoutSettings(
     onHomeRowOrderChanged: (List<HomeRow>) -> Unit,
     onHomeRowVisibilityChanged: (HomeRow, Boolean) -> Unit,
     onMinimalHomeEnabledChanged: (Boolean) -> Unit,
+    heroItemCap: Int,
+    heroIncludeNuvio: Boolean,
+    heroIncludeContinueWatching: Boolean,
+    heroIncludeSubscriptions: Boolean,
+    heroIncludeNowPlaying: Boolean,
+    heroAutoRotate: Boolean,
+    onHeroItemCapChanged: (Int) -> Unit,
+    onHeroSourceEnabledChanged: (HeroSource, Boolean) -> Unit,
+    onHeroAutoRotateChanged: (Boolean) -> Unit,
+    wallpaperImageUri: String?,
+    onPickWallpaper: () -> Unit,
+    onClearWallpaper: () -> Unit,
     moveHomeRow: (Int, Int) -> Unit
 ) {
+    val rowSwitchRequesters = remember(homeRowOrder) {
+        homeRowOrder.associateWith { FocusRequester() }
+    }
     SettingsSectionTitle("Home rows", "Choose the order of rows on Home. Rows with no content are skipped automatically.")
     Spacer(Modifier.height(20.dp))
     Row(
@@ -726,13 +785,83 @@ private fun HomeLayoutSettings(
             Spacer(Modifier.height(3.dp))
             Text("Show the ambient wallpaper and Favorite Apps only. Hero and media rows stay hidden until this is turned off.", color = muted, fontSize = 13.sp, lineHeight = 18.sp)
         }
-        androidx.compose.material3.Switch(
+        RelaySettingsSwitch(
             checked = minimalHomeEnabled,
             onCheckedChange = onMinimalHomeEnabledChanged,
-            modifier = Modifier.focusRequester(firstFocusRequester).focusProperties { up = backFocusRequester }
+            palette = palette,
+            modifier = Modifier
+                .focusRequester(firstFocusRequester)
+                .focusProperties {
+                    up = backFocusRequester
+                    rowSwitchRequesters[homeRowOrder.firstOrNull()]?.let { down = it }
+                },
+            testTag = "minimal-home-switch"
         )
     }
     Spacer(Modifier.height(15.dp))
+    Text("Wallpaper", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+    Spacer(Modifier.height(6.dp))
+    Text(
+        if (wallpaperImageUri.isNullOrBlank()) "Use focused artwork in Minimal Home, or choose a permanent photo."
+        else "Custom photo selected for Minimal / Wallpaper Home.",
+        color = muted, fontSize = 13.sp
+    )
+    Spacer(Modifier.height(9.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        ActionButton("Choose photo", palette, primary = false, onClick = onPickWallpaper)
+        if (!wallpaperImageUri.isNullOrBlank()) {
+            ActionButton("Use artwork again", palette, primary = false, onClick = onClearWallpaper)
+        }
+    }
+    Spacer(Modifier.height(18.dp))
+    Text("Hero Banner", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+    Spacer(Modifier.height(6.dp))
+    Text("Limit hero rotation to the first few items from each feed and disable sources that should stay out of the banner.", color = muted, fontSize = 13.sp, lineHeight = 18.sp)
+    Spacer(Modifier.height(10.dp))
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("Items per source: $heroItemCap", color = ivory, fontSize = 15.sp)
+        ActionButton(
+            "−",
+            palette,
+            primary = false,
+            modifier = Modifier.testTag("hero-cap-decrement"),
+            onClick = { onHeroItemCapChanged(heroItemCap - 1) }
+        )
+        ActionButton(
+            "+",
+            palette,
+            primary = false,
+            modifier = Modifier.testTag("hero-cap-increment"),
+            onClick = { onHeroItemCapChanged(heroItemCap + 1) }
+        )
+    }
+    Spacer(Modifier.height(10.dp))
+    val heroSources = listOf(
+        HeroSource.NUVIO to ("Nuvio" to heroIncludeNuvio),
+        HeroSource.CONTINUE_WATCHING to ("Continue Watching" to heroIncludeContinueWatching),
+        HeroSource.SUBSCRIPTIONS to ("Subscriptions" to heroIncludeSubscriptions),
+        HeroSource.NOW_PLAYING to ("Now Playing" to heroIncludeNowPlaying)
+    )
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        heroSources.forEach { (source, state) ->
+            ActionButton(
+                "${state.first}: ${if (state.second) "On" else "Off"}",
+                palette,
+                primary = state.second,
+                modifier = Modifier.testTag("hero-source-${source.name}"),
+                onClick = { onHeroSourceEnabledChanged(source, !state.second) }
+            )
+        }
+    }
+    Spacer(Modifier.height(8.dp))
+    ActionButton(
+        if (heroAutoRotate) "Auto-rotate: On" else "Auto-rotate: Off",
+        palette,
+        primary = heroAutoRotate,
+        modifier = Modifier.testTag("hero-auto-rotate"),
+        onClick = { onHeroAutoRotateChanged(!heroAutoRotate) }
+    )
+    Spacer(Modifier.height(18.dp))
     homeRowOrder.forEachIndexed { index, row ->
         key(row.name) {
             Row(
@@ -742,9 +871,17 @@ private fun HomeLayoutSettings(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text("${index + 1}. ${row.label}", color = ivory, fontSize = 16.sp, modifier = Modifier.weight(1f))
-                androidx.compose.material3.Switch(
+                RelaySettingsSwitch(
                     checked = row !in hiddenHomeRows,
-                    onCheckedChange = { visible -> onHomeRowVisibilityChanged(row, visible) }
+                    onCheckedChange = { visible -> onHomeRowVisibilityChanged(row, visible) },
+                    palette = palette,
+                    modifier = Modifier
+                        .focusRequester(rowSwitchRequesters.getValue(row))
+                        .focusProperties {
+                            up = rowSwitchRequesters[homeRowOrder.getOrNull(index - 1)] ?: firstFocusRequester
+                            down = rowSwitchRequesters[homeRowOrder.getOrNull(index + 1)] ?: FocusRequester.Cancel
+                        },
+                    testTag = "home-row-switch-${row.name}"
                 )
                 Spacer(Modifier.width(8.dp))
                 ActionButton("↑", palette, primary = false, onClick = { moveHomeRow(index, index - 1) })
@@ -894,7 +1031,10 @@ private fun ProvidersAccountsSettings(
     onProfileImageChanged: (String?) -> Unit,
     onPickProfileImage: () -> Unit,
     onWebProfileUrlChanged: (String) -> Unit,
-    onProfileUrlError: (String?) -> Unit
+    onProfileUrlError: (String?) -> Unit,
+    nuvioProfiles: List<NuvioProfile>,
+    relayTubeProfiles: List<RelayTubeProfile>,
+    onProfileMappingChanged: (Int, String?) -> Unit
 ) {
     SettingsSectionTitle("Provider status", "Connect services here, then choose which ones appear in Relay's Home navigation.")
     Spacer(Modifier.height(20.dp))
@@ -977,6 +1117,15 @@ private fun ProvidersAccountsSettings(
         Spacer(Modifier.height(14.dp))
         ActionButton(if (nuvioSyncing) "Refreshing Nuvio…" else "Refresh Nuvio", palette.copy(accent = Provider.NUVIO.accent), primary = false, onClick = onRefreshNuvio)
     }
+    if (nuvioProfiles.isNotEmpty() && relayTubeProfiles.isNotEmpty()) {
+        Spacer(Modifier.height(30.dp))
+        ProfileMappingSettings(
+            palette = palette,
+            nuvioProfiles = nuvioProfiles,
+            relayTubeProfiles = relayTubeProfiles,
+            onProfileMappingChanged = onProfileMappingChanged
+        )
+    }
     Spacer(Modifier.height(30.dp))
     ProfileSettings(
         palette = palette,
@@ -1000,6 +1149,66 @@ private fun ProvidersAccountsSettings(
         firstFocusRequester = null,
         backFocusRequester = null
     )
+}
+
+@Composable
+private fun ProfileMappingSettings(
+    palette: RelayPalette,
+    nuvioProfiles: List<NuvioProfile>,
+    relayTubeProfiles: List<RelayTubeProfile>,
+    onProfileMappingChanged: (Int, String?) -> Unit
+) {
+    val context = LocalContext.current
+    val availableProfiles = remember(relayTubeProfiles) {
+        relayTubeProfiles.filter { it.id.isNotBlank() }.distinctBy { it.id }
+    }
+    var selectedMappings by remember(nuvioProfiles, availableProfiles) {
+        mutableStateOf(
+            nuvioProfiles.associate { profile ->
+                profile.index to RelayProfileMappingStore.get(context, profile.index)
+            }
+        )
+    }
+
+    SettingsSectionTitle(
+        "Profile pairing",
+        "Choose which RelayTube profile receives each Nuvio profile's Continue Watching data."
+    )
+    Spacer(Modifier.height(14.dp))
+    Text(
+        "Automatic name matching is used until you choose a pairing. Select a profile button to cycle through RelayTube profiles or clear it.",
+        color = muted,
+        fontSize = 14.sp,
+        lineHeight = 20.sp
+    )
+    Spacer(Modifier.height(14.dp))
+    nuvioProfiles.forEach { nuvioProfile ->
+        val selectedId = selectedMappings[nuvioProfile.index]
+        val selectedIndex = availableProfiles.indexOfFirst { it.id == selectedId }
+        val nextIndex = if (selectedIndex < 0) 0 else (selectedIndex + 1) % (availableProfiles.size + 1)
+        val nextId = availableProfiles.getOrNull(nextIndex)?.id
+        val selectedName = availableProfiles.firstOrNull { it.id == selectedId }?.name ?: "Automatic / not paired"
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(nuvioProfile.name, color = ivory, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                Text("Nuvio profile ${nuvioProfile.index}", color = muted, fontSize = 13.sp)
+            }
+            ActionButton(
+                label = selectedName,
+                palette = palette,
+                primary = selectedId != null,
+                modifier = Modifier.widthIn(min = 220.dp).testTag("profile-mapping-${nuvioProfile.index}"),
+                onClick = {
+                    selectedMappings = selectedMappings + (nuvioProfile.index to nextId)
+                    onProfileMappingChanged(nuvioProfile.index, nextId)
+                }
+            )
+        }
+    }
 }
 
 @Composable
@@ -1128,14 +1337,20 @@ private fun SubscriptionSettings(
 private fun WeatherWidgetsSettings(
     palette: RelayPalette,
     weatherCityDraft: String,
+    temperatureUnit: WeatherTemperatureUnit,
     showHomeClock: Boolean,
     firstFocusRequester: FocusRequester,
     backFocusRequester: FocusRequester,
     onDraftChanged: (String) -> Unit,
     onWeatherCityChanged: () -> Unit,
+    onTemperatureUnitChanged: (WeatherTemperatureUnit) -> Unit,
     onClear: () -> Unit,
     onShowHomeClockChanged: (Boolean) -> Unit
 ) {
+    val clockFocusRequester = remember { FocusRequester() }
+    val temperatureFocusRequesters = remember {
+        WeatherTemperatureUnit.entries.associateWith { FocusRequester() }
+    }
     SettingsSectionTitle("Local weather", "Set a city to show the current temperature in the Home navigation. Leave it blank to hide weather.")
     Spacer(Modifier.height(20.dp))
     Row(
@@ -1149,11 +1364,35 @@ private fun WeatherWidgetsSettings(
             Spacer(Modifier.height(3.dp))
             Text("Show the current local time beside weather in the Home top bar.", color = muted, fontSize = 13.sp)
         }
-        androidx.compose.material3.Switch(
+        RelaySettingsSwitch(
             checked = showHomeClock,
             onCheckedChange = onShowHomeClockChanged,
-            modifier = Modifier.testTag("home-clock-setting")
+            palette = palette,
+            modifier = Modifier
+                .focusRequester(clockFocusRequester)
+                .focusProperties {
+                    up = backFocusRequester
+                    down = temperatureFocusRequesters.getValue(WeatherTemperatureUnit.entries.first())
+                },
+            testTag = "home-clock-setting"
         )
+    }
+    Spacer(Modifier.height(18.dp))
+    Text("Temperature", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+    Spacer(Modifier.height(8.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        WeatherTemperatureUnit.entries.forEachIndexed { index, unit ->
+            ActionButton(
+                unit.label,
+                palette,
+                primary = temperatureUnit == unit,
+                modifier = Modifier.testTag("weather-unit-${unit.name}"),
+                focusRequester = temperatureFocusRequesters.getValue(unit),
+                upFocusRequester = if (index == 0) clockFocusRequester else temperatureFocusRequesters.getValue(WeatherTemperatureUnit.entries[index - 1]),
+                downFocusRequester = if (index == WeatherTemperatureUnit.entries.lastIndex) firstFocusRequester else temperatureFocusRequesters.getValue(WeatherTemperatureUnit.entries[index + 1]),
+                onClick = { onTemperatureUnitChanged(unit) }
+            )
+        }
     }
     Spacer(Modifier.height(18.dp))
     Row(
@@ -1170,8 +1409,38 @@ private fun WeatherWidgetsSettings(
             modifier = Modifier.weight(1f),
             textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
         )
-        ActionButton("Save", palette, primary = true, focusRequester = firstFocusRequester, upFocusRequester = backFocusRequester, onClick = onWeatherCityChanged)
+        ActionButton(
+            "Save",
+            palette,
+            primary = true,
+            focusRequester = firstFocusRequester,
+            upFocusRequester = temperatureFocusRequesters.getValue(WeatherTemperatureUnit.entries.last()),
+            onClick = onWeatherCityChanged
+        )
         if (weatherCityDraft.isNotBlank()) ActionButton("Clear", palette, primary = false, onClick = onClear)
+    }
+}
+
+@Composable
+private fun RelaySettingsSwitch(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    palette: RelayPalette,
+    modifier: Modifier,
+    testTag: String
+) {
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(12.dp)
+    Box(
+        Modifier
+            .onFocusChanged { focused = it.hasFocus }
+            .clip(shape)
+            .background(if (focused) palette.accent.copy(alpha = .18f) else Color.Transparent)
+            .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .10f), shape)
+            .padding(horizontal = 4.dp, vertical = 2.dp)
+            .testTag(testTag)
+    ) {
+        androidx.compose.material3.Switch(checked = checked, onCheckedChange = onCheckedChange, modifier = modifier)
     }
 }
 
@@ -1187,10 +1456,16 @@ internal fun DataSourcesSettings(
 ) {
     var tmdbDraft by remember { mutableStateOf("") }
     var omdbDraft by remember { mutableStateOf("") }
+    var fanartDraft by remember { mutableStateOf("") }
+    var tvdbDraft by remember { mutableStateOf("") }
     var tmdbError by remember { mutableStateOf<String?>(null) }
     var omdbError by remember { mutableStateOf<String?>(null) }
+    var fanartError by remember { mutableStateOf<String?>(null) }
+    var tvdbError by remember { mutableStateOf<String?>(null) }
     var tmdbStatus by remember { mutableStateOf<String?>(null) }
     var omdbStatus by remember { mutableStateOf<String?>(null) }
+    var fanartStatus by remember { mutableStateOf<String?>(null) }
+    var tvdbStatus by remember { mutableStateOf<String?>(null) }
     var tmdbValidating by remember { mutableStateOf(false) }
     var omdbValidating by remember { mutableStateOf(false) }
     var tmdbValidationJob by remember { mutableStateOf<Job?>(null) }
@@ -1201,6 +1476,12 @@ internal fun DataSourcesSettings(
     }
     val hasOmdbUserKey = remember(settingsRevision) {
         RelaySettingsRepository.loadOmdbApiKey(context) != null
+    }
+    val hasFanartUserKey = remember(settingsRevision) {
+        RelaySettingsRepository.loadAdditionalMetadataApiKey(context, MetadataKeyService.FANART) != null
+    }
+    val hasTvdbUserKey = remember(settingsRevision) {
+        RelaySettingsRepository.loadAdditionalMetadataApiKey(context, MetadataKeyService.TVDB) != null
     }
 
     SettingsSectionTitle(
@@ -1332,12 +1613,119 @@ internal fun DataSourcesSettings(
         }
     )
     Spacer(Modifier.height(18.dp))
+    AdditionalMetadataKeyCard(
+        serviceName = "Fanart.tv",
+        description = "Optional higher-resolution artwork and logos for compatible media lookups.",
+        signupLabel = "Get a Fanart.tv key",
+        signupUrl = "https://fanart.tv/get-an-api-key/",
+        draft = fanartDraft,
+        error = fanartError,
+        status = fanartStatus,
+        isSaved = hasFanartUserKey,
+        focusRequester = null,
+        palette = palette,
+        onOpenSignup = { openExternalUrl(context, "https://fanart.tv/get-an-api-key/") },
+        onDraftChanged = { fanartDraft = it; fanartError = null; fanartStatus = null },
+        onSave = {
+            val validation = validationHook.validate(MetadataKeyService.FANART, fanartDraft)
+            if (!validation.isValid) fanartError = validation.errorMessage
+            else if (RelaySettingsRepository.saveAdditionalMetadataApiKey(context, MetadataKeyService.FANART, fanartDraft)) {
+                fanartDraft = ""
+                fanartStatus = "Fanart.tv key saved locally and hidden."
+            }
+        },
+        onClear = {
+            RelaySettingsRepository.clearAdditionalMetadataApiKey(context, MetadataKeyService.FANART)
+            fanartDraft = ""
+            fanartStatus = "Fanart.tv key cleared."
+        }
+    )
+    Spacer(Modifier.height(16.dp))
+    AdditionalMetadataKeyCard(
+        serviceName = "TheTVDB",
+        description = "Optional TV episode and season metadata when provider feeds are incomplete.",
+        signupLabel = "Get a TheTVDB key",
+        signupUrl = "https://thetvdb.com/api-information",
+        draft = tvdbDraft,
+        error = tvdbError,
+        status = tvdbStatus,
+        isSaved = hasTvdbUserKey,
+        focusRequester = null,
+        palette = palette,
+        onOpenSignup = { openExternalUrl(context, "https://thetvdb.com/api-information") },
+        onDraftChanged = { tvdbDraft = it; tvdbError = null; tvdbStatus = null },
+        onSave = {
+            val validation = validationHook.validate(MetadataKeyService.TVDB, tvdbDraft)
+            if (!validation.isValid) tvdbError = validation.errorMessage
+            else if (RelaySettingsRepository.saveAdditionalMetadataApiKey(context, MetadataKeyService.TVDB, tvdbDraft)) {
+                tvdbDraft = ""
+                tvdbStatus = "TheTVDB key saved locally and hidden."
+            }
+        },
+        onClear = {
+            RelaySettingsRepository.clearAdditionalMetadataApiKey(context, MetadataKeyService.TVDB)
+            tvdbDraft = ""
+            tvdbStatus = "TheTVDB key cleared."
+        }
+    )
+    Spacer(Modifier.height(18.dp))
     Text(
-        "Relay verifies each new key with its provider before saving. Checks are bounded, do not retry, and never print or display key values.",
+        "TMDB and OMDb keys are remotely verified before saving. Fanart.tv and TheTVDB credentials are stored locally for their optional lookup clients and are never displayed.",
         color = muted,
         fontSize = 14.sp,
         lineHeight = 20.sp
     )
+}
+
+@Composable
+private fun AdditionalMetadataKeyCard(
+    serviceName: String,
+    description: String,
+    signupLabel: String,
+    signupUrl: String,
+    draft: String,
+    error: String?,
+    status: String?,
+    isSaved: Boolean,
+    focusRequester: FocusRequester?,
+    palette: RelayPalette,
+    onOpenSignup: () -> Unit,
+    onDraftChanged: (String) -> Unit,
+    onSave: () -> Unit,
+    onClear: () -> Unit
+) {
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(15.dp)).background(Color(0xFF171A20))
+            .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(15.dp)).padding(20.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(serviceName, color = ivory, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.weight(1f))
+            Text(if (isSaved) "Key saved · hidden" else "Not configured", color = if (isSaved) palette.accent else muted, fontSize = 13.sp)
+        }
+        Spacer(Modifier.height(7.dp))
+        Text(description, color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+        Spacer(Modifier.height(12.dp))
+        ActionButton(signupLabel, palette, primary = false, onClick = onOpenSignup)
+        Spacer(Modifier.height(12.dp))
+        OutlinedTextField(
+            value = draft,
+            onValueChange = onDraftChanged,
+            label = { Text(if (isSaved) "Replace saved $serviceName key" else "$serviceName API key") },
+            singleLine = true,
+            visualTransformation = PasswordVisualTransformation(),
+            isError = error != null,
+            modifier = Modifier.fillMaxWidth().then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier),
+            textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
+        )
+        error?.let { Text(it, color = Provider.SMARTTUBE.accent, fontSize = 13.sp, modifier = Modifier.padding(top = 5.dp)) }
+        status?.let { Text(it, color = palette.accent, fontSize = 13.sp, modifier = Modifier.padding(top = 5.dp)) }
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            ActionButton("Save", palette, primary = true, onClick = onSave)
+            if (isSaved) ActionButton("Clear saved key", palette, primary = false, onClick = onClear)
+        }
+    }
 }
 
 @Composable
@@ -1469,10 +1857,16 @@ private fun LauncherUpdatesSettings(
     onToggleAdvancedHomeSetup: () -> Unit,
     onApplyRelayHomeWithShizuku: () -> Unit,
     onRestoreStockLauncherWithShizuku: () -> Unit,
-    updateScope: kotlinx.coroutines.CoroutineScope
+    updateScope: kotlinx.coroutines.CoroutineScope,
+    showDeviceSettings: Boolean = true
 ) {
-    SettingsSectionTitle("Home launcher", "Choose the default Home app and the update channel for this Relay installation.")
-    val statusReason = when (activeLauncherMode) {
+    SettingsSectionTitle(
+        if (showDeviceSettings) "Home launcher" else "Relay updates",
+        if (showDeviceSettings) "Choose the default Home app and manage Android TV launcher behavior."
+        else "Choose the update channel and install newer Relay Home releases."
+    )
+    if (showDeviceSettings) {
+        val statusReason = when (activeLauncherMode) {
         LauncherSetupMode.COMPATIBILITY -> launcherDiagnostics.events
             .asReversed()
             .firstOrNull { it.strategy == LauncherOverrideStrategy.ACCESSIBILITY }
@@ -1672,9 +2066,11 @@ private fun LauncherUpdatesSettings(
                 ActionButton("Restore stock launcher with Shizuku", palette, primary = false, onClick = onRestoreStockLauncherWithShizuku)
             }
         }
+        }
     }
-    Spacer(Modifier.height(28.dp))
-    Text("Relay updates", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+    if (!showDeviceSettings) {
+        Spacer(Modifier.height(28.dp))
+        Text("Relay updates", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
     Spacer(Modifier.height(7.dp))
     Text("Check GitHub Releases and install a newer Relay Home build without leaving the launcher.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
     Spacer(Modifier.height(12.dp))
@@ -1736,8 +2132,10 @@ private fun LauncherUpdatesSettings(
             })
         }
     }
-    Spacer(Modifier.height(28.dp))
-    SettingsSectionTitle("Android TV settings", "Open the device settings Android TV exposes to Relay. OEM-specific pages fall back to the main Settings screen.")
+        }
+    if (showDeviceSettings) {
+        Spacer(Modifier.height(28.dp))
+        SettingsSectionTitle("Android TV settings", "Open the device settings Android TV exposes to Relay. OEM-specific pages fall back to the main Settings screen.")
     Spacer(Modifier.height(20.dp))
     systemSettingsEntries.chunked(3).forEach { row ->
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -1747,6 +2145,7 @@ private fun LauncherUpdatesSettings(
             repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
         }
         Spacer(Modifier.height(14.dp))
+        }
     }
 }
 

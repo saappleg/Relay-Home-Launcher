@@ -8,8 +8,17 @@ import java.util.Locale
 /** Maps a local Relay/Nuvio profile to an opaque RelayTube profile id. */
 internal object RelayProfileMappingStore {
     fun get(context: Context, nuvioProfile: Int): String? =
-        RelaySettingsRepository.getResolvedProfileMapping(context, nuvioProfile)
+        (RelaySettingsRepository.getManualProfileMapping(context, nuvioProfile)
+            ?: RelaySettingsRepository.getResolvedProfileMapping(context, nuvioProfile))
             ?.let(::cleanOpaqueId)
+
+    fun setManual(context: Context, nuvioProfile: Int, relayTubeProfileId: String?) {
+        RelaySettingsRepository.saveManualProfileMapping(
+            context,
+            nuvioProfile,
+            relayTubeProfileId?.let(::cleanOpaqueId)
+        )
+    }
 
     /** Stores a candidate only; resolve() promotes it after an exact profile-name match. */
     fun set(context: Context, nuvioProfile: Int, relayTubeProfileId: String) {
@@ -33,6 +42,11 @@ internal object RelayProfileMappingStore {
     ): String? {
         val normalizedName = normalizeProfileName(nuvioProfile.name)
         if (normalizedName.isBlank()) return null
+
+        // A user-selected pairing is authoritative. Automatic name matching is only a
+        // fallback, so a refresh cannot silently undo a deliberate pairing from Settings.
+        getManualMapping(context, nuvioProfile.index)?.let { return it }
+
         val matched = relayTubeProfiles
             .filter { cleanOpaqueId(it.id) != null && normalizeProfileName(it.name) == normalizedName }
             .singleOrNull()
@@ -68,6 +82,9 @@ internal object RelayProfileMappingStore {
             RelaySettingsRepository.saveResolvedProfileMapping(context, nuvioProfile, cleanId)
         }
     }
+
+    private fun getManualMapping(context: Context, nuvioProfile: Int): String? =
+        RelaySettingsRepository.getManualProfileMapping(context, nuvioProfile)?.let(::cleanOpaqueId)
 
     internal fun shouldPersistMapping(current: String?, desired: String): Boolean = current != desired
 

@@ -371,6 +371,12 @@ internal fun allAppsRowHeight(
     ).coerceAtLeast(0.dp) / rowCount
 }
 
+internal fun allAppsTileArtworkHeight(rowHeight: Dp, compactHeight: Boolean): Dp {
+    val labelHeight = if (compactHeight) 18.dp else 20.dp
+    val labelSpacing = if (compactHeight) 4.dp else 7.dp
+    return (rowHeight - labelSpacing - labelHeight).coerceAtLeast(0.dp)
+}
+
 @Composable
 @OptIn(ExperimentalComposeUiApi::class)
 internal fun AllAppsGrid(
@@ -434,6 +440,7 @@ internal fun AllAppsGrid(
                                     app = app,
                                     palette = palette,
                                     iconShape = iconShape,
+                                    rowHeight = rowHeight,
                                     modifier = Modifier.fillMaxHeight(),
                                     focusRequester = appFocusRequesters[app.packageName],
                                     upFocusRequester = requesterFor(upIndex) ?: backFocusRequester,
@@ -476,6 +483,7 @@ internal fun InstalledAppTile(
     app: InstalledApp,
     palette: RelayPalette,
     iconShape: AppIconShape = AppIconShape.MATCH_EACH_APP,
+    rowHeight: Dp? = null,
     modifier: Modifier = Modifier,
     focusRequester: FocusRequester? = null,
     upFocusRequester: FocusRequester? = null,
@@ -518,6 +526,9 @@ internal fun InstalledAppTile(
             longPressHandled = false
         }
     }
+    val labelHeight = if (compactHeight) 18.dp else 20.dp
+    val labelSpacing = if (compactHeight) 4.dp else 7.dp
+    val artworkHeight = rowHeight?.let { allAppsTileArtworkHeight(it, compactHeight) }
     Column(
         modifier = modifier.then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .then(if (upFocusRequester != null || downFocusRequester != null || leftFocusRequester != null || rightFocusRequester != null) Modifier.focusProperties {
@@ -580,7 +591,10 @@ internal fun InstalledAppTile(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Box(
-            Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(shape)
+            Modifier
+                .fillMaxWidth()
+                .then(if (artworkHeight != null) Modifier.height(artworkHeight) else Modifier.aspectRatio(16f / 9f))
+                .clip(shape)
                 .background(if (showFocus) palette.accent.copy(alpha = .24f) else Color(0xFF20232A))
                 .border(if (showFocus) 2.dp else 1.dp, if (showFocus) palette.accent else Color.White.copy(alpha = .10f), shape),
             contentAlignment = Alignment.Center
@@ -604,7 +618,7 @@ internal fun InstalledAppTile(
             }
             if (showFocus) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = .08f)))
         }
-        Spacer(Modifier.height(if (compactHeight) 4.dp else 7.dp))
+        Spacer(Modifier.height(labelSpacing))
         Text(
             app.label,
             color = if (showFocus) ivory else muted,
@@ -612,7 +626,7 @@ internal fun InstalledAppTile(
             fontWeight = if (showFocus) FontWeight.SemiBold else FontWeight.Normal,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.fillMaxWidth().heightIn(min = 18.dp)
+            modifier = Modifier.fillMaxWidth().height(labelHeight)
         )
     }
 }

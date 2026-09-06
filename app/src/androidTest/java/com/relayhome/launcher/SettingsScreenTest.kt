@@ -15,12 +15,16 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.performScrollTo
+import androidx.test.core.app.ApplicationProvider
+import com.relayhome.launcher.data.RelaySettingsRepository
 import com.relayhome.launcher.ui.settings.SettingsCategory
+import com.relayhome.launcher.ui.state.HeroSource
 import com.relayhome.launcher.ui.settings.SettingsScreen
 import com.relayhome.launcher.ui.shared.HomeRow
 import com.relayhome.launcher.ui.shared.Provider
 import com.relayhome.launcher.ui.shared.RelayAppearance
 import com.relayhome.launcher.ui.shared.orbitalPalette
+import com.relayhome.launcher.WeatherTemperatureUnit
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -47,11 +51,11 @@ class SettingsScreenTest {
     fun enteringCategoryAndPressingBack_returnsToRootWithFocusedCategory() {
         setSettings()
 
-        val category = composeRule.onNodeWithText(SettingsCategory.LAUNCHER_UPDATES.label)
+        val category = composeRule.onNodeWithText(SettingsCategory.DEVICE_SETTINGS.label)
         category.performScrollTo()
         category.performClick()
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("settings-category-detail-LAUNCHER_UPDATES").assertIsDisplayed()
+        composeRule.onNodeWithTag("settings-category-detail-DEVICE_SETTINGS").assertIsDisplayed()
         composeRule.onNodeWithText("Home launcher").performScrollTo().assertIsDisplayed()
 
         // This uses the same Android TV Back key event that the detail page handles in addition
@@ -60,7 +64,7 @@ class SettingsScreenTest {
         composeRule.waitForIdle()
 
         composeRule.onNodeWithTag("settings-category-root").assertIsDisplayed()
-        composeRule.onNodeWithText(SettingsCategory.LAUNCHER_UPDATES.label).assertIsFocused()
+        composeRule.onNodeWithText(SettingsCategory.DEVICE_SETTINGS.label).assertIsFocused()
     }
 
     @Test
@@ -71,6 +75,10 @@ class SettingsScreenTest {
         var managedProvider: Provider? = null
         var savedWeatherCity: String? = null
         var showHomeClock = false
+        var heroCap: Int? = null
+        var heroSourceChange: Pair<HeroSource, Boolean>? = null
+        var heroAutoRotate: Boolean? = null
+        var temperatureUnit: WeatherTemperatureUnit? = null
 
         setSettings(
             onAppearanceChanged = { selectedAppearance = it },
@@ -78,7 +86,11 @@ class SettingsScreenTest {
             onHomeRowOrderChanged = { resetRows = true },
             onManageProvider = { managedProvider = it },
             onWeatherCityChanged = { savedWeatherCity = it },
-            onShowHomeClockChanged = { showHomeClock = it }
+            onShowHomeClockChanged = { showHomeClock = it },
+            onHeroItemCapChanged = { heroCap = it },
+            onHeroSourceEnabledChanged = { source, enabled -> heroSourceChange = source to enabled },
+            onHeroAutoRotateChanged = { heroAutoRotate = it },
+            onWeatherTemperatureUnitChanged = { temperatureUnit = it }
         )
 
         composeRule.onNodeWithText(SettingsCategory.APPEARANCE.label).performClick()
@@ -93,6 +105,12 @@ class SettingsScreenTest {
         composeRule.onNodeWithText(SettingsCategory.HOME_LAYOUT.label).performClick()
         composeRule.onNodeWithText("Home rows").assertIsDisplayed()
         composeRule.onNodeWithText("Minimal / Wallpaper Home").assertIsDisplayed()
+        composeRule.onNodeWithTag("hero-cap-increment").performScrollTo().performClick()
+        composeRule.onNodeWithTag("hero-source-SUBSCRIPTIONS").performScrollTo().performClick()
+        composeRule.onNodeWithTag("hero-auto-rotate").performScrollTo().performClick()
+        assertEquals(5, heroCap)
+        assertEquals(HeroSource.SUBSCRIPTIONS to false, heroSourceChange)
+        assertEquals(false, heroAutoRotate)
         composeRule.onNodeWithText("Reset row order").performScrollTo().performClick()
         composeRule.waitForIdle()
         assertEquals(true, resetRows)
@@ -108,6 +126,8 @@ class SettingsScreenTest {
         composeRule.onNodeWithText(SettingsCategory.WEATHER_WIDGETS.label).performClick()
         composeRule.onNodeWithText("Local weather").assertIsDisplayed()
         composeRule.onNodeWithText("Home clock").assertIsDisplayed()
+        composeRule.onNodeWithTag("weather-unit-FAHRENHEIT").performScrollTo().performClick()
+        assertEquals(WeatherTemperatureUnit.FAHRENHEIT, temperatureUnit)
         composeRule.onNodeWithTag("home-clock-setting").performClick()
         assertEquals(true, showHomeClock)
         composeRule.onNodeWithText("Save").performClick()
@@ -133,7 +153,7 @@ class SettingsScreenTest {
     fun launcherModes_showCopySelectionAndActiveStatus() {
         setSettings()
 
-        composeRule.onNodeWithText(SettingsCategory.LAUNCHER_UPDATES.label).performScrollTo().performClick()
+        composeRule.onNodeWithText(SettingsCategory.DEVICE_SETTINGS.label).performScrollTo().performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithText("Choose a launcher mode").performScrollTo().assertIsDisplayed()
         composeRule.onNodeWithTag("launcher-active-mode")
@@ -159,6 +179,41 @@ class SettingsScreenTest {
         composeRule.onNodeWithText("Selected for setup").performScrollTo().assertIsDisplayed()
     }
 
+    @Test
+    fun launcherUpdates_containsOnlyReleaseControls() {
+        setSettings()
+
+        composeRule.onNodeWithText(SettingsCategory.LAUNCHER_UPDATES.label).performScrollTo().performClick()
+        composeRule.onNodeWithText("Check for updates").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Home launcher").assertDoesNotExist()
+        composeRule.onNodeWithText("Check now").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun profileMappings_areVisibleAndCycleThroughRelayTubeProfiles() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        RelaySettingsRepository.clearProfileMapping(context, 1)
+        var selectedPairing: Pair<Int, String?>? = null
+        setSettings(
+            nuvioProfiles = listOf(NuvioProfile(1, "Living Room", "blue", null)),
+            relayTubeProfiles = listOf(
+                RelayTubeProfile("relay-a", "Living Room", null, false),
+                RelayTubeProfile("relay-b", "Bedroom", null, false)
+            ),
+            onProfileMappingChanged = { profile, relayId -> selectedPairing = profile to relayId }
+        )
+
+        composeRule.onNodeWithText(SettingsCategory.PROVIDERS_ACCOUNTS.label).performClick()
+        composeRule.onNodeWithText("Profile pairing").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithTag("profile-mapping-1").performScrollTo().performClick()
+        assertEquals(1 to "relay-a", selectedPairing)
+        composeRule.onNodeWithTag("profile-mapping-1").performClick()
+        assertEquals(1 to "relay-b", selectedPairing)
+        composeRule.onNodeWithTag("profile-mapping-1").performClick()
+        assertEquals(1 to null, selectedPairing)
+        RelaySettingsRepository.clearProfileMapping(context, 1)
+    }
+
     private fun setSettings(
         onAppearanceChanged: (RelayAppearance) -> Unit = {},
         onDateFormatChanged: (RelayDateFormat) -> Unit = {},
@@ -166,7 +221,14 @@ class SettingsScreenTest {
         onManageProvider: (Provider) -> Unit = {},
         onWeatherCityChanged: (String) -> Unit = {},
         onShowHomeClockChanged: (Boolean) -> Unit = {},
-        relayIsDefault: Boolean = false
+        onHeroItemCapChanged: (Int) -> Unit = {},
+        onHeroSourceEnabledChanged: (HeroSource, Boolean) -> Unit = { _, _ -> },
+        onHeroAutoRotateChanged: (Boolean) -> Unit = {},
+        onWeatherTemperatureUnitChanged: (WeatherTemperatureUnit) -> Unit = {},
+        relayIsDefault: Boolean = false,
+        nuvioProfiles: List<NuvioProfile> = emptyList(),
+        relayTubeProfiles: List<RelayTubeProfile> = emptyList(),
+        onProfileMappingChanged: (Int, String?) -> Unit = { _, _ -> }
     ) {
         composeRule.setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
@@ -200,11 +262,24 @@ class SettingsScreenTest {
                     onHomeRowVisibilityChanged = { _, _ -> },
                     minimalHomeEnabled = false,
                     onMinimalHomeEnabledChanged = {},
+                    heroItemCap = 4,
+                    heroIncludeNuvio = true,
+                    heroIncludeContinueWatching = true,
+                    heroIncludeSubscriptions = true,
+                    heroIncludeNowPlaying = true,
+                    heroAutoRotate = true,
+                    onHeroItemCapChanged = onHeroItemCapChanged,
+                    onHeroSourceEnabledChanged = onHeroSourceEnabledChanged,
+                    onHeroAutoRotateChanged = onHeroAutoRotateChanged,
                     weatherCity = "",
                     onWeatherCityChanged = onWeatherCityChanged,
+                    onWeatherTemperatureUnitChanged = onWeatherTemperatureUnitChanged,
                     onShowHomeClockChanged = onShowHomeClockChanged,
                     profileImageUri = null,
                     onProfileImageChanged = {},
+                    nuvioProfiles = nuvioProfiles,
+                    relayTubeProfiles = relayTubeProfiles,
+                    onProfileMappingChanged = onProfileMappingChanged,
                     relayIsDefault = relayIsDefault,
                     stockLauncherOverride = null,
                     onLauncherChanged = {}

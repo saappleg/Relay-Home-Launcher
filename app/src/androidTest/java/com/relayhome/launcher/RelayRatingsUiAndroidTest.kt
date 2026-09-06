@@ -30,21 +30,20 @@ class RelayRatingsUiAndroidTest {
     )
 
     @Test
-    fun mediaCard_showsPersonalRatingBadge_whenRated() {
+    fun mediaCard_doesNotShowPersonalRatingBadge() {
         composeRule.setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 MediaCard(
                     item = item,
                     palette = orbitalPalette,
                     poster = false,
-                    personalRating = PersonalRating.LOVE,
                     onClick = {},
                     onFocusChanged = {}
                 )
             }
         }
 
-        composeRule.onNodeWithText("Love").assertIsDisplayed()
+        composeRule.onNodeWithText("Love").assertDoesNotExist()
     }
 
     @Test

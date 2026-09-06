@@ -29,6 +29,8 @@ import com.relayhome.launcher.SmartTubeSubscriptionVideo
 import com.relayhome.launcher.TmdbApi
 import com.relayhome.launcher.WeatherApi
 import com.relayhome.launcher.WeatherCitySettings
+import com.relayhome.launcher.WeatherTemperatureSettings
+import com.relayhome.launcher.WeatherTemperatureUnit
 import com.relayhome.launcher.data.RelaySettingsRepository
 import com.relayhome.launcher.data.PersonalRating
 import com.relayhome.launcher.data.RelayRatingsStore
@@ -75,11 +77,20 @@ internal interface RelayHomeSystemActions {
     fun requestAutoStartAccessibility()
 }
 
+internal enum class HeroSource {
+    NUVIO,
+    CONTINUE_WATCHING,
+    SUBSCRIPTIONS,
+    NOW_PLAYING
+}
+
 private const val MAX_OMDB_ITEMS_PER_BATCH = 18
 private const val OMDB_CONCURRENT_REQUESTS = 4
+internal const val MAX_HERO_CANDIDATES_PER_SOURCE = 4
 
 internal data class RelayHomeUiState(
     val destination: Destination = Destination.HOME,
+    val detailReturnDestination: Destination = Destination.HOME,
     val activeProvider: Provider = Provider.STREMIO,
     val peekProvider: Provider? = null,
     val suppressProviderPeek: Boolean = false,
@@ -93,8 +104,16 @@ internal data class RelayHomeUiState(
     val hiddenHomeRows: Set<HomeRow> = emptySet(),
     val minimalHomeEnabled: Boolean = false,
     val weatherCity: String = "",
+    val weatherTemperatureUnit: WeatherTemperatureUnit = WeatherTemperatureUnit.defaultForLocale(),
+    val heroItemCap: Int = 4,
+    val heroIncludeNuvio: Boolean = true,
+    val heroIncludeContinueWatching: Boolean = true,
+    val heroIncludeSubscriptions: Boolean = true,
+    val heroIncludeNowPlaying: Boolean = true,
+    val heroAutoRotate: Boolean = true,
     val showHomeClock: Boolean = false,
     val profileImageUri: String? = null,
+    val wallpaperImageUri: String? = null,
     val favoriteApps: Set<String> = emptySet(),
     val hiddenApps: Set<String> = emptySet(),
     val appSortOrder: AppSortOrder = AppSortOrder.ALPHABETICAL,
@@ -139,6 +158,19 @@ internal fun RelayHomeUiState.afterReturnHome(): RelayHomeUiState = copy(
     suppressProviderPeek = true,
     homeRequestGeneration = homeRequestGeneration + 1
 )
+
+internal fun RelayHomeUiState.afterDetailsBack(): RelayHomeUiState =
+    if (detailReturnDestination == Destination.HOME) {
+        afterReturnHome()
+    } else {
+        copy(
+            destination = detailReturnDestination,
+            peekProvider = null
+        )
+    }
+
+internal fun <T> capHeroSource(items: List<T>, cap: Int): List<T> =
+    items.take(cap.coerceIn(1, 8))
 
 internal class RelayHomeStateHolder(application: Application) : AndroidViewModel(application) {
     private val appContext = application.applicationContext
@@ -264,7 +296,15 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
 
     fun openMediaDetails(item: MediaItem) {
         detailEnrichmentJob?.cancel()
-        _state.update { it.copy(selectedMedia = item, destination = Destination.DETAIL, peekProvider = null) }
+        _state.update {
+            it.copy(
+                selectedMedia = item,
+                destination = Destination.DETAIL,
+                detailReturnDestination = it.destination.takeUnless { destination -> destination == Destination.DETAIL }
+                    ?: Destination.HOME,
+                peekProvider = null
+            )
+        }
         requestOmdbRatings(listOf(item))
         if (Regex("(?i)S\\s*\\d+\\D{0,8}E\\s*\\d+").containsMatchIn(item.episodeInfo.orEmpty())) {
             detailEnrichmentJob = stateScope.launch {
@@ -274,6 +314,17 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                     _state.update { it.copy(selectedMedia = enriched) }
                 }
             }
+        }
+    }
+
+    fun returnFromDetails() {
+        val returnDestination = _state.value.detailReturnDestination
+        _state.update(RelayHomeUiState::afterDetailsBack)
+        if (returnDestination == Destination.HOME) {
+            heroRotationJob?.cancel()
+            startHeroRotationIfNeeded()
+        } else {
+            heroRotationJob?.cancel()
         }
     }
 
@@ -499,6 +550,49 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         }
     }
 
+    fun setWeatherTemperatureUnit(unit: WeatherTemperatureUnit) {
+        _state.update { it.copy(weatherTemperatureUnit = unit) }
+        stateScope.launch(Dispatchers.IO) { WeatherTemperatureSettings.save(appContext, unit) }
+    }
+
+    fun setManualProfileMapping(nuvioProfile: Int, relayTubeProfileId: String?) {
+        RelayProfileMappingStore.setManual(appContext, nuvioProfile, relayTubeProfileId)
+        lastProfilePairingSignature = null
+        selectRelayTubeProfile(profileIndex = nuvioProfile, allowSelectedFallback = false, force = true)
+    }
+
+    fun setHeroItemCap(cap: Int) {
+        val normalized = cap.coerceIn(1, 8)
+        _state.update { it.copy(heroItemCap = normalized) }
+        stateScope.launch(Dispatchers.IO) { RelaySettingsRepository.saveHeroItemCap(appContext, normalized) }
+        refreshHeroCandidates()
+    }
+
+    fun setHeroSourceEnabled(source: HeroSource, enabled: Boolean) {
+        _state.update {
+            when (source) {
+                HeroSource.NUVIO -> it.copy(heroIncludeNuvio = enabled)
+                HeroSource.CONTINUE_WATCHING -> it.copy(heroIncludeContinueWatching = enabled)
+                HeroSource.SUBSCRIPTIONS -> it.copy(heroIncludeSubscriptions = enabled)
+                HeroSource.NOW_PLAYING -> it.copy(heroIncludeNowPlaying = enabled)
+            }
+        }
+        val key = when (source) {
+            HeroSource.NUVIO -> "home.hero.include_nuvio"
+            HeroSource.CONTINUE_WATCHING -> "home.hero.include_continue_watching"
+            HeroSource.SUBSCRIPTIONS -> "home.hero.include_subscriptions"
+            HeroSource.NOW_PLAYING -> "home.hero.include_now_playing"
+        }
+        stateScope.launch(Dispatchers.IO) { RelaySettingsRepository.saveHeroSourceEnabled(appContext, key, enabled) }
+        refreshHeroCandidates()
+    }
+
+    fun setHeroAutoRotate(enabled: Boolean) {
+        _state.update { it.copy(heroAutoRotate = enabled) }
+        stateScope.launch(Dispatchers.IO) { RelaySettingsRepository.saveHeroAutoRotate(appContext, enabled) }
+        if (enabled) startHeroRotationIfNeeded() else heroRotationJob?.cancel()
+    }
+
     fun setHiddenApp(packageName: String, hidden: Boolean) {
         val normalized = packageName.trim()
         if (normalized.isEmpty()) return
@@ -527,6 +621,13 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         _state.update { it.copy(profileImageUri = uri) }
         stateScope.launch(Dispatchers.IO) {
             if (uri == null) ProfileImageSettings.clear(appContext) else ProfileImageSettings.save(appContext, uri)
+        }
+    }
+
+    fun setWallpaperImage(uri: String?) {
+        _state.update { it.copy(wallpaperImageUri = uri) }
+        stateScope.launch(Dispatchers.IO) {
+            RelaySettingsRepository.saveWallpaperImageUri(appContext, uri)
         }
     }
 
@@ -570,8 +671,16 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 hiddenHomeRows = HomeRowOrderStore.loadHiddenRows(appContext),
                 minimalHomeEnabled = HomeRowOrderStore.loadMinimalHomeEnabled(appContext),
                 weatherCity = WeatherCitySettings.load(appContext),
+                weatherTemperatureUnit = WeatherTemperatureSettings.load(appContext),
+                heroItemCap = RelaySettingsRepository.loadHeroItemCap(appContext),
+                heroIncludeNuvio = RelaySettingsRepository.loadHeroSourceEnabled(appContext, "home.hero.include_nuvio"),
+                heroIncludeContinueWatching = RelaySettingsRepository.loadHeroSourceEnabled(appContext, "home.hero.include_continue_watching"),
+                heroIncludeSubscriptions = RelaySettingsRepository.loadHeroSourceEnabled(appContext, "home.hero.include_subscriptions"),
+                heroIncludeNowPlaying = RelaySettingsRepository.loadHeroSourceEnabled(appContext, "home.hero.include_now_playing"),
+                heroAutoRotate = RelaySettingsRepository.loadHeroAutoRotate(appContext),
                 showHomeClock = RelaySettingsRepository.loadShowHomeClock(appContext),
                 profileImageUri = ProfileImageSettings.load(appContext),
+                wallpaperImageUri = RelaySettingsRepository.loadWallpaperImageUri(appContext),
                 favoriteApps = FavoriteAppsStore.load(appContext),
                 hiddenApps = RelaySettingsRepository.loadHiddenAppPackages(appContext),
                 appSortOrder = RelaySettingsRepository.loadAppSortOrder(appContext),
@@ -589,8 +698,16 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 hiddenHomeRows = loaded.hiddenHomeRows,
                 minimalHomeEnabled = loaded.minimalHomeEnabled,
                 weatherCity = loaded.weatherCity,
+                weatherTemperatureUnit = loaded.weatherTemperatureUnit,
+                heroItemCap = loaded.heroItemCap,
+                heroIncludeNuvio = loaded.heroIncludeNuvio,
+                heroIncludeContinueWatching = loaded.heroIncludeContinueWatching,
+                heroIncludeSubscriptions = loaded.heroIncludeSubscriptions,
+                heroIncludeNowPlaying = loaded.heroIncludeNowPlaying,
+                heroAutoRotate = loaded.heroAutoRotate,
                 showHomeClock = loaded.showHomeClock,
                 profileImageUri = loaded.profileImageUri,
+                wallpaperImageUri = loaded.wallpaperImageUri,
                 favoriteApps = loaded.favoriteApps,
                 hiddenApps = loaded.hiddenApps,
                 appSortOrder = loaded.appSortOrder,
@@ -610,8 +727,16 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         val hiddenHomeRows: Set<HomeRow>,
         val minimalHomeEnabled: Boolean,
         val weatherCity: String,
+        val weatherTemperatureUnit: WeatherTemperatureUnit,
+        val heroItemCap: Int,
+        val heroIncludeNuvio: Boolean,
+        val heroIncludeContinueWatching: Boolean,
+        val heroIncludeSubscriptions: Boolean,
+        val heroIncludeNowPlaying: Boolean,
+        val heroAutoRotate: Boolean,
         val showHomeClock: Boolean,
         val profileImageUri: String?,
+        val wallpaperImageUri: String?,
         val favoriteApps: Set<String>,
         val hiddenApps: Set<String>,
         val appSortOrder: AppSortOrder,
@@ -808,7 +933,11 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         val active = state.smartTubeNowPlaying?.toRelayMediaItem()
         val continueWatching = state.smartTubeContinueWatching.map(::smartTubeFeedItem)
         val subscriptions = state.smartTubeSubscriptions.map(::smartTubeFeedItem)
-        return (state.nuvioMedia + listOfNotNull(active) + continueWatching + subscriptions)
+        val cap = state.heroItemCap.coerceIn(1, 8)
+        return ((if (state.heroIncludeNuvio) capHeroSource(state.nuvioMedia, cap) else emptyList()) +
+            (if (state.heroIncludeNowPlaying) listOfNotNull(active) else emptyList()) +
+            (if (state.heroIncludeContinueWatching) capHeroSource(continueWatching, cap) else emptyList()) +
+            (if (state.heroIncludeSubscriptions) capHeroSource(subscriptions, cap) else emptyList()))
             .filter { it.provider in state.enabledProviders }
             .distinctBy(MediaItem::contentKey)
     }
@@ -837,7 +966,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
     }
 
     private fun startHeroRotationIfNeeded() {
-        if (_state.value.destination != Destination.HOME || _state.value.heroCandidates.isEmpty()) return
+        if (_state.value.destination != Destination.HOME || !_state.value.heroAutoRotate || _state.value.heroCandidates.isEmpty()) return
         heroRotationJob?.cancel()
         heroRotationJob = stateScope.launch {
             var index = _state.value.heroCandidates.indexOfFirst {

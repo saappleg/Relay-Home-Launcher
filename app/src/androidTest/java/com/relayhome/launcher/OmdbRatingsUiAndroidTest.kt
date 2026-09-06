@@ -31,22 +31,21 @@ class OmdbRatingsUiAndroidTest {
     )
 
     @Test
-    fun mediaCard_rendersOnlyAvailableTmdbAndRottenTomatoesBadges() {
+    fun mediaCard_doesNotRenderMetadataBadges() {
         composeRule.setContent {
             MaterialTheme(colorScheme = darkColorScheme()) {
                 MediaCard(
                     item = item,
                     palette = orbitalPalette,
                     poster = false,
-                    mediaScores = MediaScores(8.4, OmdbRatings(rottenTomatoesPercent = 87)),
                     onClick = {},
                     onFocusChanged = {}
                 )
             }
         }
 
-        composeRule.onNodeWithText("TMDB 8.4").assertIsDisplayed()
-        composeRule.onNodeWithText("RT 87%").assertIsDisplayed()
+        composeRule.onAllNodesWithText("TMDB 8.4").assertCountEquals(0)
+        composeRule.onAllNodesWithText("RT 87%").assertCountEquals(0)
         composeRule.onAllNodesWithText("MC 0").assertCountEquals(0)
     }
 

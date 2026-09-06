@@ -6,6 +6,7 @@ import java.io.ByteArrayInputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.Locale
 
 class WeatherApiTest {
     @Test
@@ -30,6 +31,35 @@ class WeatherApiTest {
         assertEquals(21.5, current.first, 0.001)
         assertEquals(2, current.second)
         assertEquals("⛅", WeatherApi.weatherIcon(current.second))
+    }
+
+    @Test
+    fun temperatureUnit_convertsAndDefaultsByLocale() {
+        val current = WeatherCurrent("Test", 20.0, 0)
+        assertEquals(20, current.displayTemperature(WeatherTemperatureUnit.CELSIUS))
+        assertEquals(68, current.displayTemperature(WeatherTemperatureUnit.FAHRENHEIT))
+        assertEquals(WeatherTemperatureUnit.FAHRENHEIT, WeatherTemperatureUnit.defaultForLocale(Locale.US))
+        assertEquals(WeatherTemperatureUnit.CELSIUS, WeatherTemperatureUnit.defaultForLocale(Locale.UK))
+    }
+
+    @Test
+    fun temperatureUnit_isIncludedInForecastRequestAndResult() = runBlocking {
+        val requests = mutableListOf<String>()
+        val responses = ArrayDeque(
+            listOf(
+                WeatherHttpResponse(200, "{\"results\":[{\"name\":\"Boston\",\"latitude\":42.36,\"longitude\":-71.06}] }"),
+                WeatherHttpResponse(200, "{\"current\":{\"temperature_2m\":68.0,\"weather_code\":0}}")
+            )
+        )
+        val result = WeatherApi.fetchCurrent(
+            city = "Boston",
+            transport = WeatherTransport { url -> requests += url; responses.removeFirst() },
+            temperatureUnit = WeatherTemperatureUnit.FAHRENHEIT,
+            sleeper = {}
+        ).getOrThrow()
+        assertTrue(requests.last().contains("temperature_unit=fahrenheit"))
+        assertEquals(WeatherTemperatureUnit.FAHRENHEIT, result.sourceUnit)
+        assertEquals(68, result.displayTemperature(WeatherTemperatureUnit.FAHRENHEIT))
     }
 
     @Test

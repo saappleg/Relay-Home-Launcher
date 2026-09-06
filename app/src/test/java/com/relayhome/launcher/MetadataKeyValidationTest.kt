@@ -43,6 +43,14 @@ class MetadataKeyValidationTest {
     }
 
     @Test
+    fun optionalMetadataKeys_acceptBoundedCredentials_andRejectBlankValues() {
+        assertTrue(RelayMetadataApiKeyValidationHook.validate(MetadataKeyService.FANART, "fanart-key-123456").isValid)
+        assertTrue(RelayMetadataApiKeyValidationHook.validate(MetadataKeyService.TVDB, "tvdb-key-123456").isValid)
+        assertFalse(RelayMetadataApiKeyValidationHook.validate(MetadataKeyService.FANART, "").isValid)
+        assertFalse(RelayMetadataApiKeyValidationHook.validate(MetadataKeyService.TVDB, "bad").isValid)
+    }
+
+    @Test
     fun validationHook_isInjectableAndDoesNotNeedNetwork() {
         val rejectingHook = MetadataKeyValidationHook { _, _ ->
             MetadataKeyValidationResult.invalid("Rejected by test policy.")

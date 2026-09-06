@@ -47,6 +47,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import com.relayhome.launcher.ui.home.MediaRail
 import com.relayhome.launcher.ui.home.rememberHeroFocusScrollGuard
 import com.relayhome.launcher.ui.home.HomeFocusAnchorHost
+import com.relayhome.launcher.ui.home.homeFocusAnchorRows
 import com.relayhome.launcher.ui.home.ActionButton
 import com.relayhome.launcher.ui.home.HeroPanel
 import com.relayhome.launcher.ui.home.HeroLockedBringIntoViewSpec
@@ -88,6 +89,11 @@ class DpadFocusTraversalTest {
     @Test
     fun settingsDpadTraversal_usesExplicitTwoByTwoFocusMap() {
         assertTwoByTwoTraversal("settings")
+    }
+
+    @Test
+    fun homeFocusAnchors_coverEveryLogicalHomeRow() {
+        assertEquals(HomeRow.entries.toSet(), homeFocusAnchorRows())
     }
 
     @Test

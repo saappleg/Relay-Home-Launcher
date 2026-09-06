@@ -96,6 +96,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -165,6 +166,7 @@ internal fun DetailsScreen(
     val personalRatingFocusRequesters = remember {
         PersonalRating.entries.associateWith { FocusRequester() }
     }
+    val detailsScrollState = rememberScrollState()
     val episodeMatch = remember(item.episodeInfo) { Regex("(?i)S\\s*(\\d+)\\D{0,8}E\\s*(\\d+)").find(item.episodeInfo.orEmpty()) }
     val seasonEpisode = episodeMatch?.value
     val originalSeason = episodeMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
@@ -249,7 +251,13 @@ internal fun DetailsScreen(
                     }
                     Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, midnight.copy(alpha = .52f)))))
                 }
-                Column(Modifier.weight(1f)) {
+                Column(
+                    Modifier
+                        .weight(1f)
+                        .fillMaxHeight()
+                        .verticalScroll(detailsScrollState)
+                        .testTag("details-scroll-content")
+                ) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         DetailPill(item.provider.label.uppercase(), item.provider.accent)
                         if (item.contentType.visibleRelayText().isNotBlank()) {

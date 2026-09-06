@@ -11,8 +11,10 @@ import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.URLEncoder
 import java.net.UnknownHostException
+import java.util.Locale
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
+import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -24,8 +26,30 @@ internal data class WeatherLocation(val name: String, val latitude: Double, val 
 internal data class WeatherCurrent(
     val locationName: String,
     val temperatureCelsius: Double,
-    val weatherCode: Int
+    val weatherCode: Int,
+    val sourceUnit: WeatherTemperatureUnit = WeatherTemperatureUnit.CELSIUS
 )
+
+internal enum class WeatherTemperatureUnit(val storageValue: String, val label: String) {
+    CELSIUS("celsius", "Celsius (°C)"),
+    FAHRENHEIT("fahrenheit", "Fahrenheit (°F)");
+
+    companion object {
+        fun fromStorage(value: String?): WeatherTemperatureUnit =
+            entries.firstOrNull { it.storageValue == value } ?: defaultForLocale()
+
+        fun defaultForLocale(locale: Locale = Locale.getDefault()): WeatherTemperatureUnit =
+            if (locale.country.uppercase(Locale.ROOT) in setOf("US", "LR", "MM")) FAHRENHEIT else CELSIUS
+    }
+}
+
+internal fun WeatherCurrent.displayTemperature(unit: WeatherTemperatureUnit): Int = when {
+    sourceUnit == unit -> temperatureCelsius
+    sourceUnit == WeatherTemperatureUnit.CELSIUS -> temperatureCelsius * 9.0 / 5.0 + 32.0
+    else -> (temperatureCelsius - 32.0) * 5.0 / 9.0
+}.roundToInt()
+
+internal fun WeatherTemperatureUnit.symbol(): String = if (this == WeatherTemperatureUnit.FAHRENHEIT) "°F" else "°C"
 
 internal open class WeatherApiException(message: String, cause: Throwable? = null) : IOException(message, cause)
 
@@ -73,6 +97,15 @@ internal object WeatherCitySettings {
     }
 }
 
+internal object WeatherTemperatureSettings {
+    fun load(context: android.content.Context): WeatherTemperatureUnit =
+        WeatherTemperatureUnit.fromStorage(RelaySettingsRepository.loadTemperatureUnit(context))
+
+    fun save(context: android.content.Context, unit: WeatherTemperatureUnit) {
+        RelaySettingsRepository.saveTemperatureUnit(context, unit.storageValue)
+    }
+}
+
 /** Keyless Open-Meteo client with bounded retry and a Home-friendly memory cache. */
 internal object WeatherApi {
     private const val geocodingBaseUrl = "https://geocoding-api.open-meteo.com/v1/search"
@@ -85,15 +118,19 @@ internal object WeatherApi {
     private val cache = ConcurrentHashMap<String, CachedWeather>()
     private val defaultTransport = WeatherTransport { url -> HttpTransport.get(url) }
 
-    suspend fun current(city: String): Result<WeatherCurrent> {
+    suspend fun current(
+        city: String,
+        temperatureUnit: WeatherTemperatureUnit = WeatherTemperatureUnit.defaultForLocale()
+    ): Result<WeatherCurrent> {
         val normalized = normalizeCity(city)
         if (normalized.isBlank()) return Result.failure(WeatherNotConfiguredException())
         val now = System.currentTimeMillis()
-        cache[normalized]?.takeIf { now - it.storedAtMs < cacheTtlMs }?.let {
+        val cacheKey = "$normalized:${temperatureUnit.storageValue}"
+        cache[cacheKey]?.takeIf { now - it.storedAtMs < cacheTtlMs }?.let {
             return Result.success(it.value)
         }
-        val result = fetchCurrent(normalized, defaultTransport)
-        result.getOrNull()?.let { cache[normalized] = CachedWeather(it, System.currentTimeMillis()) }
+        val result = fetchCurrent(normalized, defaultTransport, temperatureUnit = temperatureUnit)
+        result.getOrNull()?.let { cache[cacheKey] = CachedWeather(it, System.currentTimeMillis()) }
         return result
     }
 
@@ -101,6 +138,7 @@ internal object WeatherApi {
     internal suspend fun fetchCurrent(
         city: String,
         transport: WeatherTransport,
+        temperatureUnit: WeatherTemperatureUnit = WeatherTemperatureUnit.CELSIUS,
         sleeper: suspend (Long) -> Unit = { delay(it) }
     ): Result<WeatherCurrent> = withContext(Dispatchers.IO) {
         val normalized = normalizeCity(city)
@@ -109,9 +147,9 @@ internal object WeatherApi {
             val locationUrl = "$geocodingBaseUrl?name=${encode(normalized)}&count=1&language=en&format=json"
             val location = parseLocation(request("geocoding", locationUrl, transport, sleeper))
             val forecastUrl = "$forecastBaseUrl?latitude=${location.latitude}&longitude=${location.longitude}" +
-                "&current=temperature_2m,weather_code&temperature_unit=celsius&timezone=auto"
+                "&current=temperature_2m,weather_code&temperature_unit=${temperatureUnit.storageValue}&timezone=auto"
             val current = parseCurrent(request("forecast", forecastUrl, transport, sleeper))
-            Result.success(WeatherCurrent(location.name, current.first, current.second))
+            Result.success(WeatherCurrent(location.name, current.first, current.second, temperatureUnit))
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
