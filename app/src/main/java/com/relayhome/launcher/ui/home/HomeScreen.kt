@@ -1457,19 +1457,36 @@ internal fun HeroPanel(
             if (heroItem?.provider == Provider.SMARTTUBE) {
                 Text("RELAYTUBE FOCUS", color = Provider.SMARTTUBE.accent, fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp, modifier = Modifier.testTag("hero-heading"))
                 Spacer(Modifier.height(10.dp))
-                FocusedMediaInfoCard(item = heroItem, palette = palette, showArtwork = false)
-            } else {
-                Text(
-                    hero.title,
-                    color = ivory,
-                    fontSize = 33.sp,
-                    lineHeight = 40.sp,
-                    letterSpacing = 2.sp,
-                    fontWeight = FontWeight.Light,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.testTag("hero-heading")
+                // Keep the RelayTube information slot fixed. A long video title can still use
+                // two lines inside the card, but provider descriptions must not change the
+                // bottom-anchored hero geometry or push the heading under the top navigation.
+                FocusedMediaInfoCard(
+                    item = heroItem,
+                    palette = palette,
+                    showArtwork = false,
+                    compact = true,
+                    modifier = Modifier.height(152.dp)
                 )
+            } else {
+                // Reserve the full two-line title slot even for short titles. Without this
+                // stable slot, a longer title increases the bottom-anchored column's height and
+                // visibly lifts the entire hero composition toward the overlaid top navigation.
+                Box(
+                    modifier = Modifier.fillMaxWidth().height(80.dp),
+                    contentAlignment = Alignment.TopStart
+                ) {
+                    Text(
+                        hero.title,
+                        color = ivory,
+                        fontSize = 33.sp,
+                        lineHeight = 40.sp,
+                        letterSpacing = 2.sp,
+                        fontWeight = FontWeight.Light,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.testTag("hero-heading")
+                    )
+                }
                 Spacer(Modifier.height(8.dp))
                 Text(
                     hero.subtitle.visibleRelayText(),

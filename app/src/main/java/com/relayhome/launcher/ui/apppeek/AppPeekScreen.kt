@@ -144,7 +144,9 @@ import java.time.YearMonth
 internal fun FocusedMediaInfoCard(
     item: MediaItem,
     palette: RelayPalette,
-    showArtwork: Boolean
+    showArtwork: Boolean,
+    compact: Boolean = false,
+    modifier: Modifier = Modifier
 ) {
     val shape = RoundedCornerShape(16.dp)
     val progress = item.infoProgress()
@@ -173,7 +175,7 @@ internal fun FocusedMediaInfoCard(
         .takeIf { it.isNotBlank() }
     val description = item.description.visibleRelayText().takeIf { it.isNotBlank() }
     Column(
-        Modifier.fillMaxWidth()
+        modifier.fillMaxWidth()
             .clip(shape)
             .background(Color(0xD9171A20))
             .border(1.dp, palette.accent.copy(alpha = .55f), shape)
@@ -214,11 +216,11 @@ internal fun FocusedMediaInfoCard(
                 )
                 metadata?.let { details ->
                     Spacer(Modifier.height(4.dp))
-                    Text(details, color = muted, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    Text(details, color = muted, fontSize = 12.sp, maxLines = if (compact) 1 else 2, overflow = TextOverflow.Ellipsis)
                 }
             }
         }
-        description?.let { text ->
+        if (!compact) description?.let { text ->
             Spacer(Modifier.height(9.dp))
             Text(text, color = muted, fontSize = 13.sp, lineHeight = 18.sp, maxLines = 2, overflow = TextOverflow.Ellipsis)
         }

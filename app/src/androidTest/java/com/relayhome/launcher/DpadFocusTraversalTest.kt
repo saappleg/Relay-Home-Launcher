@@ -233,6 +233,43 @@ class DpadFocusTraversalTest {
     }
 
     @Test
+    fun normalHero_shortAndLongTitles_keepStableHeadingAndActionBounds() {
+        val shortItem = MediaItem(
+            title = "Short Movie",
+            provider = Provider.NUVIO,
+            progress = 0f,
+            colors = emptyList(),
+            artworkUrl = ""
+        )
+        val longItem = shortItem.copy(
+            title = "A Much Longer Movie Title That Must Remain Readable Across Two Hero Lines"
+        )
+        assertHeroGeometryStableAcrossItems(heroForTest(shortItem), heroForTest(longItem))
+    }
+
+    @Test
+    fun relayTubeHero_shortAndLongTitles_keepStableInfoAndActionBounds() {
+        val shortItem = MediaItem(
+            title = "Short RelayTube Video",
+            provider = Provider.SMARTTUBE,
+            progress = 0.4f,
+            colors = emptyList(),
+            artworkUrl = "",
+            providerContentId = "short-video",
+            channel = "RelayTube channel",
+            releaseInfo = "Published 2025",
+            durationMs = 3_600_000L,
+            playbackPositionMs = 1_440_000L,
+            description = "Description should be bounded out of the hero card."
+        )
+        val longItem = shortItem.copy(
+            title = "A Much Longer RelayTube Video Title That Must Stay Inside The Fixed Info Slot",
+            providerContentId = "long-video"
+        )
+        assertHeroGeometryStableAcrossItems(heroForTest(shortItem), heroForTest(longItem))
+    }
+
+    @Test
     fun rotatingHeroPanel_rebindsLabelsWhenItemsChange() {
         val firstItem = MediaItem(
             title = "Camp Miasma",
@@ -388,6 +425,44 @@ class DpadFocusTraversalTest {
         artworkUrl = item.artworkUrl,
         item = item
     )
+
+    private fun assertHeroGeometryStableAcrossItems(shortHero: Hero, longHero: Hero) {
+        val heroState = mutableStateOf(shortHero)
+        val resumeRequester = FocusRequester()
+
+        composeRule.setContent {
+            HeroPanel(
+                hero = heroState.value,
+                palette = orbitalPalette,
+                homeFocusRequester = FocusRequester(),
+                resumeFocusRequester = resumeRequester,
+                heroCandidates = listOfNotNull(shortHero.item, longHero.item),
+                onHeroFocused = {},
+                onItemSelected = {},
+                onArtworkColor = {}
+            )
+            LaunchedEffect(Unit) { resumeRequester.requestFocus() }
+        }
+        composeRule.waitForIdle()
+
+        val shortPanelBounds = composeRule.onNodeWithTag("hero-panel", useUnmergedTree = true).getUnclippedBoundsInRoot()
+        val shortContentBounds = composeRule.onNodeWithTag("hero-content", useUnmergedTree = true).getUnclippedBoundsInRoot()
+        val shortHeadingBounds = composeRule.onNodeWithTag("hero-heading", useUnmergedTree = true).getUnclippedBoundsInRoot()
+        val shortActionBounds = composeRule.onNodeWithTag("hero-action-column", useUnmergedTree = true).getUnclippedBoundsInRoot()
+        composeRule.runOnIdle { heroState.value = longHero }
+        composeRule.waitForIdle()
+
+        val longPanelBounds = composeRule.onNodeWithTag("hero-panel", useUnmergedTree = true).getUnclippedBoundsInRoot()
+        val longContentBounds = composeRule.onNodeWithTag("hero-content", useUnmergedTree = true).getUnclippedBoundsInRoot()
+        val longHeadingBounds = composeRule.onNodeWithTag("hero-heading", useUnmergedTree = true).getUnclippedBoundsInRoot()
+        val longActionBounds = composeRule.onNodeWithTag("hero-action-column", useUnmergedTree = true).getUnclippedBoundsInRoot()
+        assertEquals("Title length must not move the hero panel", shortPanelBounds.top.value, longPanelBounds.top.value, 0.5f)
+        assertEquals("Title length must not resize the hero panel", shortPanelBounds.bottom.value, longPanelBounds.bottom.value, 0.5f)
+        assertEquals("Title length must not move the hero content anchor", shortContentBounds.top.value, longContentBounds.top.value, 0.5f)
+        assertEquals("Title length must not move the heading baseline", shortHeadingBounds.top.value, longHeadingBounds.top.value, 0.5f)
+        assertEquals("Title length must not move the action row", shortActionBounds.top.value, longActionBounds.top.value, 0.5f)
+        assertEquals("Title length must not change the action row bottom", shortActionBounds.bottom.value, longActionBounds.bottom.value, 0.5f)
+    }
 
     private fun assertLongNuvioMovieHero(title: String, progress: Float, expectedAction: String) {
         // These are the two production titles that exposed the clipping: their provider
