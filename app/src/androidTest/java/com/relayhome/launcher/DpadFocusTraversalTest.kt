@@ -33,6 +33,7 @@ import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.ExperimentalTestApi
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -461,21 +462,25 @@ class DpadFocusTraversalTest {
             colors = emptyList(),
             artworkUrl = ""
         )
+        val heroState = mutableStateOf(heroForTest(item))
+        val expectedHeroKey = item.contentKey()
+        val expectedHeroArtwork = item.artworkUrl
 
         composeRule.setContent {
             val scrollState = rememberScrollState()
+            val heroFocusGuard = rememberHeroFocusScrollGuard(scrollState)
             LaunchedEffect(scrollState.value) { observedScrollOffset.set(scrollState.value) }
             Box(Modifier.height(520.dp)) {
-                Column(Modifier.verticalScroll(scrollState)) {
+                Column(Modifier.verticalScroll(scrollState, enabled = !heroFocusGuard.hasFocus.value)) {
                     HeroPanel(
-                        hero = heroForTest(item),
+                        hero = heroState.value,
                         palette = orbitalPalette,
                         homeFocusRequester = FocusRequester(),
                         resumeFocusRequester = resumeRequester,
                         heroCandidates = listOf(item),
                         downFocusRequester = firstRowRequester,
                         onHeroFocused = {},
-                        onHeroFocusChanged = rememberHeroFocusScrollGuard(scrollState),
+                        onHeroFocusChanged = heroFocusGuard.onFocusChanged,
                         onItemSelected = {},
                         onArtworkColor = {}
                     )
@@ -497,10 +502,32 @@ class DpadFocusTraversalTest {
         composeRule.waitForIdle()
 
         assertEquals(0, observedScrollOffset.get())
+        val initialHeroBounds = composeRule.onNodeWithTag("hero-panel", useUnmergedTree = true).getUnclippedBoundsInRoot()
+        val initialHeadingBounds = composeRule.onNodeWithTag("hero-heading", useUnmergedTree = true).getUnclippedBoundsInRoot()
+        val initialActionBounds = composeRule.onNodeWithTag("hero-action-column", useUnmergedTree = true).getUnclippedBoundsInRoot()
+        assertEquals("Hero must start at the top of the scroll content", 0f, initialHeroBounds.top.value, 0.5f)
+        assertEquals(
+            "Hero height must remain the TV composition height",
+            420f,
+            initialHeroBounds.bottom.value - initialHeroBounds.top.value,
+            0.5f
+        )
+        check(initialHeadingBounds.top.value >= 84f) {
+            "Hero heading is under the compact top-nav safe area: ${initialHeadingBounds.top}"
+        }
+        check(initialActionBounds.bottom.value <= initialHeroBounds.bottom.value) {
+            "Hero actions extend below the hero panel: ${initialActionBounds.bottom} > ${initialHeroBounds.bottom}"
+        }
         composeRule.onNodeWithText("▶  Resume").assertIsFocused()
         composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionDown) }
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).assertIsFocused()
+        assertEquals(
+            "Details must not move the hero under the top navigation",
+            0f,
+            composeRule.onNodeWithTag("hero-panel", useUnmergedTree = true).getUnclippedBoundsInRoot().top.value,
+            0.5f
+        )
         assertEquals(
             "Details must not cause the home scroll to move while the hero is still focused",
             0,
@@ -513,6 +540,29 @@ class DpadFocusTraversalTest {
         check(observedScrollOffset.get() > 0) {
             "Entering Continue Watching should be the first transition that scrolls Home"
         }
+
+        // Returning upward is the TV reproduction that exposed the race: the row has already
+        // scrolled the parent, and focus relocation can otherwise leave the hero permanently
+        // cropped under the top bar.
+        composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true)
+            .performKeyInput { pressKey(Key.DirectionUp) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true).assertIsFocused()
+        assertEquals(
+            "Returning from Continue Watching must restore the full hero anchor",
+            0f,
+            composeRule.onNodeWithTag("hero-panel", useUnmergedTree = true).getUnclippedBoundsInRoot().top.value,
+            0.5f
+        )
+        assertEquals(
+            "Returning from Continue Watching must settle the home scroll",
+            0,
+            observedScrollOffset.get()
+        )
+        val returnedHeadingBounds = composeRule.onNodeWithTag("hero-heading", useUnmergedTree = true).getUnclippedBoundsInRoot()
+        assertEquals("Hero heading must return to its initial vertical position", initialHeadingBounds.top.value, returnedHeadingBounds.top.value, 0.5f)
+        assertEquals("Resume -> Details -> rail -> Resume must not replace the hero candidate", expectedHeroKey, heroState.value.item?.contentKey())
+        assertEquals("Resume -> Details -> rail -> Resume must not reset hero artwork", expectedHeroArtwork, heroState.value.artworkUrl)
     }
 
     private fun assertTwoByTwoTraversal(screen: String) {

@@ -85,6 +85,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.State
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -241,28 +242,46 @@ internal suspend fun requestHomeFocusWithRetry(
 
 /**
  * Hero actions are part of the fixed top section even though Home's rails share one scroll
- * container. Compose's automatic focus relocation can otherwise nudge that container when the
- * stacked Details action receives focus near the viewport edge. Defer the correction one frame
- * so it wins over relocation, and cancel it as soon as focus enters a rail.
+ * container. Compose's automatic focus relocation can otherwise nudge that container when a
+ * hero action is reacquired after a rail. The scroll lock is released only after hero focus is
+ * gone, while the settling loop keeps a delayed relocation from leaving the hero cropped.
  */
+internal class HeroFocusScrollGuard internal constructor(
+    val hasFocus: State<Boolean>,
+    val onFocusChanged: (Boolean) -> Unit
+)
+
 @Composable
-internal fun rememberHeroFocusScrollGuard(scrollState: ScrollState): (Boolean) -> Unit {
+internal fun rememberHeroFocusScrollGuard(scrollState: ScrollState): HeroFocusScrollGuard {
     val scope = rememberCoroutineScope()
     val heroHasFocus = remember { mutableStateOf(false) }
-    val pendingReset = remember { arrayOfNulls<kotlinx.coroutines.Job>(1) }
-    return remember(scrollState) {
+    val pendingSettle = remember { arrayOfNulls<kotlinx.coroutines.Job>(1) }
+    val onFocusChanged = remember(scrollState) {
         { focused: Boolean ->
             heroHasFocus.value = focused
-            pendingReset[0]?.cancel()
-            pendingReset[0] = if (focused) {
+            pendingSettle[0]?.cancel()
+            pendingSettle[0] = if (focused) {
                 scope.launch {
-                    withFrameNanos { }
-                    if (heroHasFocus.value) scrollState.scrollTo(0)
+                    // Correct once immediately, then once per frame while focus is still in
+                    // the hero. This covers both directions: entering Details and returning to
+                    // Resume from a rail can each schedule a different relocation pass. Keep the
+                    // window bounded so this is a settle operation, not a permanent frame loop.
+                    repeat(8) {
+                        if (!heroHasFocus.value) return@launch
+                        if (scrollState.value != 0) scrollState.scrollTo(0)
+                        withFrameNanos { }
+                    }
                 }
             } else {
                 null
             }
         }
+    }
+    DisposableEffect(scrollState) {
+        onDispose { pendingSettle[0]?.cancel() }
+    }
+    return remember(scrollState, onFocusChanged) {
+        HeroFocusScrollGuard(heroHasFocus, onFocusChanged)
     }
 }
 
@@ -637,7 +656,11 @@ internal fun HomeScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .verticalScroll(homeScrollState)
+                // The hero is the stable top composition. Once either hero action owns focus,
+                // prevent the parent from answering focus relocation by moving that composition
+                // under the overlaid top bar. The guard settles the offset before this lock is
+                // released when focus enters a rail.
+                .verticalScroll(homeScrollState, enabled = !heroFocusScrollGuard.hasFocus.value)
         ) {
             HomeContentItem {
                 if (!minimalHomeEnabled) {
@@ -667,7 +690,7 @@ internal fun HomeScreen(
                         },
                         onItemSelected = onItemSelected,
                         onNavigateHero = onHeroNavigate,
-                        onHeroFocusChanged = heroFocusScrollGuard
+                        onHeroFocusChanged = heroFocusScrollGuard.onFocusChanged
                     ) { accent ->
                         if (accent != null) onHeroChanged(hero.copy(palette = hero.palette.copy(accent = accent, glow = accent.copy(alpha = .32f))))
                     }
@@ -1356,6 +1379,7 @@ internal fun HeroPanel(
             .fillMaxWidth()
             .height(420.dp)
             .background(midnight)
+            .testTag("hero-panel")
             .onPreviewKeyEvent { event ->
                 val direction = when (event.key) {
                     Key.DirectionLeft -> HeroNavigationDirection.PREVIOUS
@@ -1427,10 +1451,11 @@ internal fun HeroPanel(
                 )
                 .widthIn(max = 620.dp)
                 .fillMaxWidth()
+                .testTag("hero-content")
         ) {
             val heroItem = hero.item
             if (heroItem?.provider == Provider.SMARTTUBE) {
-                Text("RELAYTUBE FOCUS", color = Provider.SMARTTUBE.accent, fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+                Text("RELAYTUBE FOCUS", color = Provider.SMARTTUBE.accent, fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp, modifier = Modifier.testTag("hero-heading"))
                 Spacer(Modifier.height(10.dp))
                 FocusedMediaInfoCard(item = heroItem, palette = palette, showArtwork = false)
             } else {
@@ -1442,7 +1467,8 @@ internal fun HeroPanel(
                     letterSpacing = 2.sp,
                     fontWeight = FontWeight.Light,
                     maxLines = 2,
-                    overflow = TextOverflow.Ellipsis
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.testTag("hero-heading")
                 )
                 Spacer(Modifier.height(8.dp))
                 Text(
@@ -1457,7 +1483,8 @@ internal fun HeroPanel(
             Spacer(Modifier.height(12.dp))
             Column(
                 horizontalAlignment = Alignment.Start,
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier.testTag("hero-action-column")
             ) {
                 val heroContentKey = hero.item?.contentKey() ?: "${hero.title}|${hero.subtitle}"
                 ActionButton(
@@ -1647,6 +1674,7 @@ internal fun MediaRail(
                     .size(1.dp)
                     .testTag("home-row-entry")
                     .focusRequester(firstFocusRequester)
+                    .focusProperties { up = upFocusRequester }
                     .focusable()
                     .onFocusChanged { entryFocused = it.hasFocus }
             )
@@ -1819,6 +1847,7 @@ internal fun MediaCard(
         modifier = (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .requiredWidth(width).aspectRatio(if (poster) .69f else 1.78f)
             .scale(scale).clip(shape)
+            .testTag("media-card-${item.contentKey()}")
             .background(Color(0xFF141519))
             .border(if (focused) 2.dp else 1.dp, if (focused) ivory.copy(alpha = .78f) else Color.White.copy(alpha = .12f), shape)
             .then(if (upFocusRequester != null || downFocusRequester != null) Modifier.focusProperties {
