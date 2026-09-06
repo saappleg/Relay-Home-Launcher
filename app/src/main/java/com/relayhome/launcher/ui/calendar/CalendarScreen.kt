@@ -26,6 +26,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.focusGroup
@@ -94,6 +95,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
@@ -179,6 +181,11 @@ internal fun CalendarScreen(
     }
     val visibleDays = if (weekView) (0..6).map { weekStart.plusDays(it.toLong()) } else monthDays
     val visibleEntries = if (weekView) entries.filter { it.date in weekStart..weekStart.plusDays(6) } else entries.filter { YearMonth.from(it.date) == month }
+    val eventDayFocusRequesters = remember(visibleDays, entries) {
+        visibleDays.map { date ->
+            if (date != null && entries.any { it.date == date }) FocusRequester() else null
+        }
+    }
     // Back first closes a selected calendar day. Only a second Back leaves Calendar.
     BackHandler {
         if (selectedDay != null) selectedDay = null else onBackHome()
@@ -209,7 +216,8 @@ internal fun CalendarScreen(
                 palette,
                 primary = false,
                 focusRequester = firstFocusRequester,
-                upFocusRequester = backFocusRequester
+                upFocusRequester = backFocusRequester,
+                downFocusRequester = eventDayFocusRequesters.firstOrNull { it != null }
             ) {
                 if (weekView) weekStart = weekStart.minusWeeks(1) else month = month.minusMonths(1)
             }
@@ -249,19 +257,15 @@ internal fun CalendarScreen(
             items(visibleDays.size) { index ->
                 val date = visibleDays[index]
                 val dayEvents = date?.let { selected -> entries.filter { it.date == selected } }.orEmpty()
-                val event = dayEvents.firstOrNull()
-                Box(
-                    modifier = Modifier.aspectRatio(1.15f).clip(RoundedCornerShape(10.dp))
-                        .background(if (event != null) palette.accent.copy(alpha = .24f) else Color.White.copy(alpha = .045f))
-                        .border(if (event != null) 1.dp else 0.dp, palette.accent.copy(alpha = .7f), RoundedCornerShape(10.dp))
-                        .then(if (dayEvents.isNotEmpty()) Modifier.clickable { date?.let { selectedDay = it } } else Modifier)
-                        .padding(9.dp)
-                ) {
-                    date?.let { Text(if (weekView) "${it.dayOfWeek.name.take(3).lowercase().replaceFirstChar { char -> char.uppercase() }} ${it.dayOfMonth}" else it.dayOfMonth.toString(), color = if (event != null) ivory else muted, fontSize = 14.sp, fontWeight = if (event != null) FontWeight.Bold else FontWeight.Normal) }
-                    event?.let {
-                        Text(if (dayEvents.size > 1) "${dayEvents.size} new episodes" else it.item.episodeInfo ?: it.item.title, color = ivory, fontSize = 10.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.align(Alignment.BottomStart))
-                    }
-                }
+                CalendarDayCell(
+                    date = date,
+                    dayEvents = dayEvents,
+                    weekView = weekView,
+                    palette = palette,
+                    focusRequester = eventDayFocusRequesters[index],
+                    testTag = date?.let { "calendar-day-$it" },
+                    onClick = { selectedDay = it }
+                )
             }
         }
         Spacer(Modifier.height(24.dp))
@@ -291,6 +295,71 @@ internal fun CalendarScreen(
         )
     }
 }
+
+@Composable
+internal fun CalendarDayCell(
+    date: LocalDate?,
+    dayEvents: List<TmdbCalendarEntry>,
+    weekView: Boolean,
+    palette: RelayPalette,
+    focusRequester: FocusRequester?,
+    testTag: String? = null,
+    onClick: (LocalDate) -> Unit
+) {
+    var focused by remember { mutableStateOf(false) }
+    val event = dayEvents.firstOrNull()
+    val shape = RoundedCornerShape(10.dp)
+    val focusedScale by animateFloatAsState(if (focused) 1.06f else 1f, label = "calendar day focus")
+    Box(
+        modifier = Modifier
+            .aspectRatio(1.15f)
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .then(if (dayEvents.isNotEmpty()) Modifier.focusable() else Modifier)
+            .onFocusChanged { focused = it.hasFocus }
+            .scale(focusedScale)
+            .clip(shape)
+            .background(
+                when {
+                    focused -> palette.accent.copy(alpha = .34f)
+                    event != null -> palette.accent.copy(alpha = .24f)
+                    else -> Color.White.copy(alpha = .045f)
+                }
+            )
+            .border(
+                if (focused) 2.dp else if (event != null) 1.dp else 0.dp,
+                if (focused) palette.accent else palette.accent.copy(alpha = .7f),
+                shape
+            )
+            .then(
+                if (dayEvents.isNotEmpty()) {
+                    Modifier.clickable { date?.let(onClick) }
+                } else Modifier
+            )
+            .then(if (testTag != null) Modifier.testTag(testTag) else Modifier)
+            .padding(9.dp)
+    ) {
+        date?.let {
+            Text(
+                if (weekView) "${it.dayOfWeek.name.take(3).lowercase().replaceFirstChar { char -> char.uppercase() }} ${it.dayOfMonth}"
+                else it.dayOfMonth.toString(),
+                color = if (event != null) ivory else muted,
+                fontSize = 14.sp,
+                fontWeight = if (event != null) FontWeight.Bold else FontWeight.Normal
+            )
+        }
+        event?.let {
+            Text(
+                if (dayEvents.size > 1) "${dayEvents.size} new episodes" else it.item.episodeInfo ?: it.item.title,
+                color = ivory,
+                fontSize = 10.sp,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.align(Alignment.BottomStart)
+            )
+        }
+    }
+}
+
 @Composable
 internal fun CalendarDayOverlay(
     palette: RelayPalette,

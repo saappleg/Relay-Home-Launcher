@@ -38,6 +38,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.foundation.gestures.animateScrollBy
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -111,6 +112,7 @@ import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.Key as ComposeKey
@@ -1147,7 +1149,7 @@ private fun ProvidersAccountsSettings(
         onSmartTubeChannelVisible = onSmartTubeChannelVisible,
         onManageProvider = onManageProvider,
         firstFocusRequester = null,
-        backFocusRequester = null
+        backFocusRequester = backFocusRequester
     )
 }
 
@@ -1293,6 +1295,9 @@ private fun SubscriptionSettings(
             .distinctBy { it.first }
             .sortedBy { it.second.lowercase() }
     }
+    val channelFocusRequesters = remember(smartTubeChannels) {
+        smartTubeChannels.associate { (channelId, _) -> channelId to FocusRequester() }
+    }
     if (smartTubeChannels.isNotEmpty()) {
         Spacer(Modifier.height(20.dp))
         Text("New from subscriptions", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
@@ -1307,13 +1312,21 @@ private fun SubscriptionSettings(
             ) {
                 Text(channelName, color = ivory, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                 Spacer(Modifier.width(12.dp))
-                ActionButton(
-                    if (visible) "Showing" else "Hidden",
-                    palette.copy(accent = Provider.SMARTTUBE.accent),
-                    primary = visible,
-                    focusRequester = if (channelIndex == 0) firstFocusRequester else null,
-                    upFocusRequester = if (channelIndex == 0) backFocusRequester else null,
-                    onClick = { onSmartTubeChannelVisible(channelId, !visible) }
+                RelaySettingsSwitch(
+                    checked = visible,
+                    onCheckedChange = { onSmartTubeChannelVisible(channelId, it) },
+                    palette = palette.copy(accent = Provider.SMARTTUBE.accent),
+                    modifier = Modifier
+                        .focusRequester(channelFocusRequesters.getValue(channelId))
+                        .focusProperties {
+                            if (channelIndex == 0) {
+                                if (backFocusRequester != null) up = backFocusRequester
+                            } else {
+                                up = channelFocusRequesters.getValue(smartTubeChannels[channelIndex - 1].first)
+                            }
+                            channelFocusRequesters[smartTubeChannels.getOrNull(channelIndex + 1)?.first]?.let { down = it }
+                        },
+                    testTag = "smarttube-channel-switch-$channelId"
                 )
             }
             Spacer(Modifier.height(8.dp))
@@ -1347,9 +1360,13 @@ private fun WeatherWidgetsSettings(
     onClear: () -> Unit,
     onShowHomeClockChanged: (Boolean) -> Unit
 ) {
-    val clockFocusRequester = remember { FocusRequester() }
+    val saveFocusRequester = remember { FocusRequester() }
     val temperatureFocusRequesters = remember {
         WeatherTemperatureUnit.entries.associateWith { FocusRequester() }
+    }
+    LaunchedEffect(Unit) {
+        withFrameNanos { }
+        runCatching { firstFocusRequester.requestFocus() }
     }
     SettingsSectionTitle("Local weather", "Set a city to show the current temperature in the Home navigation. Leave it blank to hide weather.")
     Spacer(Modifier.height(20.dp))
@@ -1369,7 +1386,7 @@ private fun WeatherWidgetsSettings(
             onCheckedChange = onShowHomeClockChanged,
             palette = palette,
             modifier = Modifier
-                .focusRequester(clockFocusRequester)
+                .focusRequester(firstFocusRequester)
                 .focusProperties {
                     up = backFocusRequester
                     down = temperatureFocusRequesters.getValue(WeatherTemperatureUnit.entries.first())
@@ -1388,8 +1405,8 @@ private fun WeatherWidgetsSettings(
                 primary = temperatureUnit == unit,
                 modifier = Modifier.testTag("weather-unit-${unit.name}"),
                 focusRequester = temperatureFocusRequesters.getValue(unit),
-                upFocusRequester = if (index == 0) clockFocusRequester else temperatureFocusRequesters.getValue(WeatherTemperatureUnit.entries[index - 1]),
-                downFocusRequester = if (index == WeatherTemperatureUnit.entries.lastIndex) firstFocusRequester else temperatureFocusRequesters.getValue(WeatherTemperatureUnit.entries[index + 1]),
+                upFocusRequester = if (index == 0) firstFocusRequester else temperatureFocusRequesters.getValue(WeatherTemperatureUnit.entries[index - 1]),
+                downFocusRequester = if (index == WeatherTemperatureUnit.entries.lastIndex) saveFocusRequester else temperatureFocusRequesters.getValue(WeatherTemperatureUnit.entries[index + 1]),
                 onClick = { onTemperatureUnitChanged(unit) }
             )
         }
@@ -1413,7 +1430,7 @@ private fun WeatherWidgetsSettings(
             "Save",
             palette,
             primary = true,
-            focusRequester = firstFocusRequester,
+            focusRequester = saveFocusRequester,
             upFocusRequester = temperatureFocusRequesters.getValue(WeatherTemperatureUnit.entries.last()),
             onClick = onWeatherCityChanged
         )
@@ -1431,16 +1448,25 @@ private fun RelaySettingsSwitch(
 ) {
     var focused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(12.dp)
+    val focusedScale by animateFloatAsState(if (focused) 1.06f else 1f, label = "settings switch focus")
     Box(
         Modifier
+            .then(modifier)
             .onFocusChanged { focused = it.hasFocus }
+            .focusable()
+            .scale(focusedScale)
             .clip(shape)
             .background(if (focused) palette.accent.copy(alpha = .18f) else Color.Transparent)
             .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .10f), shape)
+            .toggleable(value = checked, role = Role.Switch, onValueChange = onCheckedChange)
             .padding(horizontal = 4.dp, vertical = 2.dp)
             .testTag(testTag)
     ) {
-        androidx.compose.material3.Switch(checked = checked, onCheckedChange = onCheckedChange, modifier = modifier)
+        androidx.compose.material3.Switch(
+            checked = checked,
+            onCheckedChange = null,
+            enabled = false
+        )
     }
 }
 

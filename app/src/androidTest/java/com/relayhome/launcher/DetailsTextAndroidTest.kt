@@ -3,6 +3,7 @@ package com.relayhome.launcher
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
@@ -159,8 +160,10 @@ class DetailsTextAndroidTest {
             )
         )
 
+        val currentItem = mutableStateOf(cases.first().item)
+        composeRule.setContent { renderDetails(currentItem.value) }
         cases.forEach { fixture ->
-            composeRule.setContent { renderDetails(fixture.item) }
+            composeRule.runOnIdle { currentItem.value = fixture.item }
             composeRule.waitForIdle()
 
             val title = fixture.item.title.visibleRelayText().ifBlank { "Untitled" }
@@ -203,12 +206,13 @@ class DetailsTextAndroidTest {
             description = "A long synopsis with enough words to exercise the production max-lines and ellipsis bounds. The Play action must remain a distinct readable target below this text, and the rating controls must remain separated from it."
         )
 
-        composeRule.setContent { renderDetails(shortItem) }
+        val currentItem = mutableStateOf(shortItem)
+        composeRule.setContent { renderDetails(currentItem.value) }
         composeRule.waitForIdle()
         val shortPlay = actionBounds("▶  Play")
         val shortLike = actionBounds("Like")
 
-        composeRule.setContent { renderDetails(longItem) }
+        composeRule.runOnIdle { currentItem.value = longItem }
         composeRule.waitForIdle()
         val longTitle = composeRule.onNodeWithText(longItem.title, substring = false, useUnmergedTree = true)
             .fetchSemanticsNode().boundsInRoot

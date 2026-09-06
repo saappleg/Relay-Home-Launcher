@@ -13,8 +13,10 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performKeyInput
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.semantics.SemanticsActions
 import androidx.test.core.app.ApplicationProvider
 import com.relayhome.launcher.data.RelaySettingsRepository
 import com.relayhome.launcher.ui.settings.SettingsCategory
@@ -150,6 +152,65 @@ class SettingsScreenTest {
     }
 
     @Test
+    fun homeLayoutSwitches_followTheExplicitVerticalFocusChain() {
+        setSettings()
+
+        composeRule.onNodeWithText(SettingsCategory.HOME_LAYOUT.label).performClick()
+        val switches = listOf(
+            "minimal-home-switch",
+            *HomeRow.entries.map { "home-row-switch-${it.name}" }.toTypedArray()
+        )
+        composeRule.onNodeWithTag(switches.first()).performSemanticsAction(SemanticsActions.RequestFocus)
+        composeRule.onNodeWithTag(switches.first()).assertIsFocused()
+        switches.drop(1).forEach { tag ->
+            composeRule.onNodeWithTag(switches[switches.indexOf(tag) - 1]).performKeyInput {
+                pressKey(Key.DirectionDown)
+            }
+            composeRule.onNodeWithTag(tag).assertIsFocused()
+        }
+    }
+
+    @Test
+    fun weatherClockSwitch_isConnectedToTemperatureFocusChain() {
+        setSettings()
+
+        composeRule.onNodeWithText(SettingsCategory.WEATHER_WIDGETS.label).performClick()
+        val clock = composeRule.onNodeWithTag("home-clock-setting")
+        val celsius = composeRule.onNodeWithTag("weather-unit-CELSIUS")
+        clock.assertIsFocused()
+        clock.performKeyInput { pressKey(Key.DirectionDown) }
+        celsius.assertIsFocused()
+        celsius.performKeyInput { pressKey(Key.DirectionUp) }
+        clock.assertIsFocused()
+    }
+
+    @Test
+    fun subscriptionVisibilitySwitches_followTheExplicitChannelChain() {
+        setSettings(
+            smartTubeInstalled = true,
+            smartTubeSubscriptions = listOf(
+                SmartTubeSubscriptionVideo("video-a", "Video A", "Alpha", "channel-a", null),
+                SmartTubeSubscriptionVideo("video-b", "Video B", "Beta", "channel-b", null),
+                SmartTubeSubscriptionVideo("video-c", "Video C", "Gamma", "channel-c", null)
+            )
+        )
+
+        composeRule.onNodeWithText(SettingsCategory.PROVIDERS_ACCOUNTS.label).performClick()
+        val channelTags = listOf("channel-a", "channel-b", "channel-c").map { "smarttube-channel-switch-$it" }
+        val firstChannel = composeRule.onNodeWithTag(channelTags.first(), useUnmergedTree = true)
+        firstChannel.performSemanticsAction(SemanticsActions.RequestFocus)
+        channelTags.forEachIndexed { index, tag ->
+            val channel = composeRule.onNodeWithTag(tag, useUnmergedTree = true)
+            channel.assertIsFocused()
+            if (index < channelTags.lastIndex) {
+                channel.performKeyInput { pressKey(Key.DirectionDown) }
+            }
+        }
+        composeRule.onNodeWithTag(channelTags.last(), useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionUp) }
+        composeRule.onNodeWithTag(channelTags[channelTags.lastIndex - 1], useUnmergedTree = true).assertIsFocused()
+    }
+
+    @Test
     fun launcherModes_showCopySelectionAndActiveStatus() {
         setSettings()
 
@@ -225,6 +286,8 @@ class SettingsScreenTest {
         onHeroSourceEnabledChanged: (HeroSource, Boolean) -> Unit = { _, _ -> },
         onHeroAutoRotateChanged: (Boolean) -> Unit = {},
         onWeatherTemperatureUnitChanged: (WeatherTemperatureUnit) -> Unit = {},
+        smartTubeSubscriptions: List<SmartTubeSubscriptionVideo> = emptyList(),
+        smartTubeInstalled: Boolean = false,
         relayIsDefault: Boolean = false,
         nuvioProfiles: List<NuvioProfile> = emptyList(),
         relayTubeProfiles: List<RelayTubeProfile> = emptyList(),
@@ -243,8 +306,8 @@ class SettingsScreenTest {
                     onRequestSmartTubeAccess = {},
                     continueWatchingLimits = emptyMap(),
                     onContinueWatchingLimitChanged = { _, _ -> },
-                    smartTubeSubscriptions = emptyList(),
-                    smartTubeInstalled = false,
+                    smartTubeSubscriptions = smartTubeSubscriptions,
+                    smartTubeInstalled = smartTubeInstalled,
                     hiddenSmartTubeChannels = emptySet(),
                     onSmartTubeChannelVisible = { _, _ -> },
                     nuvioConnected = false,
