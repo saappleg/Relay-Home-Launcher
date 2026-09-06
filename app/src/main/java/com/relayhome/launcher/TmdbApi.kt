@@ -2,7 +2,10 @@ package com.relayhome.launcher
 
 import org.json.JSONArray
 import org.json.JSONObject
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import androidx.compose.ui.graphics.Color
 import com.relayhome.launcher.ui.shared.MediaItem
@@ -68,6 +71,12 @@ internal class TmdbHttpException(val statusCode: Int) : TmdbApiException(
 internal class TmdbNoConfidentMatchException : TmdbApiException(
     "TMDB title matching confidence was insufficient; no metadata was attached."
 )
+
+internal class TmdbResponseTooLargeException : TmdbApiException(
+    "TMDB returned a response larger than the supported limit."
+)
+
+internal data class TmdbHttpResponse(val statusCode: Int, val body: String)
 
 /** Conservative title matcher: exact normalized matches win; fuzzy matches need a clear margin. */
 internal object TmdbTitleMatcher {
@@ -168,14 +177,19 @@ internal object TmdbApi {
     private const val baseUrl = "https://api.themoviedb.org/3"
     private val apiKey get() = BuildConfig.TMDB_API_KEY
 
-    fun enrichEpisodes(items: List<MediaItem>): List<MediaItem> {
-        if (apiKey.isBlank()) return items
-        return items.map { item -> runCatching { enrichEpisode(item) }.getOrDefault(item) }
-    }
+    fun enrichEpisodes(items: List<MediaItem>): List<MediaItem> =
+        enrichEpisodesResult(items).getOrDefault(items)
 
-    internal fun enrichEpisodesResult(items: List<MediaItem>): Result<List<MediaItem>> =
-        if (apiKey.isBlank()) Result.failure(TmdbNotConfiguredException())
-        else tmdbCall { items.map { enrichEpisode(it) } }
+    internal fun enrichEpisodesResult(items: List<MediaItem>): Result<List<MediaItem>> {
+        if (apiKey.isBlank()) return Result.failure(TmdbNotConfiguredException())
+        return runBlocking(Dispatchers.IO) {
+            tmdbCall {
+                buildList {
+                    for (item in items) add(isolateTmdbItemFailure { enrichEpisode(item) } ?: item)
+                }
+            }
+        }
+    }
 
     suspend fun enrichEpisodeDetails(item: MediaItem): MediaItem = withContext(Dispatchers.IO) {
         enrichEpisodeDetailsResult(item).getOrDefault(item)
@@ -243,13 +257,15 @@ internal object TmdbApi {
         tmdbCall {
             // Three seeds already provide a full rail; avoid a burst of serial requests when Home
             // opens on a TV with a slower connection.
-            items.take(3).flatMap { item -> recommendationsFor(item) }
+            buildList {
+                for (item in items.take(3)) addAll(isolateTmdbItemFailure { recommendationsFor(item) }.orEmpty())
+            }
                 .distinctBy { TmdbTitleMatcher.normalize(it.title) }
                 .take(18)
         }
     }
 
-    private fun recommendationsFor(source: MediaItem): List<MediaItem> {
+    private suspend fun recommendationsFor(source: MediaItem): List<MediaItem> {
         val queryTitle = source.showTitle ?: source.title
         val search = JSONObject(get("/search/tv", mapOf("query" to queryTitle)))
         val series = findTmdbTitleMatch(search.optJSONArray("results") ?: JSONArray(), queryTitle, "name", "original_name")?.result
@@ -288,13 +304,17 @@ internal object TmdbApi {
     internal suspend fun upcomingEpisodesResult(items: List<MediaItem>): Result<List<TmdbCalendarEntry>> = withContext(Dispatchers.IO) {
         if (apiKey.isBlank()) return@withContext Result.failure(TmdbNotConfiguredException())
         tmdbCall {
-            items.mapNotNull { item -> upcomingEpisode(item) }
+            buildList {
+                for (item in upcomingEnrichmentItems(items)) {
+                    isolateTmdbItemFailure { upcomingEpisode(item) }?.let(::add)
+                }
+            }
                 .distinctBy { "${it.date}:${it.item.providerContentId ?: TmdbTitleMatcher.normalize(it.item.title)}:${it.item.episodeInfo}" }
                 .sortedBy { it.date }
         }
     }
 
-    private fun upcomingEpisode(item: MediaItem): TmdbCalendarEntry? {
+    private suspend fun upcomingEpisode(item: MediaItem): TmdbCalendarEntry? {
         val queryTitle = item.showTitle ?: item.title
         val search = JSONObject(get("/search/tv", mapOf("query" to queryTitle)))
         val series = findTmdbTitleMatch(search.optJSONArray("results") ?: JSONArray(), queryTitle, "name", "original_name")?.result
@@ -334,11 +354,13 @@ internal object TmdbApi {
     internal suspend fun calendarEntriesResult(items: List<MediaItem>): Result<List<TmdbCalendarEntry>> = withContext(Dispatchers.IO) {
         if (apiKey.isBlank()) return@withContext Result.failure(TmdbNotConfiguredException())
         tmdbCall {
-            items.mapNotNull { item -> calendarEntry(item) }
+            buildList {
+                for (item in items) isolateTmdbItemFailure { calendarEntry(item) }?.let(::add)
+            }
         }
     }
 
-    private fun calendarEntry(item: MediaItem): TmdbCalendarEntry? {
+    private suspend fun calendarEntry(item: MediaItem): TmdbCalendarEntry? {
         val queryTitle = item.showTitle ?: item.title
         val search = JSONObject(get("/search/tv", mapOf("query" to queryTitle)))
         val series = findTmdbTitleMatch(search.optJSONArray("results") ?: JSONArray(), queryTitle, "name", "original_name")?.result
@@ -386,7 +408,7 @@ internal object TmdbApi {
         }
     }
 
-    private fun enrichEpisode(item: MediaItem): MediaItem {
+    private suspend fun enrichEpisode(item: MediaItem): MediaItem {
         // Nuvio's sync payload does not include a TMDB series ID. Restrict enrichment to TV-like
         // media and require a high-confidence title match before attaching episode metadata.
         if (item.contentType.lowercase() !in setOf("tv", "show", "series", "episode")) return item
@@ -413,22 +435,8 @@ internal object TmdbApi {
     private fun findTmdbTitleMatch(results: JSONArray, query: String, vararg titleKeys: String): TmdbTitleMatch? =
         TmdbTitleMatcher.match(results, query, *titleKeys)
 
-    // Kept as a private compatibility shim for older diagnostics/tests. Production lookups use
-    // findTmdbTitleMatch above so they receive the explicit exact-or-conservative-fuzzy boundary.
-    private fun normalize(value: String): String = TmdbTitleMatcher.normalize(value)
-
-    private fun findExactResult(results: JSONArray, query: String, vararg titleKeys: String): JSONObject? {
-        val normalizedQuery = normalize(query)
-        if (normalizedQuery.isBlank()) return null
-        return (0 until results.length())
-            .asSequence()
-            .mapNotNull { results.optJSONObject(it) }
-            .firstOrNull { result ->
-                titleKeys.any { key ->
-                    (result.opt(key) as? String)?.let(::normalize) == normalizedQuery
-                }
-            }
-    }
+    internal fun upcomingEnrichmentItems(items: List<MediaItem>): List<MediaItem> =
+        items.take(MAX_UPCOMING_ENRICHMENT_ITEMS)
 
     private fun JSONObject.firstText(vararg keys: String): String? = keys
         .asSequence()
@@ -449,46 +457,68 @@ internal object TmdbApi {
         return names.distinct().takeIf { it.isNotEmpty() }?.joinToString(", ")
     }
 
-    private fun get(path: String, query: Map<String, String> = emptyMap()): String {
+    private suspend fun get(path: String, query: Map<String, String> = emptyMap()): String {
         val params = (query + ("api_key" to apiKey)).entries.joinToString("&") {
             "${URLEncoder.encode(it.key, "UTF-8")}=${URLEncoder.encode(it.value, "UTF-8")}"
         }
+        return requestWithRetry(path, request = {
+            val connection = (URL("$baseUrl$path?$params").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = REQUEST_TIMEOUT_MS
+                readTimeout = REQUEST_TIMEOUT_MS
+            }
+            try {
+                val status = connection.responseCode
+                if (connection.contentLengthLong > MAX_HTTP_RESPONSE_BYTES) throw TmdbResponseTooLargeException()
+                val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+                val body = stream?.use {
+                    readResponseBodyAtMost(it, MAX_HTTP_RESPONSE_BYTES) { TmdbResponseTooLargeException() }
+                }.orEmpty()
+                TmdbHttpResponse(status, body)
+            } finally {
+                connection.disconnect()
+            }
+        })
+    }
+
+    private suspend fun requestWithRetry(
+        operation: String,
+        request: () -> TmdbHttpResponse,
+        sleeper: suspend (Long) -> Unit = { delay(it) }
+    ): String {
         var attempt = 1
         while (true) {
             try {
-                val connection = (URL("$baseUrl$path?$params").openConnection() as HttpURLConnection).apply {
-                    requestMethod = "GET"
-                    connectTimeout = REQUEST_TIMEOUT_MS
-                    readTimeout = REQUEST_TIMEOUT_MS
-                }
-                try {
-                    val status = connection.responseCode
-                    val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-                    val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
-                    if (status in TRANSIENT_HTTP_STATUSES) {
-                        if (attempt >= MAX_REQUEST_ATTEMPTS) throw TmdbTransientException(path, attempt, status)
-                    } else {
-                        if (status !in 200..299) throw TmdbHttpException(status)
-                        return body
-                    }
-                } finally {
-                    connection.disconnect()
+                val response = request()
+                if (response.statusCode in TRANSIENT_HTTP_STATUSES) {
+                    if (attempt >= MAX_REQUEST_ATTEMPTS) throw TmdbTransientException(operation, attempt, response.statusCode)
+                } else {
+                    if (response.statusCode !in 200..299) throw TmdbHttpException(response.statusCode)
+                    return response.body
                 }
             } catch (known: TmdbApiException) {
                 throw known
             } catch (network: IOException) {
                 if (!network.isTransientNetwork() || attempt >= MAX_REQUEST_ATTEMPTS) {
-                    if (network.isTransientNetwork()) throw TmdbTransientException(path, attempt, cause = network)
+                    if (network.isTransientNetwork()) throw TmdbTransientException(operation, attempt, cause = network)
                     throw network
                 }
             }
-            sleepBeforeRetry(attempt)
+            sleeper(retryDelayMs(attempt))
             attempt += 1
         }
     }
 
-    private inline fun <T> tmdbCall(block: () -> T): Result<T> = try {
+    /** The test seam exercises the same retry loop without making a real network request. */
+    internal suspend fun requestWithRetryForTesting(
+        request: () -> TmdbHttpResponse,
+        sleeper: suspend (Long) -> Unit
+    ): Result<String> = tmdbCall { requestWithRetry("test", request, sleeper) }
+
+    private suspend inline fun <T> tmdbCall(crossinline block: suspend () -> T): Result<T> = try {
         Result.success(block())
+    } catch (cancelled: CancellationException) {
+        throw cancelled
     } catch (known: TmdbApiException) {
         Result.failure(known)
     } catch (unexpected: Exception) {
@@ -502,14 +532,7 @@ internal object TmdbApi {
         this is NoRouteToHostException ||
         this is InterruptedIOException
 
-    private fun sleepBeforeRetry(attempt: Int) {
-        try {
-            Thread.sleep(RETRY_BASE_DELAY_MS * (1L shl (attempt - 1).coerceAtMost(4)))
-        } catch (interrupted: InterruptedException) {
-            Thread.currentThread().interrupt()
-            throw TmdbTransientException("request", attempt, cause = interrupted)
-        }
-    }
+    private fun retryDelayMs(attempt: Int): Long = RETRY_BASE_DELAY_MS * (1L shl (attempt - 1).coerceAtMost(4))
 
     private val movieGenres = mapOf(
         28 to "Action", 12 to "Adventure", 16 to "Animation", 35 to "Comedy", 80 to "Crime",
@@ -528,4 +551,14 @@ internal object TmdbApi {
 private const val REQUEST_TIMEOUT_MS = 8_000
 private const val MAX_REQUEST_ATTEMPTS = 3
 private const val RETRY_BASE_DELAY_MS = 300L
+// One Home/Calendar rail does not need the full sync page; this bounds serial TMDB fan-out.
+private const val MAX_UPCOMING_ENRICHMENT_ITEMS = 24
 private val TRANSIENT_HTTP_STATUSES = setOf(408, 425, 429, 500, 502, 503, 504)
+
+internal suspend inline fun <T> isolateTmdbItemFailure(crossinline block: suspend () -> T): T? = try {
+    block()
+} catch (cancelled: CancellationException) {
+    throw cancelled
+} catch (_: Exception) {
+    null
+}

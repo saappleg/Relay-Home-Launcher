@@ -4,9 +4,14 @@
 build/
 local.properties
 keystore.properties
+signing.properties
 RelaySigning/
 *.iml
 **/build/
 *.apk
+*.aab
+*.jks
+*.p12
+*.pfx
+*.keystore
 .DS_Store
-*.apk

@@ -187,7 +187,7 @@ internal fun CalendarScreen(
         withFrameNanos { }
         firstFocusRequester.requestFocus()
     }
-    Column(Modifier.fillMaxSize().padding(horizontal = 76.dp, vertical = 42.dp)) {
+    Column(Modifier.fillMaxSize().padding(horizontal = RelayTvMargins.screenHorizontal, vertical = 42.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Calendar", color = ivory, fontSize = 38.sp, fontWeight = FontWeight.Light)
             Spacer(Modifier.width(16.dp))
@@ -271,8 +271,10 @@ internal fun CalendarScreen(
             Text(if (scheduleLoading) "Looking up exact premiere and episode dates…" else "No scheduled events for this month. Nuvio library titles are supplemented with exact TMDB dates; Stremio and SmartTube will join as their schedule data becomes available.", color = muted, fontSize = 15.sp, lineHeight = 22.sp)
         } else {
             LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                items(visibleEntries.size) { index ->
-                    val event = visibleEntries[index]
+                items(
+                    visibleEntries,
+                    key = { event -> "${event.date}:${event.item.provider}:${event.item.providerContentId ?: event.item.title}:${event.item.episodeInfo.orEmpty()}" }
+                ) { event ->
                     ActionButton("${formatRelayDate(event.date, dateFormat)}  ${event.item.showTitle ?: event.item.title}", palette, primary = false) { onItemSelected(event.item) }
                 }
             }

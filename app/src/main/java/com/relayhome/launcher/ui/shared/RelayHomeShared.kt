@@ -67,9 +67,16 @@ internal fun SmartTubeNowPlaying.toRelayMediaItem() = MediaItem(
     playbackPlaying = playing
 )
 
+/** Shared TV-safe screen margins; keep horizontal content rhythm consistent across surfaces. */
+internal object RelayTvMargins {
+    val screenHorizontal = 76.dp
+}
+
+private val visibleRelayTextRegex = Regex("[\\p{C}\\s]+")
+
 /** Removes invisible format/control characters that some provider payloads use for empty fields. */
 internal fun String?.visibleRelayText(): String =
-    this.orEmpty().replace(Regex("[\\p{C}\\s]+"), " ").trim()
+    this.orEmpty().replace(visibleRelayTextRegex, " ").trim()
 
 internal fun formatMediaDuration(durationMs: Long): String {
     val totalMinutes = (durationMs / 60_000L).coerceAtLeast(1L)

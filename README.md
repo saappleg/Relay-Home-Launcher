@@ -2,7 +2,7 @@
 
 Relay Home is an Android TV / Google TV media launcher. It is the discovery and navigation layer; providers retain responsibility for their catalogs, profiles, and playback.
 
-> Alpha software — expect rough edges and report reproducible issues through GitHub Issues.
+> Beta software — expect rough edges and report reproducible issues through GitHub Issues.
 
 ## Beta features
 
@@ -31,7 +31,7 @@ Relay Home is an Android TV / Google TV media launcher. It is the discovery and 
 2. Add a TMDB v3 key as `tmdb.apiKey` in `local.properties` to enable exact metadata-backed episode choices.
 3. Build `app:assembleDebug` and install the APK on an Android TV emulator or test device.
 
-For a distributable APK, create a permanent PKCS12 signing key and add the four `relay.signing.*`
+For a distributable APK, create a permanent PKCS12 signing key and add the five `relay.signing.*`
 entries from [`signing.properties.example`](signing.properties.example) to the ignored
 `local.properties` file. Relay intentionally refuses release builds until these values are set.
 Release publishing and updater requirements are documented in [`docs/RELEASES.md`](docs/RELEASES.md).
@@ -41,6 +41,14 @@ Command line:
 ```bash
 ./gradlew :app:assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+Normal validation does not require release signing:
+
+```bash
+./gradlew test
+./gradlew :app:testDebugUnitTest
+./gradlew :app:connectedCheck  # requires an Android TV emulator or device
 ```
 
 `local.properties`, signing keys, Gradle caches, and build outputs are intentionally excluded from Git. Never commit API keys, signing credentials, or provider session data.

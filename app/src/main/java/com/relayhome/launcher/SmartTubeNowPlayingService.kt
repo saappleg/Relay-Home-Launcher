@@ -261,6 +261,15 @@ private data class ParsedRelayTubeProfiles(val valid: Boolean, val profiles: Lis
 
 private data class ParsedSubscriptionVideos(val valid: Boolean, val videos: List<SmartTubeSubscriptionVideo>)
 
+internal fun parseRelayTubeProfilePayloadForTest(payload: String?): Pair<Boolean, List<RelayTubeProfile>> =
+    parseRelayTubeProfilePayload(payload).let { it.valid to it.profiles }
+
+internal fun parseSubscriptionVideoPayloadForTest(payload: String?): Pair<Boolean, List<SmartTubeSubscriptionVideo>> =
+    parseSubscriptionVideoPayload(payload).let { it.valid to it.videos }
+
+internal fun relayTubeFeedProfileMatchesForTest(requestedProfileId: String?, returnedProfileId: String?): Boolean =
+    relayTubeFeedProfileMatches(requestedProfileId, returnedProfileId)
+
 private fun parseRelayTubeProfilePayload(payload: String?): ParsedRelayTubeProfiles {
     val raw = payload?.trim()?.takeIf { it.length <= MAX_BRIDGE_PAYLOAD_LENGTH && it.startsWith("[") } ?:
         return ParsedRelayTubeProfiles(false, emptyList())
@@ -377,12 +386,18 @@ private fun normalizeRelayTubeArtwork(value: String?): String? {
     val uri = runCatching { Uri.parse(raw) }.getOrNull() ?: return null
     val scheme = uri.scheme?.lowercase() ?: return null
     return raw.takeIf {
-        scheme in setOf("http", "https") &&
+        scheme == "https" &&
             !uri.host.isNullOrBlank() &&
             uri.userInfo == null &&
             uri.fragment == null &&
-            (uri.port == -1 || uri.port in setOf(80, 443))
+            (uri.port == -1 || uri.port == 443)
     }
+}
+
+private fun relayTubeFeedProfileMatches(requestedProfileId: String?, returnedProfileId: String?): Boolean {
+    val requested = normalizeRelayTubeProfileId(requestedProfileId) ?: return false
+    val returned = normalizeRelayTubeProfileId(returnedProfileId) ?: return false
+    return requested == returned
 }
 
 private fun JSONObject.firstText(vararg names: String): String? = names
@@ -447,11 +462,6 @@ private const val MAX_MEDIA_TIME_MS = 30L * 24L * 60L * 60L * 1_000L
 internal object RelayTubeProfileBridge {
     private const val selectAction = "com.relaytube.action.SELECT_PROFILE"
     private const val requestAction = "com.relaytube.action.REQUEST_PROFILES"
-    private val relayTubePackages = listOf(
-        "com.relaytube.beta",
-        "com.relaytube.stable",
-        "com.relaytube.fdroid"
-    )
     private val mainHandler = Handler(Looper.getMainLooper())
     private var refreshGeneration = 0L
 
@@ -495,7 +505,7 @@ internal object RelayTubeProfileBridge {
         }
     }
 
-    private fun findEndpoint(context: Context): RelayTubeEndpoint? = relayTubePackages.firstNotNullOfOrNull { packageName ->
+    private fun findEndpoint(context: Context): RelayTubeEndpoint? = ProviderHandoff.relayTubePackages.firstNotNullOfOrNull { packageName ->
         runCatching {
             check(context.packageManager.getApplicationInfo(packageName, 0).enabled)
             RelayTubeEndpoint(packageName, "content://$packageName.relayprofiles")
@@ -517,7 +527,7 @@ internal object RelayTubeProfileBridge {
             val returnedProfileId = normalizeRelayTubeProfileId(result.getString(RELAY_TUBE_EXTRA_PROFILE_ID))
             // A feed response is profile-scoped. Without an echoed id there is no safe way to
             // prove that a delayed response belongs to the currently selected profile.
-            if (returnedProfileId != profileId) return@runCatching
+            if (!relayTubeFeedProfileMatches(profileId, returnedProfileId)) return@runCatching
             result.getString("subscriptions")?.let { payload ->
                 val parsed = parseSubscriptionVideoPayload(payload)
                 if (parsed.valid) SmartTubePlaybackStore.saveSubscriptionVideos(context, profileId, payload, parsed.videos)
@@ -690,7 +700,7 @@ class SmartTubeNowPlayingService : NotificationListenerService() {
             // bridge value instead of replacing a resumable card with an app-only card.
             val relayTubeSnapshot = SmartTubePlaybackStore.nowPlaying
                 ?.takeIf {
-                    active.packageName.startsWith("com.relaytube") &&
+                    ProviderHandoff.isRelayTubePackage(active.packageName) &&
                         normalizeRelayTubeText(it.title, MAX_TITLE_LENGTH) == title
                 }
             SmartTubePlaybackStore.updateNowPlaying(SmartTubeNowPlaying(

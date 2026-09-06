@@ -95,12 +95,16 @@ internal object InstalledApps {
     }
 
     /**
-     * Provider apps have dedicated Relay tabs and must not also appear in All Apps.
+     * Relay is not a launchable app tile in its own All Apps list. Provider apps are deliberately
+     * discoverable here too: viewers may want to launch Nuvio, RelayTube, or another supported
+     * provider directly, in addition to using Relay's provider tabs.
+     *
      * Keep this check separate from PackageManager access so the discovery rule can be tested
-     * without relying on mocked framework internals.
+     * without relying on mocked framework internals. Provider handoff trust validation remains
+     * owned by [ProviderHandoff] and is not weakened by this visibility policy.
      */
     internal fun isExcludedPackage(relayPackageName: String, packageName: String): Boolean =
-        packageName == relayPackageName || ProviderHandoff.isProviderPackage(packageName)
+        packageName == relayPackageName
 
     private fun discoverUncached(context: Context): List<InstalledApp> {
         val packageManager = context.packageManager

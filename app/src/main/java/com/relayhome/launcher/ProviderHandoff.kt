@@ -16,13 +16,20 @@ import java.util.Locale
 internal object ProviderHandoff {
     private const val nuvioPackage = "com.nuvio.tv"
     private const val stremioPackage = "com.stremio.one"
-    private val smartTubePackages = listOf(
+    /** Exact package IDs declared in the manifest and supported by the bridge. */
+    internal val smartTubePackages = listOf(
         "com.relaytube.beta",
         "com.relaytube.stable",
         "com.relaytube.fdroid",
         "app.smarttube.stable",
         "org.smarttube.stable",
         "org.smarttube.beta"
+    )
+
+    internal val relayTubePackages = listOf(
+        "com.relaytube.beta",
+        "com.relaytube.stable",
+        "com.relaytube.fdroid"
     )
 
     fun isSmartTubeInstalled(context: Context): Boolean =
@@ -33,10 +40,10 @@ internal object ProviderHandoff {
     }.getOrNull()
 
     internal fun isSmartTubePackage(packageName: String): Boolean =
-        packageName in smartTubePackages ||
-            packageName.startsWith("app.smarttube.") ||
-            packageName.startsWith("org.smarttube.") ||
-            packageName.startsWith("com.relaytube.")
+        packageName in smartTubePackages
+
+    internal fun isRelayTubePackage(packageName: String): Boolean =
+        packageName in relayTubePackages
 
     fun isProviderPackage(packageName: String): Boolean =
         packageName == nuvioPackage || packageName == stremioPackage || isSmartTubePackage(packageName)

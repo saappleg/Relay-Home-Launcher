@@ -9,20 +9,37 @@ import org.junit.Test
 
 class InstalledAppsTest {
     @Test
-    fun exclusionRules_keepRelayAndProviderPackagesOutOfAllApps() {
+    fun exclusionRules_keepRelayOut_butProviderPackagesDiscoverable() {
+        val relayPackage = "com.relayhome.launcher"
+
+        assertTrue(InstalledApps.isExcludedPackage(relayPackage, relayPackage))
+        listOf(
+            "com.nuvio.tv",
+            "com.relaytube.beta",
+            "com.relaytube.stable",
+            "com.relaytube.fdroid",
+            "app.smarttube.stable",
+            "org.smarttube.beta"
+        ).forEach { packageName ->
+            assertTrue(
+                "$packageName should remain discoverable in All Apps",
+                !InstalledApps.isExcludedPackage(relayPackage, packageName)
+            )
+        }
+        assertTrue(!InstalledApps.isExcludedPackage(relayPackage, "com.netflix.ninja"))
+    }
+
+    @Test
+    fun exclusionRules_areExact_soRelayLikePackagesRemainDiscoverable() {
         val relayPackage = "com.relayhome.launcher"
 
         listOf(
-            relayPackage,
-            "com.nuvio.tv",
-            "com.stremio.one",
-            "app.smarttube.stable",
-            "org.smarttube.beta",
-            "com.relaytube.stable"
+            "com.relayhome.launcher.debug",
+            "com.relaytube",
+            "com.relaytube.evil"
         ).forEach { packageName ->
-            assertTrue(InstalledApps.isExcludedPackage(relayPackage, packageName))
+            assertTrue(!InstalledApps.isExcludedPackage(relayPackage, packageName))
         }
-        assertTrue(!InstalledApps.isExcludedPackage(relayPackage, "com.netflix.ninja"))
     }
 
     @Test

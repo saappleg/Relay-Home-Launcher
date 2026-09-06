@@ -1,24 +1,28 @@
 package com.relayhome.launcher
 
 import com.relayhome.launcher.ui.shared.MediaItem
+import com.relayhome.launcher.ui.shared.Provider
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.runBlocking
+import java.io.ByteArrayInputStream
 import org.json.JSONArray
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertNotNull
 import org.junit.Test
 
 /**
- * TmdbApi keeps these helpers private because they are implementation details. Reflection is
- * used only here so the production files remain within Agent 2's no-edit boundary; all assertions
- * exercise the actual normalization and exact-match implementation without an HTTP request.
+ * Covers dependency-free matching and the retry/body-limit seams without making a real network
+ * request.
  */
 class TmdbApiTest {
     @Test
     fun titleNormalization_ignoresCaseAccentsWhitespaceAndPunctuation() {
-        assertEquals("amelie2001", normalize("  Amélie (2001) "))
-        assertEquals("starwarsanewhope", normalize("Star Wars: A New Hope"))
-        assertEquals(normalize("Cafe"), normalize("Café"))
-        assertEquals("", normalize("   ...   "))
+        assertEquals("amelie2001", TmdbTitleMatcher.normalize("  Amélie (2001) "))
+        assertEquals("starwarsanewhope", TmdbTitleMatcher.normalize("Star Wars: A New Hope"))
+        assertEquals(TmdbTitleMatcher.normalize("Cafe"), TmdbTitleMatcher.normalize("Café"))
+        assertEquals("", TmdbTitleMatcher.normalize("   ...   "))
     }
 
     @Test
@@ -32,11 +36,11 @@ class TmdbApiTest {
             """.trimIndent()
         )
 
-        val match = findExactResult(results, "the cafe", "name", "original_name")
+        val match = TmdbTitleMatcher.match(results, "the cafe", "name", "original_name")?.result
         assertNotNull(match)
         assertEquals(10, match?.optInt("id"))
-        assertNull(findExactResult(results, "the cafe extended", "name", "original_name"))
-        assertNull(findExactResult(results, "   ", "name", "original_name"))
+        assertNull(TmdbTitleMatcher.match(results, "the cafe extended", "name", "original_name"))
+        assertNull(TmdbTitleMatcher.match(results, "   ", "name", "original_name"))
     }
 
     @Test
@@ -45,22 +49,77 @@ class TmdbApiTest {
         assertEquals(emptyList<MediaItem>(), TmdbApi.enrichEpisodes(emptyList()))
     }
 
-    private fun normalize(value: String): String = invokePrivate(
-        name = "normalize",
-        parameterTypes = arrayOf(String::class.java),
-        arguments = arrayOf(value)
-    ) as String
-
-    private fun findExactResult(results: JSONArray, query: String, vararg keys: String) = invokePrivate(
-        name = "findExactResult",
-        parameterTypes = arrayOf(JSONArray::class.java, String::class.java, Array<String>::class.java),
-        arguments = arrayOf(results, query, keys)
-    ) as? org.json.JSONObject
-
-    private fun invokePrivate(name: String, parameterTypes: Array<Class<*>>, arguments: Array<Any?>): Any? {
-        val method = TmdbApi::class.java.getDeclaredMethod(name, *parameterTypes).apply {
-            isAccessible = true
+    @Test
+    fun upcomingEnrichment_isCappedToAReasonableRailSizedBatch() {
+        val items = List(40) { index ->
+            MediaItem(
+                title = "Show $index",
+                provider = Provider.NUVIO,
+                progress = 0f,
+                colors = emptyList(),
+                artworkUrl = "https://example.com/$index.jpg",
+                providerContentId = index.toString(),
+                contentType = "series"
+            )
         }
-        return method.invoke(TmdbApi, *arguments)
+
+        assertEquals(24, TmdbApi.upcomingEnrichmentItems(items).size)
+        assertEquals(items.take(24), TmdbApi.upcomingEnrichmentItems(items))
+    }
+
+    @Test
+    fun itemFailures_areIsolated_withoutSwallowingCancellation() = runBlocking {
+        assertEquals("kept", isolateTmdbItemFailure { "kept" })
+        assertNull(isolateTmdbItemFailure<String> { error("bad item") })
+
+        val cancellation = CancellationException("screen left")
+        val thrown = runCatching {
+            isolateTmdbItemFailure<String> { throw cancellation }
+        }.exceptionOrNull()
+        assertTrue(thrown is CancellationException)
+    }
+
+    @Test
+    fun responseBodyReader_rejectsOversizedBodies_andKeepsExactLimit() {
+        assertEquals(
+            "1234",
+            readResponseBodyAtMost(ByteArrayInputStream("1234".toByteArray()), 4) {
+                TmdbResponseTooLargeException()
+            }
+        )
+        val failure = runCatching {
+            readResponseBodyAtMost(ByteArrayInputStream("12345".toByteArray()), 4) {
+                TmdbResponseTooLargeException()
+            }
+        }
+        assertTrue(failure.exceptionOrNull() is TmdbResponseTooLargeException)
+    }
+
+    @Test
+    fun retryTransientResponse_usesSuspendingBackoff_andSucceeds() = runBlocking {
+        val responses = ArrayDeque(
+            listOf(TmdbHttpResponse(503, ""), TmdbHttpResponse(200, "ok"))
+        )
+        val delays = mutableListOf<Long>()
+        val result = TmdbApi.requestWithRetryForTesting(
+            request = { responses.removeFirst() },
+            sleeper = { delays += it }
+        )
+
+        assertEquals("ok", result.getOrThrow())
+        assertEquals(listOf(300L), delays)
+    }
+
+    @Test
+    fun retryCancellation_isPropagated_insteadOfReturnedAsFailure() = runBlocking {
+        val cancellation = CancellationException("screen left")
+        val thrown = runCatching {
+            TmdbApi.requestWithRetryForTesting(
+                request = { TmdbHttpResponse(503, "") },
+                sleeper = { throw cancellation }
+            )
+        }.exceptionOrNull()
+
+        assertTrue(thrown is CancellationException)
     }
 }

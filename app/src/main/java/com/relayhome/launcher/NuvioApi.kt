@@ -10,8 +10,10 @@ import kotlinx.coroutines.delay
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.io.InterruptedIOException
 import java.io.IOException
+import java.io.InputStream
 import java.net.ConnectException
 import java.net.HttpURLConnection
 import java.net.NoRouteToHostException
@@ -181,7 +183,7 @@ internal object NuvioApi {
             val result = response.body.firstJsonObject()
             val accessToken = result.firstString("access_token")
                 ?: throw NuvioQrLoginException("Nuvio QR login returned no access token.")
-            val expiresIn = result.optLong("expires_in", 0L).takeIf { it > 0L }
+            val expiresIn = result.boundedExpiresIn()
             NuvioSession(
                 accessToken = accessToken,
                 refreshToken = result.firstString("refresh_token"),
@@ -218,7 +220,7 @@ internal object NuvioApi {
             val body = JSONObject(response.body)
             val token = body.firstString("access_token")
                 ?: throw NuvioSignInException(response.status, "Nuvio did not return a session token.")
-            val expiresIn = body.optLong("expires_in", 0L).takeIf { it > 0L }
+            val expiresIn = body.boundedExpiresIn()
             NuvioSession(
                 accessToken = token,
                 refreshToken = body.firstString("refresh_token"),
@@ -243,14 +245,18 @@ internal object NuvioApi {
                     val item = progress.getJSONObject(i)
                     item.firstString("content_id", "contentId", "media_id", "id")?.let { contentId ->
                         val existing = get(contentId)
-                        val isNewer = existing == null || item.optString("last_watched") > existing.optString("last_watched")
+                        val isNewer = existing == null || isNewerWatchProgress(
+                            item.firstString("last_watched"),
+                            existing.firstString("last_watched")
+                        )
                         if (isNewer) put(contentId, item)
                     }
                 }
             }
             val relayItems = progressByContent.mapNotNull { (contentId, progressItem) ->
                 val item = libraryByContent[contentId] ?: progressItem
-                val duration = progressItem.optDouble("duration", 0.0)
+                val duration = progressItem.finiteDouble("duration") ?: 0.0
+                val position = progressItem.finiteDouble("position") ?: 0.0
                 val season = progressItem.firstInt("season_number", "season", "seasonNumber") ?: item.firstInt("season_number", "season", "seasonNumber") ?: 0
                 val episode = progressItem.firstInt("episode_number", "episode", "episodeNumber")
                     ?: item.firstInt("episode_number", "episode", "episodeNumber")
@@ -276,7 +282,7 @@ internal object NuvioApi {
                 MediaItem(
                     title = title,
                     provider = Provider.NUVIO,
-                    progress = if (duration > 0) (progressItem.optDouble("position") / duration).toFloat().coerceIn(0f, 1f) else 0f,
+                    progress = if (duration > 0 && position >= 0) (position / duration).toFloat().coerceIn(0f, 1f) else 0f,
                     colors = listOf(Provider.NUVIO.accent.copy(alpha = .5f), Color(0xFF08060C)),
                     artworkUrl = artworkUrl,
                     providerContentId = contentId,
@@ -285,7 +291,7 @@ internal object NuvioApi {
                     showTitle = showTitle,
                     description = item.firstString("description") ?: progressItem.firstString("description"),
                     releaseInfo = item.firstString("release_info"),
-                    rating = item.optDouble("imdb_rating", Double.NaN).takeIf { !it.isNaN() && it > 0 },
+                    rating = item.ratingValue("imdb_rating"),
                     genres = item.optString("genres").trim().trim('[', ']').takeIf { it.isNotBlank() }
                 )
             }
@@ -478,8 +484,11 @@ internal object NuvioApi {
 
     private fun HttpURLConnection.readResponse(): HttpResponse {
         val status = responseCode
+        if (contentLengthLong > MAX_HTTP_RESPONSE_BYTES) throw NuvioResponseTooLargeException()
         val stream = if (status in 200..299) inputStream else errorStream
-        val body = stream?.bufferedReader()?.use { it.readText() }.orEmpty()
+        val body = stream?.use {
+            readResponseBodyAtMost(it, MAX_HTTP_RESPONSE_BYTES) { NuvioResponseTooLargeException() }
+        }.orEmpty()
         return HttpResponse(status, body)
     }
 
@@ -498,8 +507,33 @@ internal object NuvioApi {
 
     private fun JSONObject.firstInt(vararg names: String): Int? = names
         .asSequence()
-        .map { optInt(it, 0) }
-        .firstOrNull { it > 0 }
+        .mapNotNull { parsePositiveInt(opt(it)) }
+        .firstOrNull()
+
+    private fun JSONObject.finiteDouble(name: String): Double? = when (val value = opt(name)) {
+        is Number -> value.toDouble()
+        is String -> value.trim().toDoubleOrNull()
+        else -> null
+    }?.takeIf { it.isFinite() }
+
+    private fun JSONObject.ratingValue(name: String): Double? = finiteDouble(name)
+        ?.takeIf { it in 0.1..10.0 }
+
+    private fun parsePositiveInt(value: Any?): Int? = when (value) {
+        is Number -> value.toDouble().takeIf {
+            it.isFinite() && it >= 1.0 && it <= Int.MAX_VALUE && it % 1.0 == 0.0
+        }?.toInt()
+        is String -> value.trim().toLongOrNull()?.takeIf { it in 1..Int.MAX_VALUE }?.toInt()
+        else -> null
+    }
+
+    private fun JSONObject.boundedExpiresIn(): Long? = when (val value = opt("expires_in")) {
+        is Number -> value.toLong().takeIf {
+            value.toDouble().isFinite() && it in 1..MAX_SESSION_LIFETIME_SECONDS
+        }
+        is String -> value.trim().toLongOrNull()?.takeIf { it in 1..MAX_SESSION_LIFETIME_SECONDS }
+        else -> null
+    }
 
     private fun String.firstJsonObject(): JSONObject {
         val value = trim()
@@ -511,7 +545,60 @@ internal object NuvioApi {
     }
 }
 
+/** Compares provider timestamps without letting mixed or absurd formats corrupt recency ordering. */
+internal fun isNewerWatchProgress(candidate: String?, existing: String?): Boolean {
+    if (existing == null) return true
+    val candidateInstant = parseWatchInstant(candidate)
+    val existingInstant = parseWatchInstant(existing)
+    return when {
+        candidateInstant != null && existingInstant != null -> candidateInstant > existingInstant
+        candidateInstant != null -> true
+        existingInstant != null -> false
+        else -> candidate.orEmpty() > existing
+    }
+}
+
+private fun parseWatchInstant(value: String?): Instant? {
+    val raw = value?.trim().orEmpty()
+    if (raw.isBlank()) return null
+    val parsed = raw.toLongOrNull()?.let { numeric ->
+        runCatching {
+            if (numeric >= 100_000_000_000L) Instant.ofEpochMilli(numeric) else Instant.ofEpochSecond(numeric)
+        }.getOrNull()
+    } ?: runCatching { Instant.parse(raw) }.getOrNull()
+        ?: runCatching { java.time.OffsetDateTime.parse(raw).toInstant() }.getOrNull()
+    return parsed?.takeIf { it.epochSecond in 0..MAX_REASONABLE_WATCH_EPOCH_SECONDS }
+}
+
+/** Reads at most [maxBytes] of an HTTP response and rejects an oversized body. */
+internal fun readResponseBodyAtMost(
+    input: InputStream,
+    maxBytes: Int,
+    tooLarge: () -> IOException
+): String {
+    require(maxBytes > 0) { "maxBytes must be positive" }
+    val output = ByteArrayOutputStream(minOf(maxBytes, 8 * 1024))
+    val buffer = ByteArray(minOf(maxBytes, 8 * 1024))
+    var total = 0
+    while (true) {
+        val count = input.read(buffer)
+        if (count < 0) break
+        if (count == 0) continue
+        if (count > maxBytes - total) throw tooLarge()
+        output.write(buffer, 0, count)
+        total += count
+    }
+    return String(output.toByteArray(), Charsets.UTF_8)
+}
+
 private const val REQUEST_TIMEOUT_MS = 12_000
 private const val MAX_REQUEST_ATTEMPTS = 3
 private const val RETRY_BASE_DELAY_MS = 300L
+internal const val MAX_HTTP_RESPONSE_BYTES = 2 * 1024 * 1024
+private const val MAX_SESSION_LIFETIME_SECONDS = 90L * 24L * 60L * 60L
+private const val MAX_REASONABLE_WATCH_EPOCH_SECONDS = 4_102_444_800L
 private val TRANSIENT_HTTP_STATUSES = setOf(408, 425, 429, 500, 502, 503, 504)
+
+internal class NuvioResponseTooLargeException : NuvioApiException(
+    "Nuvio returned a response larger than the supported limit."
+)

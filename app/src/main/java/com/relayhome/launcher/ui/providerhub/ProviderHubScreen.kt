@@ -142,16 +142,6 @@ import java.time.YearMonth
 
 
 @Composable
-internal fun PlaceholderScreen(title: String, description: String, palette: RelayPalette, onBack: () -> Unit) {
-    Column(Modifier.fillMaxSize().padding(64.dp), verticalArrangement = Arrangement.Center) {
-        Text(title, color = ivory, fontSize = 42.sp, fontWeight = FontWeight.Light)
-        Spacer(Modifier.height(12.dp))
-        Text(description, color = muted, fontSize = 18.sp)
-        Spacer(Modifier.height(30.dp))
-        ActionButton("Back to Home", palette, primary = true, onClick = onBack)
-    }
-}
-@Composable
 internal fun ProviderHubScreen(
     provider: Provider,
     palette: RelayPalette,
@@ -170,12 +160,15 @@ internal fun ProviderHubScreen(
 ) {
     val context = LocalContext.current
     val firstActionFocusRequester = remember(provider, nuvioConnected, nuvioProfiles.size) { FocusRequester() }
+    val backFocusRequester = remember { FocusRequester() }
     LaunchedEffect(provider, nuvioConnected, nuvioProfiles.size) {
         withFrameNanos { }
-        firstActionFocusRequester.requestFocus()
+        if (runCatching { firstActionFocusRequester.requestFocus() }.isFailure) {
+            runCatching { backFocusRequester.requestFocus() }
+        }
     }
     BackHandler(onBack = onBack)
-    Column(Modifier.fillMaxSize().padding(64.dp), verticalArrangement = Arrangement.Center) {
+    Column(Modifier.fillMaxSize().padding(RelayTvMargins.screenHorizontal), verticalArrangement = Arrangement.Center) {
         Text(provider.label, color = ivory, fontSize = 42.sp, fontWeight = FontWeight.Light)
         Spacer(Modifier.height(12.dp))
         Text(
@@ -251,6 +244,6 @@ internal fun ProviderHubScreen(
             }
             Spacer(Modifier.height(12.dp))
         }
-        ActionButton("Back to Home", palette.copy(accent = provider.accent), primary = true, onClick = onBack)
+        ActionButton("Back to Home", palette.copy(accent = provider.accent), primary = true, focusRequester = backFocusRequester, onClick = onBack)
     }
 }

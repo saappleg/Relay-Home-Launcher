@@ -202,6 +202,26 @@ private fun HomeContentItem(content: @Composable () -> Unit) {
 }
 
 /**
+ * Compose can report a failed focus request with `false` while a just-recomposed TV node is
+ * attaching; it does not always throw. Retry across a few frames so a route anchor never becomes
+ * the user's visible focus destination merely because its real target missed one attachment frame.
+ */
+internal suspend fun requestHomeFocusWithRetry(
+    requester: FocusRequester,
+    attempts: Int = 4
+): Boolean {
+    repeat(attempts.coerceAtLeast(1)) {
+        withFrameNanos { }
+        if (runCatching {
+                requester.requestFocus()
+                true
+            }.getOrDefault(false)
+        ) return true
+    }
+    return false
+}
+
+/**
  * A route endpoint must remain attached even while the LazyRow containing the real first card
  * is recycled or while Home is swapping rows/modes. The endpoint immediately hands focus to the
  * currently mounted row entry, or to the current top-content fallback if that row disappeared.
@@ -220,13 +240,12 @@ internal fun HomeFocusAnchorHost(
             var focused by remember(row) { mutableStateOf(false) }
             LaunchedEffect(focused, mountedRows, fallbackRequester) {
                 if (focused) {
-                    withFrameNanos { }
                     val target = if (row in mountedRows) entryRequester else fallbackRequester
-                    if (runCatching { target.requestFocus() }.isFailure && target !== fallbackRequester) {
+                    if (!requestHomeFocusWithRetry(target) && target !== fallbackRequester) {
                         // A provider/settings refresh can still remove the row between the
                         // mounted-row snapshot and this frame. Return to the known top target
                         // rather than leaving the focus owner without a valid destination.
-                        runCatching { fallbackRequester.requestFocus() }
+                        requestHomeFocusWithRetry(fallbackRequester)
                     }
                 }
             }
@@ -371,11 +390,6 @@ internal fun HomeScreen(
         Provider.entries.associateWith { FocusRequester() }
     }
     val heroFocusRequester = remember { FocusRequester() }
-    val continueFocusRequester = remember { FocusRequester() }
-    val favoriteAppsFocusRequester = remember { FocusRequester() }
-    val recommendationFocusRequester = remember { FocusRequester() }
-    val subscriptionFocusRequester = remember { FocusRequester() }
-    val upcomingFocusRequester = remember { FocusRequester() }
     val homeScrollState = rememberScrollState()
     var profilePickerVisible by remember { mutableStateOf(false) }
     var ambientFocus by remember { mutableStateOf(ambientFocusFor(hero)) }
@@ -494,37 +508,23 @@ internal fun HomeScreen(
         }
     }
     val favoriteAppsVisible = HomeRow.FAVORITE_APPS !in hiddenHomeRows && favoriteInstalledApps.isNotEmpty()
-    val rowFocusRequesters = remember {
-        mapOf(
-            HomeRow.CONTINUE_WATCHING to continueFocusRequester,
-            HomeRow.FAVORITE_APPS to favoriteAppsFocusRequester,
-            HomeRow.RECOMMENDATIONS to recommendationFocusRequester,
-            HomeRow.SUBSCRIPTIONS to subscriptionFocusRequester,
-            HomeRow.UPCOMING to upcomingFocusRequester
-        )
-    }
     val rowEntryFocusRequesters = remember {
         HomeRow.entries.associateWith { FocusRequester() }
     }
-    val firstRowFocusRequester = availableHomeRows.firstOrNull()?.let { rowFocusRequesters[it] }
+    // Enter each mounted row through its local bridge. Sending a handoff through a separate
+    // invisible route node can strand focus there when a held D-pad event arrives during a Home
+    // recomposition.
+    val firstRowEntryFocusRequester = availableHomeRows.firstOrNull()?.let { rowEntryFocusRequesters[it] }
     val topContentFocusRequester = when {
-        minimalHomeEnabled && favoriteAppsVisible -> favoriteAppsFocusRequester
+        minimalHomeEnabled && favoriteAppsVisible -> rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS)
         minimalHomeEnabled -> homeFocusRequester
         activePeekProvider != null -> peekFocusRequester
         else -> heroFocusRequester
     }
-    val mountedHomeRows = when {
-        activePeekProvider != null -> emptySet()
-        minimalHomeEnabled -> if (favoriteAppsVisible) setOf(HomeRow.FAVORITE_APPS) else emptySet()
-        providers.isEmpty() -> if (favoriteAppsVisible) setOf(HomeRow.FAVORITE_APPS) else emptySet()
-        continueWatching.isEmpty() && favoriteInstalledApps.isEmpty() && recommendationItems.isEmpty() &&
-            subscriptionItems.isEmpty() && upcomingEpisodes.isEmpty() -> emptySet()
-        else -> availableHomeRows.toSet()
-    }
-    fun previousRowFocusRequester(index: Int): FocusRequester =
-        if (index == 0) topContentFocusRequester else rowFocusRequesters[availableHomeRows[index - 1]]!!
-    fun nextRowFocusRequester(index: Int): FocusRequester? =
-        availableHomeRows.getOrNull(index + 1)?.let { rowFocusRequesters[it] }
+    fun previousRowEntryFocusRequester(index: Int): FocusRequester =
+        if (index == 0) topContentFocusRequester else rowEntryFocusRequesters.getValue(availableHomeRows[index - 1])
+    fun nextRowEntryFocusRequester(index: Int): FocusRequester? =
+        availableHomeRows.getOrNull(index + 1)?.let { rowEntryFocusRequesters.getValue(it) }
     val homeScope = rememberCoroutineScope()
     fun scrollHomeToTop() {
         if (homeScrollState.value != 0) {
@@ -566,7 +566,7 @@ internal fun HomeScreen(
                         )
                     } else HeroPanel(
                         hero, palette, homeFocusRequester, heroFocusRequester, heroCandidates,
-                        downFocusRequester = firstRowFocusRequester,
+                        downFocusRequester = firstRowEntryFocusRequester,
                         onHeroFocused = {
                             showHeroAmbient()
                             scrollHomeToTop()
@@ -631,16 +631,16 @@ internal fun HomeScreen(
                                 onFocusedItem = showMediaAmbient,
                                 onItemSelected = onItemSelected,
                                 largeCards = true,
-                                upFocusRequester = previousRowFocusRequester(rowIndex),
+                                upFocusRequester = previousRowEntryFocusRequester(rowIndex),
                                 firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.CONTINUE_WATCHING),
-                                downFocusRequester = nextRowFocusRequester(rowIndex)
+                                downFocusRequester = nextRowEntryFocusRequester(rowIndex)
                             )
                             HomeRow.FAVORITE_APPS -> FavoriteAppsRail(
                                 apps = favoriteInstalledApps,
                                 palette = palette,
                                 focusRequester = rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS),
-                                upFocusRequester = previousRowFocusRequester(rowIndex),
-                                downFocusRequester = nextRowFocusRequester(rowIndex),
+                                upFocusRequester = previousRowEntryFocusRequester(rowIndex),
+                                downFocusRequester = nextRowEntryFocusRequester(rowIndex),
                                 onFocusedApp = showAppAmbient
                             ) { app -> InstalledApps.launch(context, app) }
                             HomeRow.RECOMMENDATIONS -> MediaRail(
@@ -652,9 +652,9 @@ internal fun HomeScreen(
                                 onFocusedItem = showMediaAmbient,
                                 onItemSelected = onItemSelected,
                                 posters = true,
-                                upFocusRequester = previousRowFocusRequester(rowIndex),
+                                upFocusRequester = previousRowEntryFocusRequester(rowIndex),
                                 firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.RECOMMENDATIONS),
-                                downFocusRequester = nextRowFocusRequester(rowIndex)
+                                downFocusRequester = nextRowEntryFocusRequester(rowIndex)
                             )
                             HomeRow.SUBSCRIPTIONS -> MediaRail(
                                 title = "New from subscriptions",
@@ -665,9 +665,9 @@ internal fun HomeScreen(
                                 onFocusedItem = showMediaAmbient,
                                 onItemSelected = onItemSelected,
                                 largeCards = true,
-                                upFocusRequester = previousRowFocusRequester(rowIndex),
+                                upFocusRequester = previousRowEntryFocusRequester(rowIndex),
                                 firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.SUBSCRIPTIONS),
-                                downFocusRequester = nextRowFocusRequester(rowIndex)
+                                downFocusRequester = nextRowEntryFocusRequester(rowIndex)
                             )
                             HomeRow.UPCOMING -> MediaRail(
                                 title = "Coming Up",
@@ -679,9 +679,9 @@ internal fun HomeScreen(
                                 onItemSelected = onItemSelected,
                                 showPremiereDate = true,
                                 largeCards = true,
-                                upFocusRequester = previousRowFocusRequester(rowIndex),
+                                upFocusRequester = previousRowEntryFocusRequester(rowIndex),
                                 firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.UPCOMING),
-                                downFocusRequester = nextRowFocusRequester(rowIndex)
+                                downFocusRequester = nextRowEntryFocusRequester(rowIndex)
                             )
                         }
                         Spacer(Modifier.height(18.dp))
@@ -690,12 +690,6 @@ internal fun HomeScreen(
             }
             Spacer(Modifier.height(52.dp))
         }
-        HomeFocusAnchorHost(
-            routeRequesters = rowFocusRequesters,
-            entryRequesters = rowEntryFocusRequesters,
-            mountedRows = mountedHomeRows,
-            fallbackRequester = topContentFocusRequester
-        )
         // The navigation lives over the artwork, keeping the visual field continuous from the top edge.
         Box(
             modifier = Modifier
@@ -781,43 +775,74 @@ internal fun EmptyHomeState(palette: RelayPalette, onSettings: () -> Unit) {
 
 @Composable
 private fun WeatherReadout(city: String, palette: RelayPalette) {
-    var weather by remember(city) { mutableStateOf<WeatherCurrent?>(null) }
+    if (city.isBlank()) return
+    var weatherState by remember(city) { mutableStateOf<WeatherReadoutState>(WeatherReadoutState.Loading) }
     LaunchedEffect(city) {
-        weather = withContext(Dispatchers.IO) { WeatherApi.current(city).getOrNull() }
-    }
-    weather?.let { current ->
-        Row(
-            modifier = Modifier
-                .clip(RoundedCornerShape(12.dp))
-                .background(Color.White.copy(alpha = .07f))
-                .padding(horizontal = 10.dp, vertical = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = WeatherApi.weatherIcon(current.weatherCode),
-                color = palette.accent,
-                fontSize = 17.sp,
-                modifier = Modifier.padding(end = 6.dp)
+        weatherState = WeatherReadoutState.Loading
+        weatherState = withContext(Dispatchers.IO) {
+            WeatherApi.current(city).fold(
+                onSuccess = { WeatherReadoutState.Available(it) },
+                onFailure = { WeatherReadoutState.Unavailable }
             )
-            Column {
+        }
+    }
+    when (val state = weatherState) {
+        WeatherReadoutState.Loading -> WeatherStatusChip("Weather…")
+        WeatherReadoutState.Unavailable -> WeatherStatusChip("Weather unavailable")
+        is WeatherReadoutState.Available -> {
+            val current = state.current
+            Row(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(Color.White.copy(alpha = .07f))
+                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Text(
-                    text = "${current.temperatureCelsius.roundToInt()}°",
-                    color = ivory,
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Medium,
-                    lineHeight = 17.sp
+                    text = WeatherApi.weatherIcon(current.weatherCode),
+                    color = palette.accent,
+                    fontSize = 17.sp,
+                    modifier = Modifier.padding(end = 6.dp)
                 )
-                Text(
-                    text = current.locationName,
-                    color = muted,
-                    fontSize = 10.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    lineHeight = 12.sp
-                )
+                Column {
+                    Text(
+                        text = "${current.temperatureCelsius.roundToInt()}°",
+                        color = ivory,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Medium,
+                        lineHeight = 17.sp
+                    )
+                    Text(
+                        text = current.locationName,
+                        color = muted,
+                        fontSize = 10.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        lineHeight = 12.sp
+                    )
+                }
             }
         }
     }
+}
+
+private sealed interface WeatherReadoutState {
+    data object Loading : WeatherReadoutState
+    data class Available(val current: WeatherCurrent) : WeatherReadoutState
+    data object Unavailable : WeatherReadoutState
+}
+
+@Composable
+private fun WeatherStatusChip(text: String) {
+    Text(
+        text = text,
+        color = muted,
+        fontSize = 13.sp,
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color.White.copy(alpha = .07f))
+            .padding(horizontal = 10.dp, vertical = 8.dp)
+    )
 }
 
 @Composable
@@ -1137,6 +1162,7 @@ internal fun HeroPanel(
 ) {
     val context = LocalContext.current
     val paletteScope = rememberCoroutineScope()
+    val detailsFocusRequester = remember { FocusRequester() }
     val heroImageRequest = remember(hero.artworkUrl) {
         ImageRequest.Builder(context)
             .data(hero.artworkUrl)
@@ -1184,11 +1210,24 @@ internal fun HeroPanel(
                 accent = palette.accent,
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(end = 78.dp, bottom = 24.dp)
+                    .padding(end = RelayTvMargins.screenHorizontal, bottom = 24.dp)
             )
         }
-        // Keep changing media titles well clear of the persistent navigation overlay.
-        Column(modifier = Modifier.padding(start = 78.dp, top = 180.dp, end = 78.dp, bottom = 42.dp).width(620.dp)) {
+        // Keep the content inside the fixed hero bounds. A provider description can be much
+        // longer than the short hero subtitle Google TV expects; anchoring this block to the
+        // bottom leaves the action row a guaranteed home instead of letting long text push it
+        // below the 420dp panel and behind the next rail.
+        Column(
+            modifier = Modifier
+                .align(Alignment.BottomStart)
+                .padding(
+                    start = RelayTvMargins.screenHorizontal,
+                    end = RelayTvMargins.screenHorizontal,
+                    bottom = 42.dp
+                )
+                .widthIn(max = 620.dp)
+                .fillMaxWidth()
+        ) {
             val heroItem = hero.item
             if (heroItem?.provider == Provider.SMARTTUBE) {
                 Text("RELAYTUBE FOCUS", color = Provider.SMARTTUBE.accent, fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
@@ -1206,25 +1245,50 @@ internal fun HeroPanel(
                     overflow = TextOverflow.Ellipsis
                 )
                 Spacer(Modifier.height(8.dp))
-                Text(hero.subtitle, color = muted, fontSize = 15.sp, lineHeight = 22.sp)
+                Text(
+                    hero.subtitle.visibleRelayText(),
+                    color = muted,
+                    fontSize = 15.sp,
+                    lineHeight = 22.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
             }
-            Spacer(Modifier.height(20.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Spacer(Modifier.height(12.dp))
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val heroContentKey = hero.item?.contentKey() ?: "${hero.title}|${hero.subtitle}"
                 ActionButton(
                     if ((hero.item?.progress ?: 0f) > 0f) "▶  Resume" else "▶  Play",
                     palette,
                     primary = true,
+                    contentKey = heroContentKey,
+                    modifier = Modifier
+                        // Resume is the longest hero action label. Give only this button the
+                        // extra 16dp needed at TV density and during the focused 1.06x scale;
+                        // keep the secondary Details action compact.
+                        .width(128.dp)
+                        .height(44.dp),
                     focusRequester = resumeFocusRequester,
                     upFocusRequester = homeFocusRequester,
                     downFocusRequester = downFocusRequester,
+                    rightFocusRequester = detailsFocusRequester,
                     onFocused = { if (it) onHeroFocused() }
                 ) { hero.item?.let { ProviderHandoff.play(context, it) } }
                 ActionButton(
                     "ⓘ  Details",
                     palette,
                     primary = false,
+                    contentKey = heroContentKey,
+                    modifier = Modifier
+                        .width(122.dp)
+                        .height(44.dp),
+                    focusRequester = detailsFocusRequester,
                     upFocusRequester = homeFocusRequester,
                     downFocusRequester = downFocusRequester,
+                    leftFocusRequester = resumeFocusRequester,
                     onFocused = { if (it) onHeroFocused() }
                 ) { hero.item?.let(onItemSelected) }
             }
@@ -1264,6 +1328,8 @@ internal fun ActionButton(
     label: String,
     palette: RelayPalette,
     primary: Boolean,
+    contentKey: Any? = null,
+    modifier: Modifier = Modifier,
     focusRequester: FocusRequester? = null,
     upFocusRequester: FocusRequester? = null,
     downFocusRequester: FocusRequester? = null,
@@ -1276,14 +1342,9 @@ internal fun ActionButton(
     val focused by source.collectIsFocusedAsState()
     val scale by animateFloatAsState(if (focused) 1.06f else 1f, label = "button focus")
     LaunchedEffect(focused) { onFocused(focused) }
-    Text(
-        label,
-        // Use an explicit opaque ink color for light primary surfaces. On some TV renderers
-        // the themed backdrop color is composited away, leaving the action label invisible.
-        color = if (primary) Color(0xFF111318) else ivory,
-        fontSize = 17.sp,
-        fontWeight = FontWeight.SemiBold,
-        modifier = (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+    Box(
+        modifier = modifier
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .then(
                 if (upFocusRequester != null || downFocusRequester != null || leftFocusRequester != null || rightFocusRequester != null) Modifier.focusProperties {
                     if (upFocusRequester != null) up = upFocusRequester
@@ -1292,12 +1353,29 @@ internal fun ActionButton(
                     if (rightFocusRequester != null) right = rightFocusRequester
                 } else Modifier
             )
-            .scale(scale).clip(RoundedCornerShape(24.dp))
+            .scale(scale)
+            .clip(RoundedCornerShape(22.dp))
             .background(if (primary) ivory else Color(0xFF171A20))
-            .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color(0xFF363A42), RoundedCornerShape(24.dp))
+            .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color(0xFF363A42), RoundedCornerShape(22.dp))
             .clickable(interactionSource = source, indication = null, onClick = onClick)
-            .padding(horizontal = 21.dp, vertical = 12.dp)
-    )
+            .padding(horizontal = 14.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        // Keep the action label as a single measured line. Re-key only the text child when the
+        // hero item changes: the focusable/clickable button stays mounted, while a rotated hero
+        // gets a fresh text measurement even when both items use the same Resume label.
+        key(contentKey ?: label) {
+            Text(
+                text = label,
+                color = if (primary) Color(0xFF111318) else ivory,
+                fontSize = 17.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                softWrap = false,
+                overflow = TextOverflow.Clip
+            )
+        }
+    }
 }
 
 @Composable
@@ -1336,8 +1414,7 @@ internal fun MediaRail(
             // Resetting the row before handing focus to that card makes the transfer deterministic
             // after a vertical D-pad move from a far-scrolled row.
             listState.scrollToItem(0)
-            withFrameNanos { }
-            runCatching { firstCardFocusRequester.requestFocus() }
+            requestHomeFocusWithRetry(firstCardFocusRequester)
         }
     }
     Column(
@@ -1362,7 +1439,7 @@ internal fun MediaRail(
                     .onFocusChanged { entryFocused = it.hasFocus }
             )
         }
-        Text(title, color = ivory, fontSize = 19.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = 76.dp, bottom = 10.dp))
+        Text(title, color = ivory, fontSize = 19.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = RelayTvMargins.screenHorizontal, bottom = 10.dp))
         BoxWithConstraints(Modifier.fillMaxWidth()) {
             // Match TopBar's logical-width split: on the narrower 1080p layout, size the
             // cards from the available canvas. The primary content rails use fewer, larger
@@ -1381,29 +1458,23 @@ internal fun MediaRail(
             val displayedCardWidth = cardWidth ?: if (posters) 140.dp else 310.dp
             LazyRow(
                 state = listState,
-                contentPadding = PaddingValues(horizontal = 76.dp),
+                contentPadding = PaddingValues(horizontal = RelayTvMargins.screenHorizontal),
                 horizontalArrangement = Arrangement.spacedBy(13.dp)
             ) {
-                items(
-                    count = items.size,
-                    key = { index ->
-                        val item = items[index]
-                        "${item.provider}:${item.providerContentId ?: item.title}:${item.episodeInfo.orEmpty()}:$index"
-                    }
-                ) { index ->
+                val stableItems = items.distinctBy { it.contentKey() }
+                items(stableItems, key = { it.contentKey() }) { item ->
                     MediaCard(
-                        item = items[index],
+                        item = item,
                         palette = palette,
                         poster = posters,
                         cardWidth = cardWidth,
                         dateFormat = dateFormat,
                         showEpisodeInfo = title == "Continue Watching" || title == "Coming Up",
                         showPremiereDate = showPremiereDate,
-                        focusRequester = if (index == 0 && firstFocusRequester != null) firstCardFocusRequester else null,
+                        focusRequester = if (item.contentKey() == stableItems.firstOrNull()?.contentKey() && firstFocusRequester != null) firstCardFocusRequester else null,
                         upFocusRequester = upFocusRequester,
                         downFocusRequester = downFocusRequester,
                         onClick = {
-                        val item = items[index]
                         if (item.provider == Provider.SMARTTUBE && item.providerContentId != null) {
                             ProviderHandoff.play(context, item)
                         } else {
@@ -1411,7 +1482,6 @@ internal fun MediaRail(
                         }
                         }
                     ) { isFocused ->
-                        val item = items[index]
                         val itemKey = item.contentKey()
                         if (isFocused) {
                             onFocusedItem(item)
@@ -1586,8 +1656,7 @@ internal fun FavoriteAppsRail(
     LaunchedEffect(entryFocused) {
         if (entryFocused && focusRequester != null) {
             railBringIntoViewRequester.bringIntoView()
-            withFrameNanos { }
-            runCatching { firstCardFocusRequester.requestFocus() }
+            requestHomeFocusWithRetry(firstCardFocusRequester)
         }
     }
     val railHasFocus = remember { booleanArrayOf(false) }
@@ -1600,7 +1669,7 @@ internal fun FavoriteAppsRail(
                 }
                 railHasFocus[0] = focusState.hasFocus
             }
-            .padding(start = 76.dp)
+            .padding(start = RelayTvMargins.screenHorizontal)
     ) {
         if (focusRequester != null) {
             Box(
@@ -1617,12 +1686,11 @@ internal fun FavoriteAppsRail(
             contentPadding = PaddingValues(end = 64.dp, top = 5.dp, bottom = 7.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            items(apps.size, key = { apps[it].packageName }) { index ->
-                val app = apps[index]
+            items(apps, key = { it.packageName }) { app ->
                 FavoriteAppCard(
                     app = app,
                     palette = palette,
-                    focusRequester = if (index == 0 && focusRequester != null) firstCardFocusRequester else null,
+                    focusRequester = if (app.packageName == apps.firstOrNull()?.packageName && focusRequester != null) firstCardFocusRequester else null,
                     upFocusRequester = upFocusRequester,
                     downFocusRequester = downFocusRequester,
                     onFocusChanged = { focused -> onFocusedApp(if (focused) app else null) }

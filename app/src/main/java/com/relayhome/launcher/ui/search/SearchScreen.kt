@@ -168,12 +168,13 @@ internal fun SearchScreen(
     val sortedProviders = remember(providers) { providers.sortedBy { it.label } }
     val hasProviders = sortedProviders.isNotEmpty()
     val allInstalledApps = rememberInstalledApps(context)
+    val visibleResults = remember(results) { results.distinctBy { it.contentKey() } }
     val installedApps = remember(allInstalledApps) {
         allInstalledApps
             .filterNot { ProviderHandoff.isProviderPackage(it.packageName) }
             .take(6)
     }
-    val hasResults = searchProvider == Provider.NUVIO && results.isNotEmpty()
+    val hasResults = searchProvider == Provider.NUVIO && visibleResults.isNotEmpty()
     val hasHandoff = query.isNotBlank()
     val hasApps = installedApps.isNotEmpty()
     val searchDownRequester = when {
@@ -198,7 +199,7 @@ internal fun SearchScreen(
         loading = false
     }
     BackHandler(onBack = onBackHome)
-    Column(Modifier.fillMaxSize().verticalScroll(searchScreenState).padding(horizontal = 76.dp, vertical = 42.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(searchScreenState).padding(horizontal = RelayTvMargins.screenHorizontal, vertical = 42.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Search", color = ivory, fontSize = 38.sp, fontWeight = FontWeight.Light)
             Spacer(Modifier.width(18.dp))
@@ -299,13 +300,13 @@ internal fun SearchScreen(
             Text("No matches found. Try a more specific title.", color = muted, fontSize = 17.sp)
         } else {
             LazyRow(horizontalArrangement = Arrangement.spacedBy(15.dp)) {
-                items(results.size) { index ->
+                items(visibleResults, key = { it.contentKey() }) { result ->
                     MediaCard(
-                        results[index], palette, poster = true,
-                        focusRequester = if (index == 0) resultFocusRequester else null,
+                        result, palette, poster = true,
+                        focusRequester = if (result.contentKey() == visibleResults.firstOrNull()?.contentKey()) resultFocusRequester else null,
                         upFocusRequester = searchFocusRequester,
                         downFocusRequester = if (hasHandoff) handoffFocusRequester else if (hasApps) appFocusRequester else null,
-                        onClick = { onItemSelected(results[index]) }
+                        onClick = { onItemSelected(result) }
                     ) { }
                 }
             }
@@ -328,12 +329,11 @@ internal fun SearchScreen(
             horizontalArrangement = Arrangement.spacedBy(13.dp),
             contentPadding = PaddingValues(end = 16.dp)
         ) {
-            items(installedApps.size) { index ->
-                val app = installedApps[index]
+            items(installedApps, key = { it.packageName }) { app ->
                 AppTile(
                     app,
                     palette,
-                    focusRequester = if (index == 0) appFocusRequester else null,
+                    focusRequester = if (app.packageName == installedApps.firstOrNull()?.packageName) appFocusRequester else null,
                     upFocusRequester = if (hasHandoff) handoffFocusRequester else if (hasResults) resultFocusRequester else searchFocusRequester
                 ) { InstalledApps.launch(context, app) }
             }

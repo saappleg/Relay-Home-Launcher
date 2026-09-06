@@ -28,14 +28,24 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsFocused
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.unit.dp
 import com.relayhome.launcher.ui.home.HomeFocusAnchorHost
+import com.relayhome.launcher.ui.home.ActionButton
+import com.relayhome.launcher.ui.home.HeroPanel
 import com.relayhome.launcher.ui.shared.HomeRow
+import com.relayhome.launcher.ui.shared.Hero
+import com.relayhome.launcher.ui.shared.MediaItem
+import com.relayhome.launcher.ui.shared.Provider
+import com.relayhome.launcher.ui.shared.contentKey
+import com.relayhome.launcher.ui.shared.orbitalPalette
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -145,6 +155,150 @@ class DpadFocusTraversalTest {
         }
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("dynamic-${HomeRow.CONTINUE_WATCHING.name}").assertExists()
+    }
+
+    @Test
+    fun heroActions_keepReadableLabels_andDirectlyEnterFirstRow() {
+        val heroRequester = FocusRequester()
+        val firstRowRequester = FocusRequester()
+
+        composeRule.setContent {
+            Column {
+                ActionButton(
+                    label = "▶  Play",
+                    palette = orbitalPalette,
+                    primary = true,
+                    modifier = Modifier
+                        .width(128.dp)
+                        .height(48.dp)
+                        .testTag("hero-play"),
+                    focusRequester = heroRequester,
+                    downFocusRequester = firstRowRequester,
+                    onClick = {}
+                )
+                Box(
+                    Modifier
+                        .width(240.dp)
+                        .height(80.dp)
+                        .testTag("first-row-entry")
+                        .focusRequester(firstRowRequester)
+                        .focusable()
+                )
+            }
+            LaunchedEffect(Unit) { heroRequester.requestFocus() }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithTag("hero-play").assertIsDisplayed()
+        composeRule.onNodeWithText("▶  Play").assertTextEquals("▶  Play")
+        composeRule.onNodeWithTag("hero-play").performKeyInput { pressKey(Key.DirectionDown) }
+        composeRule.onNodeWithTag("first-row-entry").assertIsFocused()
+    }
+
+    @Test
+    fun campMiasmaHero_keepsBothActionLabelsVisibleAndFocusable() {
+        assertLongNuvioMovieHero("Camp Miasma", progress = 0.35f, expectedAction = "▶  Resume")
+    }
+
+    @Test
+    fun iWantYourSexHero_keepsBothActionLabelsVisibleAndFocusable() {
+        assertLongNuvioMovieHero("I Want Your Sex", progress = 0f, expectedAction = "▶  Play")
+    }
+
+    @Test
+    fun rotatingHeroPanel_rebindsLabelsWhenItemsChange() {
+        val firstItem = MediaItem(
+            title = "Camp Miasma",
+            provider = Provider.NUVIO,
+            progress = 0.35f,
+            colors = emptyList(),
+            artworkUrl = ""
+        )
+        val nextItem = MediaItem(
+            title = "President Curtis",
+            provider = Provider.NUVIO,
+            progress = 0.35f,
+            colors = emptyList(),
+            artworkUrl = "",
+            episodeInfo = "S01 • E06"
+        )
+        val firstHero = Hero("Camp Miasma", "Long Camp Miasma metadata that remains bounded", orbitalPalette, "", firstItem)
+        val nextHero = Hero("President Curtis", "S01 • E06", orbitalPalette, "", nextItem)
+        val heroState = mutableStateOf(firstHero)
+        val homeRequester = FocusRequester()
+        val resumeRequester = FocusRequester()
+
+        composeRule.setContent {
+            val hero = heroState.value
+            HeroPanel(
+                hero = hero,
+                palette = orbitalPalette,
+                homeFocusRequester = homeRequester,
+                resumeFocusRequester = resumeRequester,
+                heroCandidates = listOf(firstItem, nextItem),
+                onHeroFocused = {},
+                onItemSelected = {},
+                onArtworkColor = {}
+            )
+            LaunchedEffect(hero.item?.contentKey()) { resumeRequester.requestFocus() }
+        }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("▶  Resume").assertIsDisplayed().assertIsFocused()
+        composeRule.onNodeWithText("ⓘ  Details").assertIsDisplayed()
+
+        // Keep the same Resume label while changing the item. This catches stale/reused text
+        // content, not only the ordinary Play -> Resume string change.
+        composeRule.runOnIdle { heroState.value = nextHero }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithText("President Curtis").assertIsDisplayed()
+        composeRule.onNodeWithText("S01 • E06").assertIsDisplayed()
+        composeRule.onNodeWithText("▶  Resume").assertIsDisplayed().assertIsFocused()
+        composeRule.onNodeWithText("ⓘ  Details").assertIsDisplayed()
+    }
+
+    private fun assertLongNuvioMovieHero(title: String, progress: Float, expectedAction: String) {
+        // These are the two production titles that exposed the clipping: their provider
+        // subtitle/metadata can be much longer than the normal one-line hero copy.
+        val item = MediaItem(
+            title = title,
+            provider = Provider.NUVIO,
+            progress = progress,
+            colors = emptyList(),
+            artworkUrl = "",
+            description = "2025  •  Drama  •  1h 48m  •  A deliberately long provider description that must not displace the hero actions"
+        )
+        val resumeRequester = FocusRequester()
+
+        composeRule.setContent {
+            HeroPanel(
+                hero = Hero(
+                    title = title,
+                    subtitle = "2025  •  Drama  •  1h 48m  •  Extended metadata from Nuvio that used to push the action row out of the fixed hero panel",
+                    palette = orbitalPalette,
+                    artworkUrl = "",
+                    item = item
+                ),
+                palette = orbitalPalette,
+                homeFocusRequester = FocusRequester(),
+                resumeFocusRequester = resumeRequester,
+                heroCandidates = listOf(item),
+                onHeroFocused = {},
+                onItemSelected = {},
+                onArtworkColor = {}
+            )
+            LaunchedEffect(title) { resumeRequester.requestFocus() }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithText(expectedAction)
+            .assertIsDisplayed()
+            .assertIsFocused()
+        composeRule.onNodeWithText("ⓘ  Details").assertIsDisplayed()
+
+        // The explicit horizontal bridge proves the second compact action is a real focus
+        // target, rather than text that only happens to be painted beside the first button.
+        composeRule.onNodeWithText(expectedAction).performKeyInput { pressKey(Key.DirectionRight) }
+        composeRule.onNodeWithText("ⓘ  Details").assertIsFocused()
     }
 
     private fun assertTwoByTwoTraversal(screen: String) {

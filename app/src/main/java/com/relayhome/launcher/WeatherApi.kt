@@ -13,6 +13,7 @@ import java.net.URLEncoder
 import java.net.UnknownHostException
 import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -36,6 +37,10 @@ internal class WeatherInvalidLocationException(message: String) : WeatherApiExce
 
 internal class WeatherHttpException(val statusCode: Int) : WeatherApiException(
     "Weather lookup failed (HTTP $statusCode)."
+)
+
+internal class WeatherResponseTooLargeException : WeatherApiException(
+    "Weather returned a response larger than the supported limit."
 )
 
 internal class WeatherTransientException(
@@ -100,19 +105,18 @@ internal object WeatherApi {
     ): Result<WeatherCurrent> = withContext(Dispatchers.IO) {
         val normalized = normalizeCity(city)
         if (normalized.isBlank()) return@withContext Result.failure(WeatherNotConfiguredException())
-        runCatching {
+        try {
             val locationUrl = "$geocodingBaseUrl?name=${encode(normalized)}&count=1&language=en&format=json"
             val location = parseLocation(request("geocoding", locationUrl, transport, sleeper))
             val forecastUrl = "$forecastBaseUrl?latitude=${location.latitude}&longitude=${location.longitude}" +
                 "&current=temperature_2m,weather_code&temperature_unit=celsius&timezone=auto"
             val current = parseCurrent(request("forecast", forecastUrl, transport, sleeper))
-            WeatherCurrent(location.name, current.first, current.second)
-        }.fold(
-            onSuccess = { Result.success(it) },
-            onFailure = { error ->
-                Result.failure(if (error is WeatherApiException) error else WeatherApiException("Weather returned an invalid response.", error))
-            }
-        )
+            Result.success(WeatherCurrent(location.name, current.first, current.second))
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Result.failure(if (error is WeatherApiException) error else WeatherApiException("Weather returned an invalid response.", error))
+        }
     }
 
     internal fun normalizeCity(city: String): String = city
@@ -140,7 +144,7 @@ internal object WeatherApi {
             ?: throw WeatherInvalidLocationException("Weather returned no current conditions.")
         val temperature = current.optDouble("temperature_2m", Double.NaN)
         val code = current.optInt("weather_code", -1)
-        if (!temperature.isFinite() || code !in 0..99) {
+        if (!temperature.isFinite() || temperature !in -100.0..150.0 || code !in 0..99) {
             throw WeatherInvalidLocationException("Weather returned malformed current conditions.")
         }
         return temperature to code
@@ -218,8 +222,14 @@ internal object WeatherApi {
             }
             return try {
                 val status = connection.responseCode
+                if (connection.contentLengthLong > MAX_HTTP_RESPONSE_BYTES) throw WeatherResponseTooLargeException()
                 val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-                WeatherHttpResponse(status, stream?.bufferedReader()?.use { it.readText() }.orEmpty())
+                WeatherHttpResponse(
+                    status,
+                    stream?.use {
+                        readResponseBodyAtMost(it, MAX_HTTP_RESPONSE_BYTES) { WeatherResponseTooLargeException() }
+                    }.orEmpty()
+                )
             } finally {
                 connection.disconnect()
             }

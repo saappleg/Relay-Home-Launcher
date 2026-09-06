@@ -65,21 +65,18 @@ internal object FavoriteAppsStore {
         // An explicit empty set and a user toggle both count as an intentional choice.
         if (preferences.contains(KEY_PACKAGES)) return favoritePackages
 
-        val excludedPackages = buildSet {
-            add(context.packageName)
-            apps.asSequence()
-                .map { it.packageName }
-                .filter(ProviderHandoff::isProviderPackage)
-                .forEach(::add)
-        }
+        // Relay itself is never a candidate because it is the launcher, but provider apps are
+        // intentionally eligible. They are discoverable in All Apps and can be selected as
+        // favorites for direct launching; this does not affect ProviderHandoff's trust checks.
+        val excludedPackages = setOf(context.packageName)
         val defaults = selectDefaultFavoritePackages(
             availableApps = apps.map { FavoriteAppCandidate(it.packageName, it.label) },
             excludedPackages = excludedPackages
         )
-        if (defaults.isNotEmpty()) {
-            favoritePackages = defaults
-            preferences.edit().putStringSet(KEY_PACKAGES, defaults).apply()
-        }
+        favoritePackages = defaults
+        // Persist the empty result too: it is a completed default-initialization decision, not a
+        // missing preference. This prevents repeating PackageManager discovery on every launch.
+        preferences.edit().putStringSet(KEY_PACKAGES, defaults).apply()
         return favoritePackages
     }
 

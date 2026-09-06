@@ -4,6 +4,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  schedule:
+    - cron: '17 3 * * *'
   workflow_dispatch:
 
 
@@ -18,26 +20,15 @@ jobs:
           java-version: '17'
           cache: gradle
       - uses: android-actions/setup-android@v3
-      - name: Create ephemeral signing key for release unit tests
-        run: |
-          keytool -genkeypair -noprompt \
-            -alias relay-home-ci \
-            -keyalg RSA \
-            -keysize 2048 \
-            -validity 1 \
-            -storetype JKS \
-            -keystore "$RUNNER_TEMP/relay-home-ci.jks" \
-            -storepass changeit \
-            -keypass changeit \
-            -dname "CN=Relay Home CI, OU=Tests, O=Relay Home, L=CI, ST=CI, C=US"
       - name: Run JVM unit tests
-        env:
-          RELAY_SIGNING_STORE_FILE: ${{ runner.temp }}/relay-home-ci.jks
-          RELAY_SIGNING_STORE_TYPE: JKS
-          RELAY_SIGNING_STORE_PASSWORD: changeit
-          RELAY_SIGNING_KEY_ALIAS: relay-home-ci
-          RELAY_SIGNING_KEY_PASSWORD: changeit
         run: ./gradlew test
+
+  wrapper-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Gradle Wrapper
+        uses: gradle/actions/wrapper-validation@v6
 
   debug-apk:
     runs-on: ubuntu-latest
@@ -57,10 +48,40 @@ jobs:
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
 
+  connected_scope:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.scope.outputs.should_run }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check whether instrumentation is relevant
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          should_run=false
+          while IFS= read -r changed_path; do
+            case "$changed_path" in
+              app/src/main/*|app/src/androidTest/*|app/build.gradle.kts|gradle/libs.versions.toml|gradle/wrapper/*|gradlew|gradlew.bat|settings.gradle.kts|build.gradle.kts|gradle.properties)
+                should_run=true
+                break
+                ;;
+            esac
+          done < <(git diff --name-only "$BASE_SHA...HEAD")
+          echo "should_run=$should_run" >> "$GITHUB_OUTPUT"
+
   connected-check:
-    # Instrumentation is intentionally manual-only: ordinary PRs do not need an emulator,
-    # while workflow_dispatch still provides a reproducible connectedCheck path.
-    if: github.event_name == 'workflow_dispatch'
+    # Run manually, nightly, and for PRs that can affect Android behavior or tests.
+    needs: connected_scope
+    if: >-
+      always() &&
+      (github.event_name == 'workflow_dispatch' ||
+       github.event_name == 'schedule' ||
+       (github.event_name == 'pull_request' && needs.connected_scope.outputs.should_run == 'true'))
     runs-on: ubuntu-latest
     timeout-minutes: 35
     steps:

@@ -6,7 +6,7 @@ signed APK and use a SemVer-style tag such as `v0.1.0-alpha.1`.
 
 The **Publish Relay Home release** workflow requires these repository secrets:
 
-- `SIGNING_KEY`: Base64-encoded permanent PKCS12/JKS keystore
+- `SIGNING_KEY`: Base64-encoded permanent PKCS12 keystore
 - `KEY_STORE_PASSWORD`
 - `ALIAS`
 - `KEY_PASSWORD`
@@ -23,6 +23,9 @@ release assets over HTTPS, without forwarding the workflow token to the asset
 server. Release signing material is removed from the runner workspace at the
 end of the job. Signing values are passed to Gradle through job environment
 variables; they are not written into `local.properties`.
+
+The workflow and the checked-in signing example use PKCS12 consistently. A JKS
+keystore is not accepted by the publish workflow.
 
 The in-app updater follows a bounded redirect chain only when every hop remains
 HTTPS on the expected GitHub API or release-asset hosts. It accepts one

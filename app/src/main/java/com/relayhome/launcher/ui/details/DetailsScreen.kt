@@ -181,12 +181,17 @@ internal fun DetailsScreen(
     BackHandler {
         if (pickerVisible) pickerVisible = false else onBackHome()
     }
-    LaunchedEffect(Unit) { resumeFocusRequester.requestFocus() }
+    LaunchedEffect(Unit) {
+        withFrameNanos { }
+        if (runCatching { resumeFocusRequester.requestFocus() }.isFailure) {
+            runCatching { backFocusRequester.requestFocus() }
+        }
+    }
     Box(
         modifier = Modifier.fillMaxSize().background(midnight)
     ) {
         AsyncImage(
-            model = ImageRequest.Builder(context).data(item.artworkUrl).crossfade(true).build(),
+            model = ImageRequest.Builder(context).data(item.artworkUrl).size(1920, 1080).crossfade(true).build(),
             contentDescription = null,
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize().alpha(.44f)
@@ -197,7 +202,7 @@ internal fun DetailsScreen(
             )
         )
         Row(
-            modifier = Modifier.align(Alignment.TopStart).padding(start = 78.dp, top = 42.dp),
+            modifier = Modifier.align(Alignment.TopStart).padding(start = RelayTvMargins.screenHorizontal, top = 42.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             ActionButton(
@@ -210,7 +215,7 @@ internal fun DetailsScreen(
             Text("RELAY HOME", color = ivory.copy(alpha = .75f), fontSize = 15.sp, letterSpacing = 3.sp)
         }
         Box(
-            modifier = Modifier.fillMaxSize().padding(start = 78.dp, end = 78.dp, top = 98.dp, bottom = 48.dp),
+            modifier = Modifier.fillMaxSize().padding(start = RelayTvMargins.screenHorizontal, end = RelayTvMargins.screenHorizontal, top = 98.dp, bottom = 48.dp),
             contentAlignment = Alignment.CenterStart
         ) {
             Row(
@@ -226,7 +231,7 @@ internal fun DetailsScreen(
                 ) {
                     if (item.artworkUrl.visibleRelayText().isNotBlank()) {
                         AsyncImage(
-                            model = ImageRequest.Builder(context).data(item.artworkUrl).crossfade(true).build(),
+                            model = ImageRequest.Builder(context).data(item.artworkUrl).size(380, 540).crossfade(true).build(),
                             contentDescription = item.title,
                             contentScale = ContentScale.Crop,
                             modifier = Modifier.fillMaxSize()
@@ -343,7 +348,7 @@ internal fun DetailsScreen(
             }
         }
         Row(
-            modifier = Modifier.align(Alignment.BottomStart).padding(start = 78.dp, bottom = 42.dp),
+            modifier = Modifier.align(Alignment.BottomStart).padding(start = RelayTvMargins.screenHorizontal, bottom = 42.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text("Available in ${item.provider.label}", color = ivory, fontSize = 16.sp, fontWeight = FontWeight.Medium)
@@ -379,7 +384,10 @@ internal fun SeasonEpisodePicker(
 ) {
     val seasonFocusRequester = remember { FocusRequester() }
     val episodeFocusRequester = remember { FocusRequester() }
-    LaunchedEffect(Unit) { seasonFocusRequester.requestFocus() }
+    LaunchedEffect(Unit) {
+        withFrameNanos { }
+        runCatching { seasonFocusRequester.requestFocus() }
+    }
     Box(
         Modifier.fillMaxSize().background(midnight.copy(alpha = .94f)).padding(horizontal = 72.dp, vertical = 54.dp),
         contentAlignment = Alignment.Center

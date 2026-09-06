@@ -41,12 +41,16 @@ internal object RelayProfileMappingStore {
         // exact name match. If there is no name match, leave the profile visibly unmapped rather
         // than guessing from list order or the selected RelayTube profile.
         if (matched == null) {
-            set(context, nuvioProfile.index, "")
+            if (shouldClearMapping(get(context, nuvioProfile.index))) {
+                set(context, nuvioProfile.index, "")
+            }
             return null
         }
-        return cleanOpaqueId(matched.id)?.also {
-            saveResolved(context, nuvioProfile.index, it)
+        val resolvedId = cleanOpaqueId(matched.id) ?: return null
+        if (shouldPersistMapping(get(context, nuvioProfile.index), resolvedId)) {
+            saveResolved(context, nuvioProfile.index, resolvedId)
         }
+        return resolvedId
     }
 
     private fun normalizeProfileName(value: String): String = Normalizer.normalize(value.trim(), Normalizer.Form.NFD)
@@ -64,6 +68,10 @@ internal object RelayProfileMappingStore {
             RelaySettingsRepository.saveResolvedProfileMapping(context, nuvioProfile, cleanId)
         }
     }
+
+    internal fun shouldPersistMapping(current: String?, desired: String): Boolean = current != desired
+
+    internal fun shouldClearMapping(current: String?): Boolean = current != null
 
     private const val MAX_OPAQUE_ID_LENGTH = 128
 }

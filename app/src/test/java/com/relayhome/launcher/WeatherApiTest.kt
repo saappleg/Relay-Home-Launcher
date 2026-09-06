@@ -1,6 +1,8 @@
 package com.relayhome.launcher
 
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.CancellationException
+import java.io.ByteArrayInputStream
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -28,6 +30,12 @@ class WeatherApiTest {
         assertEquals(21.5, current.first, 0.001)
         assertEquals(2, current.second)
         assertEquals("⛅", WeatherApi.weatherIcon(current.second))
+    }
+
+    @Test
+    fun parseCurrent_rejectsImplausibleTemperatures() {
+        assertFails { WeatherApi.parseCurrent("""{"current":{"temperature_2m":-101,"weather_code":0}}""") }
+        assertFails { WeatherApi.parseCurrent("""{"current":{"temperature_2m":151,"weather_code":0}}""") }
     }
 
     @Test
@@ -89,5 +97,39 @@ class WeatherApiTest {
         )
         assertTrue(result.exceptionOrNull() is WeatherNotConfiguredException)
         assertEquals(0, calls)
+    }
+
+    @Test
+    fun retryCancellation_isPropagated_insteadOfReturnedAsFailure() = runBlocking {
+        val cancellation = CancellationException("screen left")
+        val thrown = runCatching {
+            WeatherApi.fetchCurrent(
+                city = "Boston",
+                transport = WeatherTransport { WeatherHttpResponse(503, "") },
+                sleeper = { throw cancellation }
+            )
+        }.exceptionOrNull()
+
+        assertTrue(thrown is CancellationException)
+    }
+
+    @Test
+    fun responseBodyReader_rejectsOversizedBodies_andKeepsExactLimit() {
+        assertEquals(
+            "1234",
+            readResponseBodyAtMost(ByteArrayInputStream("1234".toByteArray()), 4) {
+                WeatherResponseTooLargeException()
+            }
+        )
+        val failure = runCatching {
+            readResponseBodyAtMost(ByteArrayInputStream("12345".toByteArray()), 4) {
+                WeatherResponseTooLargeException()
+            }
+        }
+        assertTrue(failure.exceptionOrNull() is WeatherResponseTooLargeException)
+    }
+
+    private fun assertFails(block: () -> Unit) {
+        assertTrue(runCatching(block).isFailure)
     }
 }

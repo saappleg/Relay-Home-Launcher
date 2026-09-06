@@ -1,7 +1,8 @@
 # Nuvio authentication
 
-Relay keeps its existing email/password sign-in and now has an isolated API-layer implementation
-of Nuvio's TV QR-login contract for the TV UI to consume.
+Relay supports both email/password sign-in and Nuvio's TV QR-login flow directly in
+`NuvioConnectScreen`. The QR flow keeps its short-lived session values in memory and
+requires explicit approval on the user's phone before exchanging a TV session.
 
 ## QR flow
 
@@ -15,9 +16,9 @@ calls Nuvio's `start_tv_login_session` RPC. The response is validated before use
 - the server-generated URL is exposed as `NuvioQrLoginSession.verificationUrl`, ready for a QR
   renderer to encode.
 
-The UI should poll with `NuvioApi.pollQrLoginSession()` until the status is `APPROVED`, then call
-`NuvioApi.exchangeQrLoginSession(session, approvedPoll)`. The API requires an explicit `APPROVED`
-status before token exchange;
+`NuvioConnectScreen` polls with `NuvioApi.pollQrLoginSession()` until the status is `APPROVED`,
+then calls `NuvioApi.exchangeQrLoginSession(session, approvedPoll)`. The API requires an explicit
+`APPROVED` status before token exchange;
 unknown statuses never auto-login. The returned `NuvioSession` can be passed to the existing
 `NuvioSessionStore.save()` method.
 
@@ -33,5 +34,6 @@ Some older Nuvio deployments expose `start_tv_login_session` without the optiona
 specifically identifies that legacy signature. Existing password login and authenticated RPC
 sync remain unchanged.
 
-The current scoped implementation is API/model infrastructure. The existing `MainActivity` still
-shows its password form until the TV UI is wired to this session state in a separate UI change.
+The screen displays the verification URL and QR code while polling, reports expiry or a failed
+approval, and retains the email/password form as a manual fallback. Successful QR or password
+authentication is saved through the existing encrypted `NuvioSessionStore`.

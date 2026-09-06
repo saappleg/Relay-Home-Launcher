@@ -32,9 +32,19 @@ val relayVersionCode = providers.environmentVariable("RELAY_VERSION_CODE").orNul
 val relayVersionName = providers.environmentVariable("RELAY_VERSION_NAME").orNull?.takeIf { it.isNotBlank() }
     ?: "0.1.0-beta.1"
 
-// Never accidentally publish an unsigned (or debug-signed) release APK.
+// Never accidentally package an unsigned (or debug-signed) release APK. Keep this
+// guard limited to tasks that can emit the production release artifact: release
+// unit tests and lint do not need signing credentials.
+val releasePackagingTasks = setOf(
+    "assembleRelease",
+    "bundleRelease",
+    "packageRelease",
+    "packageReleaseBundle",
+    "packageReleaseUniversalApk",
+    "signReleaseBundle"
+)
 tasks.configureEach {
-    if (name.contains("Release", ignoreCase = true)) {
+    if (name in releasePackagingTasks) {
         doFirst {
             check(releaseSigningConfigured) {
                 "Release signing is not configured. Add relay.signing.* values to local.properties or RELAY_SIGNING_* environment variables."

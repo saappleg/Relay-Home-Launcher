@@ -79,7 +79,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -164,6 +163,10 @@ internal fun NuvioConnectScreen(
     var qrSession by remember { mutableStateOf<NuvioQrLoginSession?>(null) }
     var qrMessage by remember { mutableStateOf<String?>(null) }
 
+    DisposableEffect(Unit) {
+        onDispose { password = "" }
+    }
+
     LaunchedEffect(connectRequested) {
         if (connectRequested) {
             NuvioApi.signIn(email, password)
@@ -173,6 +176,7 @@ internal fun NuvioConnectScreen(
                 }
                 .onFailure { error ->
                     status = error.message ?: "Nuvio sign-in failed."
+                    password = ""
                     working = false
                     connectRequested = false
                 }
@@ -250,7 +254,7 @@ internal fun NuvioConnectScreen(
         withFrameNanos { }
         if (qrSession == null) emailFocusRequester.requestFocus()
     }
-    Column(Modifier.fillMaxSize().padding(horizontal = 76.dp, vertical = 48.dp), verticalArrangement = Arrangement.Center) {
+    Column(Modifier.fillMaxSize().padding(horizontal = RelayTvMargins.screenHorizontal, vertical = 48.dp), verticalArrangement = Arrangement.Center) {
         Text("Connect Nuvio", color = ivory, fontSize = 42.sp, fontWeight = FontWeight.Light)
         Spacer(Modifier.height(12.dp))
         Text(
@@ -371,8 +375,15 @@ internal fun NuvioConnectScreen(
 
 @Composable
 internal fun NuvioQrCode(payload: String) {
-    val bitmap = remember(payload) { createQrBitmap(payload, 320) }
-    if (bitmap == null) {
+    val bitmapState = remember(payload) { mutableStateOf<ImageBitmap?>(null) }
+    LaunchedEffect(payload) {
+        bitmapState.value = withContext(Dispatchers.Default) {
+            createQrBitmap(payload, 320)?.asImageBitmap()
+        }
+    }
+    val bitmap = bitmapState.value
+    val readyBitmap = bitmap
+    if (readyBitmap == null) {
         Box(
             Modifier.size(320.dp).clip(RoundedCornerShape(12.dp)).background(Color.White),
             contentAlignment = Alignment.Center
@@ -381,7 +392,7 @@ internal fun NuvioQrCode(payload: String) {
         }
     } else {
         Image(
-            painter = BitmapPainter(bitmap.asImageBitmap()),
+            painter = BitmapPainter(readyBitmap),
             contentDescription = "Nuvio QR login code",
             modifier = Modifier.size(320.dp).clip(RoundedCornerShape(12.dp))
         )
@@ -396,11 +407,10 @@ internal fun createQrBitmap(payload: String, size: Int): Bitmap? = runCatching {
         size,
         mapOf(EncodeHintType.MARGIN to 1)
     )
-    Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888).also { bitmap ->
-        for (x in 0 until size) {
-            for (y in 0 until size) {
-                bitmap.setPixel(x, y, if (matrix[x, y]) android.graphics.Color.BLACK else android.graphics.Color.WHITE)
-            }
-        }
+    val pixels = IntArray(size * size) { offset ->
+        val x = offset % size
+        val y = offset / size
+        if (matrix[x, y]) android.graphics.Color.BLACK else android.graphics.Color.WHITE
     }
+    Bitmap.createBitmap(pixels, size, size, Bitmap.Config.ARGB_8888)
 }.getOrNull()

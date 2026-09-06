@@ -9,56 +9,46 @@ import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.setValue
+import androidx.lifecycle.ViewModelProvider
+import com.relayhome.launcher.ui.state.RelayHomeStateHolder
+import com.relayhome.launcher.ui.state.RelayHomeSystemActions
 
-class MainActivity : ComponentActivity() {
-    var homeRequestGeneration by mutableStateOf(0)
-        private set
-    var launcherStateRevision by mutableStateOf(0)
-        private set
-    private var resetHomeOnResume = false
+class MainActivity : ComponentActivity(), RelayHomeSystemActions {
+    private lateinit var relayHomeStateHolder: RelayHomeStateHolder
+
+    /** Compatibility read for rememberInstalledApps until that composable can accept a flow. */
+    val launcherStateRevision: Int
+        get() = relayHomeStateHolder.launcherStateRevisionForLegacyCompose
+
     private val homeRoleRequest = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
-        refreshLauncherState()
+        relayHomeStateHolder.refreshLauncherState()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { RelayHomeApp() }
+        relayHomeStateHolder = ViewModelProvider(this)[RelayHomeStateHolder::class.java]
+        setContent {
+            RelayHomeApp(
+                stateHolder = relayHomeStateHolder,
+                systemActions = this@MainActivity
+            )
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         if (intent.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_HOME)) {
-            homeRequestGeneration += 1
+            relayHomeStateHolder.onHomeIntent()
         }
     }
 
     override fun onResume() {
         super.onResume()
         InstalledApps.invalidateCache()
-        launcherStateRevision += 1
-        if (resetHomeOnResume) {
-            resetHomeOnResume = false
-            resetHomeFocus()
-        }
+        relayHomeStateHolder.onResume()
     }
 
-    fun resetHomeFocus() {
-        homeRequestGeneration += 1
-    }
-
-    fun resetHomeOnNextResume() {
-        resetHomeOnResume = true
-        resetHomeFocus()
-    }
-
-    fun refreshLauncherState() {
-        launcherStateRevision += 1
-    }
-
-    fun requestHomeRole() {
+    override fun requestHomeRole() {
         val homeSettings = Intent(Settings.ACTION_HOME_SETTINGS)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.Q) {
             val roleManager = getSystemService(RoleManager::class.java)
@@ -73,7 +63,7 @@ class MainActivity : ComponentActivity() {
         startActivity(if (homeSettings.resolveActivity(packageManager) != null) homeSettings else Intent(Settings.ACTION_SETTINGS))
     }
 
-    fun requestNotificationListenerAccess() {
+    override fun requestNotificationListenerAccess() {
         val fallback = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
         val detail = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
             Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS).putExtra(
@@ -86,7 +76,7 @@ class MainActivity : ComponentActivity() {
         startActivity(if (detail.resolveActivity(packageManager) != null) detail else fallback)
     }
 
-    fun requestAutoStartAccessibility() {
+    override fun requestAutoStartAccessibility() {
         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
     }
 }

@@ -36,9 +36,11 @@ internal data class RelayRelease(
 internal object RelayUpdateSettings {
     private const val preferencesName = "relay_updates"
     private const val betaKey = "include_prereleases"
+    internal const val DEFAULT_INCLUDE_PRERELEASES = false
 
     fun includesBetas(context: Context): Boolean =
-        context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE).getBoolean(betaKey, true)
+        context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
+            .getBoolean(betaKey, DEFAULT_INCLUDE_PRERELEASES)
 
     fun setIncludesBetas(context: Context, enabled: Boolean) {
         context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
@@ -56,6 +58,8 @@ internal object RelayUpdater {
     private val versionPattern = Regex(
         "(?i)^v?([0-9]+)\\.([0-9]+)\\.([0-9]+)(?:-(alpha|beta|rc)(?:[.-]([0-9]+))?)?(?:\\+[0-9A-Za-z.-]+)?$"
     )
+    private val unsafeAssetNamePattern = Regex("(?i)(debug|unsigned|test|mapping|symbols)")
+    private val unsafeFilenameCharacterPattern = Regex("[^A-Za-z0-9._-]")
 
     /** Pure seams for regression tests; production update selection still uses the same parser. */
     internal fun compareVersionsForTest(left: String, right: String): Int =
@@ -63,6 +67,38 @@ internal object RelayUpdater {
 
     internal fun prereleaseFlagMatchesForTest(tag: String, prerelease: Boolean): Boolean =
         parsedVersion(tag)?.let { (it.stage < STABLE_STAGE) == prerelease } ?: false
+
+    internal fun selectReleaseFromJsonForTest(
+        body: String,
+        currentVersionName: String,
+        includePrereleases: Boolean
+    ): RelayRelease? {
+        val current = parsedVersion(currentVersionName) ?: return null
+        return runCatching {
+            selectLatestRelease(JSONArray(body), current, includePrereleases)
+        }.getOrNull()
+    }
+
+    internal fun isRepositoryAssetUrlForTest(address: String): Boolean = isRepositoryAssetUrl(address)
+
+    internal fun cachedReleaseTagForTest(fileName: String): String? = cachedReleaseTag(fileName)
+
+    internal data class ApkVerificationSnapshot(
+        val packageName: String,
+        val versionName: String?,
+        val versionCode: Long,
+        val debuggable: Boolean,
+        val signerDigests: Set<String>
+    )
+
+    internal fun verifyApkDecisionForTest(
+        candidate: ApkVerificationSnapshot,
+        installed: ApkVerificationSnapshot,
+        expectedPackageName: String,
+        expectedReleaseTag: String? = null
+    ): Result<Unit> = runCatching {
+        verifyApkDecision(candidate, installed, expectedPackageName, expectedReleaseTag)
+    }
 
     suspend fun check(includePrereleases: Boolean): Result<RelayRelease?> = withContext(Dispatchers.IO) {
         runCatching {
@@ -78,61 +114,7 @@ internal object RelayUpdater {
                 val releases = JSONArray(body)
                 val current = parsedVersion(BuildConfig.VERSION_NAME)
                     ?: error("Installed version is not a supported semantic version.")
-                (0 until releases.length()).asSequence().mapNotNull { index ->
-                    val release = releases.optJSONObject(index) ?: return@mapNotNull null
-                    val draft = release.opt("draft") as? Boolean ?: return@mapNotNull null
-                    val prerelease = release.opt("prerelease") as? Boolean ?: return@mapNotNull null
-                    if (draft || (!includePrereleases && prerelease)) {
-                        return@mapNotNull null
-                    }
-                    val tag = (release.opt("tag_name") as? String)?.trim().orEmpty()
-                    if (tag.isBlank()) return@mapNotNull null
-                    val version = parsedVersion(tag) ?: return@mapNotNull null
-                    // Do not trust GitHub's prerelease flag by itself. A malformed or
-                    // manually edited release must not make a prerelease visible in the
-                    // Stable channel, or hide a stable release from it.
-                    if (prerelease != (version.stage < STABLE_STAGE)) return@mapNotNull null
-                    if (!includePrereleases && version.stage < STABLE_STAGE) return@mapNotNull null
-                    if (version <= current) return@mapNotNull null
-
-                    val assets = release.optJSONArray("assets") ?: return@mapNotNull null
-                    val candidates = (0 until assets.length()).asSequence()
-                        .mapNotNull { assets.optJSONObject(it) }
-                        .mapNotNull { asset ->
-                            val name = (asset.opt("name") as? String)?.trim().orEmpty()
-                            val url = (asset.opt("browser_download_url") as? String)?.trim().orEmpty()
-                            val state = (asset.opt("state") as? String)?.trim()
-                            val size = (asset.opt("size") as? Number)?.toLong() ?: -1L
-                            if (!isSafeAssetName(name) || !name.endsWith(".apk", ignoreCase = true) ||
-                                state != "uploaded" || !isRepositoryAssetUrl(url) ||
-                                size !in minimumApkBytes..maxApkBytes
-                            ) {
-                                null
-                            } else {
-                                ApkAsset(name, url, size)
-                            }
-                        }
-                        .filterNot { it.name.contains(Regex("(?i)(debug|unsigned|test|mapping|symbols)")) }
-                        .toList()
-                    val tagWithoutV = tag.removePrefix("v").removePrefix("V")
-                    val expectedName = "relay-home-${tagWithoutV.replace(Regex("[^A-Za-z0-9._-]"), "-")}.apk"
-                    val expectedAssets = candidates.filter { it.name.equals(expectedName, ignoreCase = true) }
-                    val selectedAsset = when {
-                        expectedAssets.size == 1 -> expectedAssets.single()
-                        expectedAssets.size > 1 -> return@mapNotNull null
-                        candidates.size == 1 -> candidates.single()
-                        else -> return@mapNotNull null
-                    }
-
-                    RelayRelease(
-                        tag = tag,
-                        title = (release.opt("name") as? String)?.trim().orEmpty().ifBlank { tag },
-                        notes = (release.opt("body") as? String)?.trim().orEmpty(),
-                        apkUrl = selectedAsset.url,
-                        pageUrl = (release.opt("html_url") as? String)?.trim().orEmpty(),
-                        prerelease = prerelease
-                    ) to version
-                }.maxByOrNull { it.second }?.first
+                selectLatestRelease(releases, current, includePrereleases)
             } finally {
                 connection.disconnect()
             }
@@ -192,21 +174,17 @@ internal object RelayUpdater {
             check(candidate.length() in minimumApkBytes..maxApkBytes && isValidApk(candidate)) {
                 "The downloaded file is not a valid APK."
             }
+            val expectedReleaseTag = cachedReleaseTag(candidate.name)
+                ?: error("The update APK is missing its release binding.")
             val archive = inspectApk(context, candidate)
-            check(archive.packageName == context.packageName) { "The downloaded APK is not a Relay Home update." }
             val packageInfoFlags = packageInfoFlags()
             val installed = context.packageManager.getPackageInfo(context.packageName, packageInfoFlags)
-            check(hasMatchingSigner(installed, archive)) {
-                "The downloaded APK is signed with a different Relay Home certificate."
-            }
-            val candidateVersion = parsedVersion(archive.versionName.orEmpty())
-                ?: error("The downloaded APK has an unsupported semantic version.")
-            val installedVersion = parsedVersion(installed.versionName.orEmpty())
-                ?: error("The installed Relay Home version is unsupported.")
-            check(candidateVersion > installedVersion) { "The downloaded APK is not a newer semantic version." }
-            val candidateVersionCode = versionCode(archive)
-            val installedVersionCode = versionCode(installed)
-            check(candidateVersionCode > installedVersionCode) { "The downloaded APK is not newer than this installation." }
+            verifyApkDecision(
+                candidate = verificationSnapshot(archive),
+                installed = verificationSnapshot(installed),
+                expectedPackageName = context.packageName,
+                expectedReleaseTag = expectedReleaseTag
+            )
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !context.packageManager.canRequestPackageInstalls()) {
                 context.startActivity(
@@ -240,6 +218,72 @@ internal object RelayUpdater {
             setRequestProperty("Accept", "application/vnd.github+json")
             setRequestProperty("User-Agent", "Relay-Home/${BuildConfig.VERSION_NAME}")
         }
+    }
+
+    private fun selectLatestRelease(
+        releases: JSONArray,
+        current: Version,
+        includePrereleases: Boolean
+    ): RelayRelease? = (0 until releases.length()).asSequence()
+        .mapNotNull { index -> parseRelease(releases.optJSONObject(index), current, includePrereleases) }
+        .maxByOrNull { it.second }
+        ?.first
+
+    private fun parseRelease(
+        release: org.json.JSONObject?,
+        current: Version,
+        includePrereleases: Boolean
+    ): Pair<RelayRelease, Version>? {
+        if (release == null) return null
+        val draft = release.opt("draft") as? Boolean ?: return null
+        val prerelease = release.opt("prerelease") as? Boolean ?: return null
+        if (draft || (!includePrereleases && prerelease)) return null
+
+        val tag = (release.opt("tag_name") as? String)?.trim().orEmpty()
+        val version = parsedVersion(tag) ?: return null
+        // GitHub's flag is advisory; the semantic stage in the signed release tag is the
+        // authoritative channel signal used by both Stable and Beta settings.
+        if (prerelease != (version.stage < STABLE_STAGE)) return null
+        if (!includePrereleases && version.stage < STABLE_STAGE) return null
+        if (version <= current) return null
+
+        val assets = release.optJSONArray("assets") ?: return null
+        val candidates = (0 until assets.length()).asSequence()
+            .mapNotNull { assets.optJSONObject(it) }
+            .mapNotNull { asset ->
+                val name = (asset.opt("name") as? String)?.trim().orEmpty()
+                val url = (asset.opt("browser_download_url") as? String)?.trim().orEmpty()
+                val state = (asset.opt("state") as? String)?.trim()
+                val size = (asset.opt("size") as? Number)?.toLong() ?: -1L
+                if (!isSafeAssetName(name) || !name.endsWith(".apk", ignoreCase = true) ||
+                    state != "uploaded" || !isRepositoryAssetUrl(url) ||
+                    size !in minimumApkBytes..maxApkBytes
+                ) {
+                    null
+                } else {
+                    ApkAsset(name, url, size)
+                }
+            }
+            .filterNot { it.name.contains(unsafeAssetNamePattern) }
+            .toList()
+        val tagWithoutV = tag.removePrefix("v").removePrefix("V")
+        val expectedName = "relay-home-${tagWithoutV.replace(unsafeFilenameCharacterPattern, "-")}.apk"
+        val expectedAssets = candidates.filter { it.name.equals(expectedName, ignoreCase = true) }
+        val selectedAsset = when {
+            expectedAssets.size == 1 -> expectedAssets.single()
+            expectedAssets.size > 1 -> return null
+            candidates.size == 1 -> candidates.single()
+            else -> return null
+        }
+
+        return RelayRelease(
+            tag = tag,
+            title = (release.opt("name") as? String)?.trim().orEmpty().ifBlank { tag },
+            notes = (release.opt("body") as? String)?.trim().orEmpty(),
+            apkUrl = selectedAsset.url,
+            pageUrl = (release.opt("html_url") as? String)?.trim().orEmpty(),
+            prerelease = prerelease
+        ) to version
     }
 
     private fun openTrustedConnection(address: String, apiOnly: Boolean = false): HttpURLConnection =
@@ -281,9 +325,17 @@ internal object RelayUpdater {
     }
 
     private fun isRepositoryAssetUrl(address: String): Boolean = runCatching {
+        val uri = URI(address.trim())
         val url = trustedUrl(address, apiOnly = false)
-        val host = url.host.lowercase(Locale.ROOT)
-        host != "github.com" || url.path.lowercase(Locale.ROOT).startsWith(repositoryAssetPath)
+        val path = uri.path.orEmpty()
+        // The API's browser_download_url must be a same-repository release URL. The
+        // githubusercontent hosts are accepted only as redirect destinations, never as an
+        // initial asset address where their path is not repository-scoped.
+        url.host.equals("github.com", ignoreCase = true) &&
+            uri.query == null &&
+            uri.normalize().path == path &&
+            path.startsWith(repositoryAssetPath) &&
+            path.split('/').none { it == "." || it == ".." }
     }.getOrDefault(false)
 
     private fun isAllowedAssetHost(host: String): Boolean {
@@ -338,28 +390,55 @@ internal object RelayUpdater {
 
     private fun verifyDownloadedApk(context: Context, file: File, release: RelayRelease) {
         val archive = inspectApk(context, file)
-        check(archive.packageName == context.packageName) { "The downloaded APK is not a Relay Home update." }
-        val releaseVersion = parsedVersion(release.tag)
-            ?: error("The update release has an unsupported semantic version.")
-        val archiveVersionName = archive.versionName?.trim().orEmpty()
-        val archiveVersion = parsedVersion(archiveVersionName)
-            ?: error("The downloaded APK has an unsupported semantic version.")
-        check(archiveVersion == releaseVersion &&
-            normalizedVersionLabel(archiveVersionName) == normalizedVersionLabel(release.tag)
-        ) {
-            "The downloaded APK version does not match the GitHub release tag."
-        }
+        // The shared decision seam below enforces package, signer, version and release-tag
+        // invariants for both the download and install paths.
         val packageInfoFlags = packageInfoFlags()
         val installed = context.packageManager.getPackageInfo(context.packageName, packageInfoFlags)
-        check(hasMatchingSigner(installed, archive)) {
+        verifyApkDecision(
+            candidate = verificationSnapshot(archive),
+            installed = verificationSnapshot(installed),
+            expectedPackageName = context.packageName,
+            expectedReleaseTag = release.tag
+        )
+
+    }
+
+    private fun verificationSnapshot(packageInfo: PackageInfo): ApkVerificationSnapshot =
+        ApkVerificationSnapshot(
+            packageName = packageInfo.packageName,
+            versionName = packageInfo.versionName,
+            versionCode = versionCode(packageInfo),
+            debuggable = (packageInfo.applicationInfo?.flags ?: 0) and ApplicationInfo.FLAG_DEBUGGABLE != 0,
+            signerDigests = signerStrings(packageInfo)
+        )
+
+    private fun verifyApkDecision(
+        candidate: ApkVerificationSnapshot,
+        installed: ApkVerificationSnapshot,
+        expectedPackageName: String,
+        expectedReleaseTag: String?
+    ) {
+        check(!candidate.debuggable) { "The downloaded APK is debuggable." }
+        check(candidate.packageName == expectedPackageName) { "The downloaded APK is not a Relay Home update." }
+        val candidateVersionName = candidate.versionName?.trim().orEmpty()
+        val candidateVersion = parsedVersion(candidateVersionName)
+            ?: error("The downloaded APK has an unsupported semantic version.")
+        if (expectedReleaseTag != null) {
+            val releaseVersion = parsedVersion(expectedReleaseTag)
+                ?: error("The update release has an unsupported semantic version.")
+            check(candidateVersion == releaseVersion &&
+                normalizedVersionLabel(candidateVersionName) == normalizedVersionLabel(expectedReleaseTag)
+            ) {
+                "The downloaded APK version does not match the GitHub release tag."
+            }
+        }
+        check(installed.signerDigests.isNotEmpty() && installed.signerDigests == candidate.signerDigests) {
             "The downloaded APK is signed with a different Relay Home certificate."
         }
         val installedVersion = parsedVersion(installed.versionName.orEmpty())
             ?: error("The installed Relay Home version is unsupported.")
-        check(archiveVersion > installedVersion) {
-            "The downloaded APK is not a newer semantic version."
-        }
-        check(versionCode(archive) > versionCode(installed)) {
+        check(candidateVersion > installedVersion) { "The downloaded APK is not a newer semantic version." }
+        check(candidate.versionCode > installed.versionCode) {
             "The downloaded APK is not newer than this installation."
         }
     }
@@ -370,25 +449,21 @@ internal object RelayUpdater {
     private fun versionCode(packageInfo: PackageInfo): Long =
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) packageInfo.longVersionCode else packageInfo.versionCode.toLong()
 
-    private fun hasMatchingSigner(installed: PackageInfo, candidate: PackageInfo): Boolean {
-        val installedSignatures: Set<String>
-        val candidateSignatures: Set<String>
+    private fun signerStrings(packageInfo: PackageInfo): Set<String> {
+        val signatures: Array<android.content.pm.Signature>?
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            val installedSigningInfo = installed.signingInfo ?: return false
-            val candidateSigningInfo = candidate.signingInfo ?: return false
-            installedSignatures = installedSigningInfo.apkContentsSigners
-                .map { it.toCharsString() }.toSet()
-            candidateSignatures = candidateSigningInfo.apkContentsSigners
-                .map { it.toCharsString() }.toSet()
+            signatures = packageInfo.signingInfo?.apkContentsSigners
         } else {
             @Suppress("DEPRECATION")
-            val installedLegacySignatures = installed.signatures ?: return false
-            @Suppress("DEPRECATION")
-            val candidateLegacySignatures = candidate.signatures ?: return false
-            installedSignatures = installedLegacySignatures.map { it.toCharsString() }.toSet()
-            candidateSignatures = candidateLegacySignatures.map { it.toCharsString() }.toSet()
+            signatures = packageInfo.signatures
         }
-        return installedSignatures.isNotEmpty() && installedSignatures == candidateSignatures
+        return signatures?.map { it.toCharsString() }?.toSet().orEmpty()
+    }
+
+    private fun cachedReleaseTag(fileName: String): String? {
+        if (!fileName.startsWith("Relay-Home-") || !fileName.endsWith(".apk", ignoreCase = true)) return null
+        val tag = fileName.removePrefix("Relay-Home-").dropLast(4)
+        return tag.takeIf { parsedVersion(it) != null }
     }
 
     private fun checkTrustedFinalUrl(connection: HttpURLConnection, apiOnly: Boolean = false) {

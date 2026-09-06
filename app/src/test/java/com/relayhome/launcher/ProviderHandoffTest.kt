@@ -13,32 +13,29 @@ class ProviderHandoffTest {
         assertTrue(ProviderHandoff.isProviderPackage("com.stremio.one"))
         assertTrue(ProviderHandoff.isProviderPackage("com.relaytube.beta"))
         assertTrue(ProviderHandoff.isSmartTubePackage("org.smarttube.beta"))
-        assertTrue(ProviderHandoff.isProviderPackage("app.smarttube.custom"))
-        assertTrue(ProviderHandoff.isProviderPackage("org.smarttube.custom"))
-        assertTrue(ProviderHandoff.isProviderPackage("com.relaytube.custom"))
 
         assertFalse(ProviderHandoff.isProviderPackage("com.relayhome.launcher"))
         assertFalse(ProviderHandoff.isProviderPackage("com.relaytube"))
+        assertFalse(ProviderHandoff.isProviderPackage("com.relaytube.evil"))
+        assertFalse(ProviderHandoff.isProviderPackage("app.smarttube.custom"))
+        assertFalse(ProviderHandoff.isProviderPackage("org.smarttube.custom"))
     }
 
     @Test
-    fun installedAppExclusionRules_rejectRelayAndEveryProviderFamily() {
+    fun installedAppVisibility_keepsRelayOut_butLeavesProvidersDiscoverable() {
         val relayPackage = "com.relayhome.launcher"
 
+        assertTrue(InstalledApps.isExcludedPackage(relayPackage, relayPackage))
         listOf(
-            relayPackage,
             "com.nuvio.tv",
             "com.stremio.one",
             "app.smarttube.stable",
-            "app.smarttube.custom",
             "org.smarttube.beta",
-            "org.smarttube.custom",
             "com.relaytube.beta",
-            "com.relaytube.stable",
-            "com.relaytube.custom"
+            "com.relaytube.stable"
         ).forEach { packageName ->
-            assertTrue(
-                "Expected $packageName to be excluded",
+            assertFalse(
+                "Expected $packageName to remain discoverable in All Apps",
                 InstalledApps.isExcludedPackage(relayPackage, packageName)
             )
         }
