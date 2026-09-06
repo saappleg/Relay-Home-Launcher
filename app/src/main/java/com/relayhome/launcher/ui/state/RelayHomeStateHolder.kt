@@ -172,6 +172,47 @@ internal fun RelayHomeUiState.afterDetailsBack(): RelayHomeUiState =
 internal fun <T> capHeroSource(items: List<T>, cap: Int): List<T> =
     items.take(cap.coerceIn(1, 8))
 
+/**
+ * Assembles the rotating hero in a stable source order.
+ *
+ * Every list-backed source is capped before it is merged. Keep this as one production
+ * pipeline (rather than relying on callers to cap their inputs) so refreshes and future
+ * callers cannot accidentally make one source dominate the hero rotation.
+ */
+internal fun assembleHeroCandidates(state: RelayHomeUiState): List<MediaItem> {
+    val active = state.smartTubeNowPlaying?.toRelayMediaItem()
+    val continueWatching = state.smartTubeContinueWatching.map(::smartTubeHeroItem)
+    val subscriptions = state.smartTubeSubscriptions.map(::smartTubeHeroItem)
+    val cap = state.heroItemCap.coerceIn(1, 8)
+
+    return (
+        (if (state.heroIncludeNuvio) capHeroSource(state.nuvioMedia, cap) else emptyList()) +
+            (if (state.heroIncludeNowPlaying) listOfNotNull(active) else emptyList()) +
+            (if (state.heroIncludeContinueWatching) capHeroSource(continueWatching, cap) else emptyList()) +
+            (if (state.heroIncludeSubscriptions) capHeroSource(subscriptions, cap) else emptyList())
+        )
+        .filter { item -> item.provider in state.enabledProviders }
+        .distinctBy(MediaItem::contentKey)
+}
+
+private fun smartTubeHeroItem(video: SmartTubeSubscriptionVideo): MediaItem = MediaItem(
+    title = video.title,
+    provider = Provider.SMARTTUBE,
+    progress = video.progress,
+    colors = listOf(Provider.SMARTTUBE.accent.copy(alpha = .5f), midnight),
+    artworkUrl = video.artworkUrl.orEmpty(),
+    providerContentId = video.videoId,
+    providerChannelId = video.channelId,
+    contentType = "video",
+    episodeInfo = video.channel,
+    description = video.description,
+    releaseInfo = video.metadata,
+    durationMs = video.durationMs,
+    channel = video.channel,
+    resumePositionMs = video.resumePositionMs,
+    playbackPositionMs = video.resumePositionMs
+)
+
 internal class RelayHomeStateHolder(application: Application) : AndroidViewModel(application) {
     private val appContext = application.applicationContext
     private val stateScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -930,35 +971,8 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
     }
 
     private fun buildHeroCandidates(state: RelayHomeUiState): List<MediaItem> {
-        val active = state.smartTubeNowPlaying?.toRelayMediaItem()
-        val continueWatching = state.smartTubeContinueWatching.map(::smartTubeFeedItem)
-        val subscriptions = state.smartTubeSubscriptions.map(::smartTubeFeedItem)
-        val cap = state.heroItemCap.coerceIn(1, 8)
-        return ((if (state.heroIncludeNuvio) capHeroSource(state.nuvioMedia, cap) else emptyList()) +
-            (if (state.heroIncludeNowPlaying) listOfNotNull(active) else emptyList()) +
-            (if (state.heroIncludeContinueWatching) capHeroSource(continueWatching, cap) else emptyList()) +
-            (if (state.heroIncludeSubscriptions) capHeroSource(subscriptions, cap) else emptyList()))
-            .filter { it.provider in state.enabledProviders }
-            .distinctBy(MediaItem::contentKey)
+        return assembleHeroCandidates(state)
     }
-
-    private fun smartTubeFeedItem(video: SmartTubeSubscriptionVideo): MediaItem = MediaItem(
-        title = video.title,
-        provider = Provider.SMARTTUBE,
-        progress = video.progress,
-        colors = listOf(Provider.SMARTTUBE.accent.copy(alpha = .5f), midnight),
-        artworkUrl = video.artworkUrl.orEmpty(),
-        providerContentId = video.videoId,
-        providerChannelId = video.channelId,
-        contentType = "video",
-        episodeInfo = video.channel,
-        description = video.description,
-        releaseInfo = video.metadata,
-        durationMs = video.durationMs,
-        channel = video.channel,
-        resumePositionMs = video.resumePositionMs,
-        playbackPositionMs = video.resumePositionMs
-    )
 
     private fun resetHero() {
         _state.update { it.copy(hero = RelayHomeUiState().hero) }
