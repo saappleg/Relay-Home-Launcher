@@ -250,15 +250,16 @@ internal object WeatherApi {
 
     private object HttpTransport {
         fun get(url: String): WeatherHttpResponse {
-            val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 8_000
-                readTimeout = 8_000
-                instanceFollowRedirects = false
-                setRequestProperty("Accept", "application/json")
-                setRequestProperty("User-Agent", "RelayHome/1.0")
-            }
+            val connection = URL(url).openConnection() as HttpURLConnection
             return try {
+                connection.apply {
+                    requestMethod = "GET"
+                    connectTimeout = 8_000
+                    readTimeout = 8_000
+                    instanceFollowRedirects = false
+                    setRequestProperty("Accept", "application/json")
+                    setRequestProperty("User-Agent", "RelayHome/1.0")
+                }
                 val status = connection.responseCode
                 if (connection.contentLengthLong > MAX_HTTP_RESPONSE_BYTES) throw WeatherResponseTooLargeException()
                 val stream = if (status in 200..299) connection.inputStream else connection.errorStream

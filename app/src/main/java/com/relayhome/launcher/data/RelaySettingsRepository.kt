@@ -12,6 +12,7 @@ import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.relayhome.launcher.applicationContextSafely
 import com.relayhome.launcher.ui.shared.HomeRow
 import com.relayhome.launcher.ui.shared.Provider
 import com.relayhome.launcher.ui.shared.AppIconShape
@@ -106,6 +107,7 @@ internal object RelaySettingsRepository {
     private var collectorJob: Job? = null
     private var migrationJob: Job? = null
     private var pendingWrites = 0
+    private var lastPersistedSnapshot = Snapshot(emptyPreferences())
 
     /** Emits whenever the in-memory snapshot may have changed. */
     fun revision(context: Context): StateFlow<Long> {
@@ -488,22 +490,28 @@ internal object RelaySettingsRepository {
     }
 
     private fun initialize(context: Context) {
-        val appContext = context.applicationContext
+        val appContext = applicationContextSafely(context)
         synchronized(lock) {
             if (initializedContext === appContext && collectorJob?.isActive == true) return
             initializedContext = appContext
             snapshot.set(Snapshot(emptyPreferences()))
+            lastPersistedSnapshot = Snapshot(emptyPreferences())
             collectorJob?.cancel()
             migrationJob?.cancel()
             collectorJob = scope.launch {
                 appContext.relaySettingsDataStore.data
-                    .catch { emit(emptyPreferences()) }
+                    .catch {
+                        // Keep the last good snapshot when DataStore is temporarily unreadable;
+                        // replacing it with defaults would silently hide the user's settings.
+                    }
                     .collect { values ->
                         synchronized(lock) {
                             // A migration emission can race an optimistic write. Never replace a
                             // newer local value with that stale emission.
                             if (pendingWrites == 0) {
-                                snapshot.set(Snapshot(values))
+                                val persisted = Snapshot(values)
+                                snapshot.set(persisted)
+                                lastPersistedSnapshot = persisted
                                 _revision.value += 1
                             }
                         }
@@ -535,9 +543,9 @@ internal object RelaySettingsRepository {
         mutation: (MutablePreferences) -> Unit
     ) {
         initialize(context)
-        val appContext = context.applicationContext
-        val optimistic = snapshot.get().values.toMutablePreferences().also(mutation)
+        val appContext = applicationContextSafely(context)
         synchronized(lock) {
+            val optimistic = snapshot.get().values.toMutablePreferences().also(mutation)
             pendingWrites += 1
             snapshot.set(Snapshot(optimistic))
             _revision.value += 1
@@ -550,13 +558,16 @@ internal object RelaySettingsRepository {
                     }
                 }
                 synchronized(lock) {
-                    snapshot.set(Snapshot(persisted))
+                    val persistedSnapshot = Snapshot(persisted)
+                    snapshot.set(persistedSnapshot)
+                    lastPersistedSnapshot = persistedSnapshot
                     pendingWrites -= 1
                     _revision.value += 1
                 }
             } catch (_: Throwable) {
                 synchronized(lock) {
                     pendingWrites -= 1
+                    if (pendingWrites == 0) snapshot.set(lastPersistedSnapshot)
                     _revision.value += 1
                 }
             }
@@ -567,9 +578,13 @@ internal object RelaySettingsRepository {
     suspend fun awaitReady(context: Context) {
         initialize(context)
         migrationJob?.join()
-        val values = context.applicationContext.relaySettingsDataStore.data.first()
+        val values = applicationContextSafely(context).relaySettingsDataStore.data.first()
         synchronized(lock) {
-            if (pendingWrites == 0) snapshot.set(Snapshot(values))
+            if (pendingWrites == 0) {
+                val persisted = Snapshot(values)
+                snapshot.set(persisted)
+                lastPersistedSnapshot = persisted
+            }
             _revision.value += 1
         }
     }
@@ -577,7 +592,7 @@ internal object RelaySettingsRepository {
     // Test-only hooks keep instrumentation setup out of production facades. Tests call these
     // from runBlocking on a test thread, never from Compose or the Android main thread.
     internal suspend fun resetForTesting(context: Context) {
-        val appContext = context.applicationContext
+        val appContext = applicationContextSafely(context)
         while (true) {
             val idle = synchronized(lock) { pendingWrites == 0 }
             if (idle) break
@@ -591,6 +606,7 @@ internal object RelaySettingsRepository {
             initializedContext = null
             pendingWrites = 0
             snapshot.set(Snapshot(emptyPreferences()))
+            lastPersistedSnapshot = Snapshot(emptyPreferences())
             _revision.value += 1
         }
         appContext.relaySettingsDataStore.updateData { emptyPreferences() }
@@ -617,16 +633,17 @@ internal object RelaySettingsRepository {
             initializedContext = null
             pendingWrites = 0
             snapshot.set(Snapshot(emptyPreferences()))
+            lastPersistedSnapshot = Snapshot(emptyPreferences())
             _revision.value += 1
         }
         awaitReady(context)
     }
 
     internal suspend fun storedKeysForTesting(context: Context): Set<String> =
-        context.applicationContext.relaySettingsDataStore.data.first().asMap().keys.map { it.name }.toSet()
+        applicationContextSafely(context).relaySettingsDataStore.data.first().asMap().keys.map { it.name }.toSet()
 
     internal suspend fun putStringForTesting(context: Context, key: String, value: String) {
-        context.applicationContext.relaySettingsDataStore.updateData { current ->
+        applicationContextSafely(context).relaySettingsDataStore.updateData { current ->
             current.toMutablePreferences().also { it[stringPreferencesKey(key)] = value }
         }
         awaitReady(context)
@@ -634,13 +651,16 @@ internal object RelaySettingsRepository {
 
     /** Used by the DataStore migration; kept internal so the migration remains a thin adapter. */
     internal fun copyLegacyInto(destination: MutablePreferences, context: Context) {
-        copyExistingDestination(context.getSharedPreferences(dataStoreName, Context.MODE_PRIVATE), destination)
-        copyLegacySource(context.getSharedPreferences(legacyProviderPreferencesName, Context.MODE_PRIVATE), destination)
-        copyLegacySource(context.getSharedPreferences(legacySearchPreferencesName, Context.MODE_PRIVATE), destination)
-        copyLegacySource(context.getSharedPreferences(legacyDisplayPreferencesName, Context.MODE_PRIVATE), destination)
-        copyLegacySource(context.getSharedPreferences(legacyProfilePreferencesName, Context.MODE_PRIVATE), destination)
-        copyLegacySource(context.getSharedPreferences(legacyContinueWatchingPreferencesName, Context.MODE_PRIVATE), destination)
-        copyLegacySource(context.getSharedPreferences(legacyProfileMappingPreferencesName, Context.MODE_PRIVATE), destination)
+        // A damaged legacy XML file should not prevent DataStore from opening. Each source is
+        // optional; skipping only that source preserves the rest of the upgrade and leaves the
+        // normal typed defaults available to the UI.
+        sharedPreferencesOrNull(context, dataStoreName)?.let { copyExistingDestination(it, destination) }
+        sharedPreferencesOrNull(context, legacyProviderPreferencesName)?.let { copyLegacySource(it, destination) }
+        sharedPreferencesOrNull(context, legacySearchPreferencesName)?.let { copyLegacySource(it, destination) }
+        sharedPreferencesOrNull(context, legacyDisplayPreferencesName)?.let { copyLegacySource(it, destination) }
+        sharedPreferencesOrNull(context, legacyProfilePreferencesName)?.let { copyLegacySource(it, destination) }
+        sharedPreferencesOrNull(context, legacyContinueWatchingPreferencesName)?.let { copyLegacySource(it, destination) }
+        sharedPreferencesOrNull(context, legacyProfileMappingPreferencesName)?.let { copyLegacySource(it, destination) }
     }
 
     private fun copyExistingDestination(source: SharedPreferences, destination: MutablePreferences) {
@@ -697,6 +717,11 @@ internal object RelaySettingsRepository {
 
     private fun profileMappingKey(kind: String, nuvioProfile: Int): String = profileMappingPrefix + kind + nuvioProfile
 }
+
+private fun sharedPreferencesOrNull(context: Context, name: String): SharedPreferences? =
+    runCatching {
+        applicationContextSafely(context).getSharedPreferences(name, Context.MODE_PRIVATE)
+    }.getOrNull()
 
 private class LegacySettingsMigration(private val context: Context) : DataMigration<Preferences> {
     override suspend fun shouldMigrate(currentData: Preferences): Boolean =

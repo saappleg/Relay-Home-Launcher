@@ -99,7 +99,11 @@ internal object InstalledApps {
     }
 
     fun discover(context: Context): List<InstalledApp> {
-        return cache.getOrDiscover { discoverUncached(context) }
+        return cache.getOrDiscover {
+            // PackageManager and LauncherApps are remote framework services. A transient binder
+            // failure must leave All Apps empty for this refresh, never crash the launcher.
+            runCatching { discoverUncached(context) }.getOrDefault(emptyList())
+        }
     }
 
     fun invalidateCache() {
@@ -268,15 +272,19 @@ internal fun rememberInstalledApps(context: Context): List<InstalledApp> {
         }
         apps = discovered
         withContext(Dispatchers.IO) {
-            RelaySettingsRepository.recordDiscoveredAppPackages(
-                appContext,
-                discovered.map { it.packageName }.toSet()
-            )
-            FavoriteAppsStore.ensureDefaults(
-                appContext,
-                discovered,
-                hiddenPackages = RelaySettingsRepository.loadHiddenAppPackages(appContext)
-            )
+            // App metadata is useful but not required to render the discovered list. Keep a
+            // PackageManager refresh or settings-store failure from taking down the Apps route.
+            runCatching {
+                RelaySettingsRepository.recordDiscoveredAppPackages(
+                    appContext,
+                    discovered.map { it.packageName }.toSet()
+                )
+                FavoriteAppsStore.ensureDefaults(
+                    appContext,
+                    discovered,
+                    hiddenPackages = RelaySettingsRepository.loadHiddenAppPackages(appContext)
+                )
+            }
         }
     }
     return apps

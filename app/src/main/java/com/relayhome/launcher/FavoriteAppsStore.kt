@@ -43,8 +43,9 @@ internal object FavoriteAppsStore {
         private set
 
     fun load(context: Context): Set<String> {
-        val stored = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getStringSet(KEY_PACKAGES, null)
+        val stored = readSharedPreferencesResult(context, PREFS) {
+            it.getStringSet(KEY_PACKAGES, null)?.toSet()
+        }.getOrElse { return favoritePackages }
         // Do not discover packages from composition. The no-preference path is completed by
         // InstalledApps after its existing IO-bound discovery finishes.
         favoritePackages = stored?.toSet() ?: emptySet()
@@ -53,11 +54,9 @@ internal object FavoriteAppsStore {
 
     fun toggle(context: Context, packageName: String) {
         val next = if (packageName in favoritePackages) favoritePackages - packageName else favoritePackages + packageName
-        favoritePackages = next
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .putStringSet(KEY_PACKAGES, next)
-            .apply()
+        if (writeSharedPreferencesSafely(context, PREFS) { it.putStringSet(KEY_PACKAGES, next) }) {
+            favoritePackages = next
+        }
     }
 
     fun ensureDefaults(context: Context, apps: List<InstalledApp>): Set<String> {
@@ -69,9 +68,11 @@ internal object FavoriteAppsStore {
         apps: List<InstalledApp>,
         hiddenPackages: Set<String>
     ): Set<String> {
-        val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val hasStoredChoice = readSharedPreferencesSafely(context, PREFS, false) {
+            it.contains(KEY_PACKAGES)
+        }
         // An explicit empty set and a user toggle both count as an intentional choice.
-        if (preferences.contains(KEY_PACKAGES)) return favoritePackages
+        if (hasStoredChoice) return favoritePackages
 
         // Relay itself is never a candidate because it is the launcher, but provider apps are
         // intentionally eligible. They are discoverable in All Apps and can be selected as
@@ -81,10 +82,14 @@ internal object FavoriteAppsStore {
             availableApps = apps.map { FavoriteAppCandidate(it.packageName, it.label) },
             excludedPackages = excludedPackages
         )
-        favoritePackages = defaults
         // Persist the empty result too: it is a completed default-initialization decision, not a
         // missing preference. This prevents repeating PackageManager discovery on every launch.
-        preferences.edit().putStringSet(KEY_PACKAGES, defaults).apply()
+        if (!writeSharedPreferencesSafely(context, PREFS) { it.putStringSet(KEY_PACKAGES, defaults) }) {
+            // Keep the previous-good in-memory selection if Android rejects the write during
+            // shutdown or a provider-backed profile switch.
+            return favoritePackages
+        }
+        favoritePackages = defaults
         return favoritePackages
     }
 

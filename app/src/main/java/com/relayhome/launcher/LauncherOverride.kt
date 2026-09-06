@@ -189,10 +189,24 @@ internal object LauncherOverride {
     }
 
     fun inspect(context: Context): LauncherState {
-        val packageManager = context.packageManager
+        val packageManager = runCatching { context.packageManager }.getOrNull()
+        if (packageManager == null) {
+            // PackageManager is a system binder. During OEM boot/teardown there may be no
+            // trustworthy resolver result, so report the conservative empty state.
+            return LauncherState(
+                resolvedPackageName = null,
+                resolvedActivityName = null,
+                stockLauncherOverride = loadRemembered(context),
+                diagnostics = loadDiagnostics(context, relayIsDefault = false)
+            )
+        }
         val homeIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
-        val resolved = packageManager.resolveActivity(homeIntent, PackageManager.MATCH_DEFAULT_ONLY)
-        val candidates = packageManager.queryIntentActivities(homeIntent, PackageManager.MATCH_DEFAULT_ONLY)
+        val (resolved, candidates) = runCatching {
+            packageManager.resolveActivity(homeIntent, PackageManager.MATCH_DEFAULT_ONLY) to
+                packageManager.queryIntentActivities(homeIntent, PackageManager.MATCH_DEFAULT_ONLY)
+        }.getOrElse {
+            null to emptyList<android.content.pm.ResolveInfo>()
+        }
         val resolvedPackage = resolved?.activityInfo?.packageName
         val resolvedActivity = resolved?.activityInfo?.name
         val detectedStock = sequenceOf(resolved)
@@ -204,11 +218,13 @@ internal object LauncherOverride {
                     info.activityInfo.packageName != "android"
             }
             ?.let { info ->
-                StockLauncherOverride(
-                    packageName = info.activityInfo.packageName,
-                    activityName = info.activityInfo.name,
-                    label = info.loadLabel(packageManager).toString()
-                )
+                runCatching {
+                    StockLauncherOverride(
+                        packageName = info.activityInfo.packageName,
+                        activityName = info.activityInfo.name,
+                        label = info.loadLabel(packageManager).toString()
+                    )
+                }.getOrNull()
             }
 
         // Once the stock launcher is disabled, it disappears from normal package queries. Keep
@@ -242,8 +258,8 @@ internal object LauncherOverride {
         relayIsDefault: Boolean,
         resolvedHome: String? = null,
         stockLauncherOverride: StockLauncherOverride? = null
-    ): LauncherDiagnostics {
-        val preferences = context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
+    ): LauncherDiagnostics = runCatching {
+        val preferences = context.applicationContext.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
         val events = decodeEvents(preferences.getString(diagnosticEventsKey, null))
         val storedStrategy = preferences.getString(diagnosticStrategyKey, LauncherOverrideStrategy.NONE)
             ?: LauncherOverrideStrategy.NONE
@@ -287,19 +303,31 @@ internal object LauncherOverride {
             device = preferences.getString(diagnosticDeviceKey, null) ?: launcherDeviceDescription(),
             events = events
         )
+    }.getOrElse {
+        // Diagnostics are deliberately best effort. If preferences are unavailable, showing a
+        // conservative resolver explanation is safer than taking down Settings while rendering
+        // the diagnostics card.
+        LauncherDiagnostics(
+            activeStrategyKey = if (relayIsDefault) LauncherOverrideStrategy.HOME_PRIORITY else LauncherOverrideStrategy.NONE,
+            reason = "Launcher diagnostics are temporarily unavailable.",
+            lastOperation = null,
+            lastUpdatedMs = null,
+            device = launcherDeviceDescription(),
+            events = emptyList()
+        )
     }
 
     fun remember(context: Context, override: StockLauncherOverride) {
-        context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE).edit()
-            .putString(packageKey, override.packageName)
-            .putString(activityKey, override.activityName)
-            .apply()
+        writeSharedPreferencesSafely(context, preferencesName) {
+            it.putString(packageKey, override.packageName)
+                .putString(activityKey, override.activityName)
+        }
     }
 
     /** Stores service diagnostics locally and writes the same structured events to Logcat. */
     fun recordServiceResult(context: Context, raw: String): String? {
         val decoded = LauncherDiagnosticTransport.decode(raw) ?: return null
-        persistReport(context, decoded.report)
+        runCatching { persistReport(context, decoded.report) }
         return decoded.message
     }
 
@@ -307,36 +335,42 @@ internal object LauncherOverride {
     fun recordServiceFailure(context: Context, message: String?): String? {
         val encoded = message ?: return null
         val decoded = LauncherDiagnosticTransport.decode(encoded) ?: return null
-        persistReport(context, decoded.report)
+        runCatching { persistReport(context, decoded.report) }
         return decoded.message
     }
 
     fun recordLocalEvent(context: Context, event: LauncherDiagnosticEvent) {
-        synchronized(this) {
-            val preferences = context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
-            val events = (decodeEvents(preferences.getString(diagnosticEventsKey, null)) + event)
-                .takeLast(maxDiagnosticEvents)
-            val editor = preferences.edit()
-                .putString(diagnosticEventsKey, JSONArray(events.map { it.toJson() }).toString())
-                .putString(diagnosticDeviceKey, launcherDeviceDescription())
-                .putString(diagnosticOperationKey, event.operation)
-                .putLong(diagnosticUpdatedKey, event.timestampMs)
-            if (event.operation == "set_relay_home" && event.outcome == "failure") {
-                editor
-                    .putString(diagnosticStrategyKey, LauncherOverrideStrategy.NONE)
-                    .putString(
-                        diagnosticReasonKey,
-                        "Launcher override did not complete. Cause: ${event.cause ?: "unknown failure"}"
-                    )
+        runCatching {
+            synchronized(this) {
+                val preferences = context.applicationContext.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
+                val events = (decodeEvents(preferences.getString(diagnosticEventsKey, null)) + event)
+                    .takeLast(maxDiagnosticEvents)
+                val editor = preferences.edit()
+                    .putString(diagnosticEventsKey, JSONArray(events.map { it.toJson() }).toString())
+                    .putString(diagnosticDeviceKey, launcherDeviceDescription())
+                    .putString(diagnosticOperationKey, event.operation)
+                    .putLong(diagnosticUpdatedKey, event.timestampMs)
+                if (event.operation == "set_relay_home" && event.outcome == "failure") {
+                    editor
+                        .putString(diagnosticStrategyKey, LauncherOverrideStrategy.NONE)
+                        .putString(
+                            diagnosticReasonKey,
+                            "Launcher override did not complete. Cause: ${event.cause ?: "unknown failure"}"
+                        )
+                }
+                editor.apply()
+                log(event)
             }
-            editor.apply()
-            log(event)
+        }.onFailure {
+            // Crash/launcher diagnostics must never become the source of the crash they are
+            // trying to explain. Logcat remains the fallback when local persistence is broken.
+            Log.w(logTag, "Unable to persist launcher diagnostic event", it)
         }
     }
 
     private fun persistReport(context: Context, report: LauncherDiagnosticReport) {
         synchronized(this) {
-            val preferences = context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
+            val preferences = context.applicationContext.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
             val events = (decodeEvents(preferences.getString(diagnosticEventsKey, null)) + report.events)
                 .takeLast(maxDiagnosticEvents)
             preferences.edit()
@@ -359,9 +393,12 @@ internal object LauncherOverride {
     }.getOrDefault(emptyList())
 
     private fun loadRemembered(context: Context): StockLauncherOverride? {
-        val preferences = context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
-        val packageName = preferences.getString(packageKey, null) ?: return null
-        val activityName = preferences.getString(activityKey, null) ?: return null
+        val packageName = readSharedPreferencesSafely(context, preferencesName, null as String?) {
+            it.getString(packageKey, null)
+        } ?: return null
+        val activityName = readSharedPreferencesSafely(context, preferencesName, null as String?) {
+            it.getString(activityKey, null)
+        } ?: return null
         val label = runCatching {
             context.packageManager.getApplicationLabel(
                 context.packageManager.getApplicationInfo(packageName, PackageManager.MATCH_DISABLED_COMPONENTS)

@@ -96,7 +96,7 @@ internal object RelayShizuku {
                 outcome = "failure",
                 cause = "Shizuku permission or binder is not available."
             )
-            onResult(Result.failure(IllegalStateException("Shizuku permission is not available.")))
+            runCatching { onResult(Result.failure(IllegalStateException("Shizuku permission is not available."))) }
             return
         }
         val args = Shizuku.UserServiceArgs(
@@ -129,7 +129,9 @@ internal object RelayShizuku {
                     else Result.failure(error)
                 }
             )
-            onResult(surfacedResult)
+            // The UI callback is supplied by Compose state. A late binder callback must not
+            // crash the main thread if that destination has already been disposed.
+            runCatching { onResult(surfacedResult) }
         }
 
         timeout = Runnable {
@@ -196,17 +198,19 @@ internal object RelayShizuku {
         outcome: String,
         cause: String? = null
     ) {
-        LauncherOverride.recordLocalEvent(
-            this,
-            LauncherDiagnosticEvent(
-                timestampMs = System.currentTimeMillis(),
-                operation = operation,
-                strategy = LauncherOverrideStrategy.SHIZUKU,
-                phase = phase,
-                outcome = outcome,
-                cause = cause
+        runCatching {
+            LauncherOverride.recordLocalEvent(
+                this,
+                LauncherDiagnosticEvent(
+                    timestampMs = System.currentTimeMillis(),
+                    operation = operation,
+                    strategy = LauncherOverrideStrategy.SHIZUKU,
+                    phase = phase,
+                    outcome = outcome,
+                    cause = cause
+                )
             )
-        )
+        }
     }
 
     private fun failureMessage(error: Throwable): String = generateSequence(error) { it.cause }

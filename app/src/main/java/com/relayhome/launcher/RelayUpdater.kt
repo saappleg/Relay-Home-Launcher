@@ -10,6 +10,7 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.core.content.FileProvider
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
@@ -38,13 +39,14 @@ internal object RelayUpdateSettings {
     private const val betaKey = "include_prereleases"
     internal const val DEFAULT_INCLUDE_PRERELEASES = false
 
-    fun includesBetas(context: Context): Boolean =
-        context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
-            .getBoolean(betaKey, DEFAULT_INCLUDE_PRERELEASES)
+    fun includesBetas(context: Context): Boolean = readSharedPreferencesSafely(
+        context,
+        preferencesName,
+        DEFAULT_INCLUDE_PRERELEASES
+    ) { it.getBoolean(betaKey, DEFAULT_INCLUDE_PRERELEASES) }
 
     fun setIncludesBetas(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
-            .edit().putBoolean(betaKey, enabled).apply()
+        writeSharedPreferencesSafely(context, preferencesName) { it.putBoolean(betaKey, enabled) }
     }
 }
 
@@ -101,7 +103,7 @@ internal object RelayUpdater {
     }
 
     suspend fun check(includePrereleases: Boolean): Result<RelayRelease?> = withContext(Dispatchers.IO) {
-        runCatching {
+        try {
             val connection = openTrustedConnection(releasesUrl, apiOnly = true)
             try {
                 check(connection.responseCode in 200..299) { "GitHub update check failed (HTTP ${connection.responseCode})." }
@@ -114,15 +116,21 @@ internal object RelayUpdater {
                 val releases = JSONArray(body)
                 val current = parsedVersion(BuildConfig.VERSION_NAME)
                     ?: error("Installed version is not a supported semantic version.")
-                selectLatestRelease(releases, current, includePrereleases)
+                Result.success(selectLatestRelease(releases, current, includePrereleases))
             } finally {
                 connection.disconnect()
             }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            // Update checks are optional. A network, parser, or framework failure should leave
+            // the existing installed build usable and let Settings show a retryable failure.
+            Result.failure(error)
         }
     }
 
     suspend fun download(context: Context, release: RelayRelease): Result<File> = withContext(Dispatchers.IO) {
-        runCatching {
+        try {
             check(isRepositoryAssetUrl(release.apkUrl)) { "The update URL is not a trusted GitHub asset." }
             val directory = File(context.cacheDir, "updates").apply {
                 check(mkdirs() || isDirectory) { "Could not prepare the update cache." }
@@ -159,7 +167,11 @@ internal object RelayUpdater {
                 partial.delete()
                 throw error
             }
-            destination
+            Result.success(destination)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            Result.failure(error)
         }
     }
 

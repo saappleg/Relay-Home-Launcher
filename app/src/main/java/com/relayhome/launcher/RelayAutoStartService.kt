@@ -21,8 +21,7 @@ class RelayAutoStartService : AccessibilityService() {
         if (now - lastLaunchAt < 2_000L) return
         lastLaunchAt = now
         val target = "${BuildConfig.APPLICATION_ID}/${MainActivity::class.java.name}"
-        LauncherOverride.recordLocalEvent(
-            this,
+        recordEvent(
             LauncherDiagnosticEvent(
                 timestampMs = System.currentTimeMillis(),
                 operation = "accessibility_auto_start",
@@ -42,8 +41,7 @@ class RelayAutoStartService : AccessibilityService() {
             )
             // startActivity() does not prove that Relay became the visible or resolved Home app.
             // Keep this explicitly unverified so diagnostics never overstate auto-start success.
-            LauncherOverride.recordLocalEvent(
-                this,
+            recordEvent(
                 LauncherDiagnosticEvent(
                     timestampMs = System.currentTimeMillis(),
                     operation = "accessibility_auto_start",
@@ -56,8 +54,7 @@ class RelayAutoStartService : AccessibilityService() {
                 )
             )
         } catch (error: Throwable) {
-            LauncherOverride.recordLocalEvent(
-                this,
+            recordEvent(
                 LauncherDiagnosticEvent(
                     timestampMs = System.currentTimeMillis(),
                     operation = "accessibility_auto_start",
@@ -69,11 +66,18 @@ class RelayAutoStartService : AccessibilityService() {
                     observedHome = packageName
                 )
             )
-            throw error
+            // Accessibility is a compatibility fallback. A denied/temporarily unavailable
+            // activity launch must be recorded and ignored, not crash the service process that
+            // Android may use to keep the launcher alive.
+            return
         }
     }
 
     override fun onInterrupt() = Unit
+
+    private fun recordEvent(event: LauncherDiagnosticEvent) {
+        runCatching { LauncherOverride.recordLocalEvent(this, event) }
+    }
 
     private companion object {
         val stockTvLaunchers = setOf(

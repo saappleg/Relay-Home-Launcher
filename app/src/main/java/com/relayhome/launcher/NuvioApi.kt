@@ -195,17 +195,18 @@ internal object NuvioApi {
     suspend fun signIn(email: String, password: String): Result<NuvioSession> = withContext(Dispatchers.IO) {
         apiCall {
             val response = requestWithRetry("sign-in") {
-                val connection = (URL("$baseUrl/auth/v1/token?grant_type=password").openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    doOutput = true
-                    setRequestProperty("apikey", publishableKey)
-                    setRequestProperty("Authorization", "Bearer $publishableKey")
-                    setRequestProperty("Accept", "application/json")
-                    setRequestProperty("Content-Type", "application/json")
-                    connectTimeout = REQUEST_TIMEOUT_MS
-                    readTimeout = REQUEST_TIMEOUT_MS
-                }
+                val connection = URL("$baseUrl/auth/v1/token?grant_type=password").openConnection() as HttpURLConnection
                 try {
+                    connection.apply {
+                        requestMethod = "POST"
+                        doOutput = true
+                        setRequestProperty("apikey", publishableKey)
+                        setRequestProperty("Authorization", "Bearer $publishableKey")
+                        setRequestProperty("Accept", "application/json")
+                        setRequestProperty("Content-Type", "application/json")
+                        connectTimeout = REQUEST_TIMEOUT_MS
+                        readTimeout = REQUEST_TIMEOUT_MS
+                    }
                     connection.outputStream.bufferedWriter().use {
                         it.write(JSONObject().put("email", email).put("password", password).toString())
                     }
@@ -354,16 +355,17 @@ internal object NuvioApi {
         retryOnTransient: Boolean = true
     ): String {
         val response = requestWithRetry("sync/$function", retryOnTransient) {
-            val connection = (URL("$baseUrl/rest/v1/rpc/$function").openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                doOutput = true
-                setRequestProperty("apikey", publishableKey)
-                setRequestProperty("Authorization", "Bearer ${session.accessToken}")
-                setRequestProperty("Content-Type", "application/json")
-                connectTimeout = REQUEST_TIMEOUT_MS
-                readTimeout = REQUEST_TIMEOUT_MS
-            }
+            val connection = URL("$baseUrl/rest/v1/rpc/$function").openConnection() as HttpURLConnection
             try {
+                connection.apply {
+                    requestMethod = "POST"
+                    doOutput = true
+                    setRequestProperty("apikey", publishableKey)
+                    setRequestProperty("Authorization", "Bearer ${session.accessToken}")
+                    setRequestProperty("Content-Type", "application/json")
+                    connectTimeout = REQUEST_TIMEOUT_MS
+                    readTimeout = REQUEST_TIMEOUT_MS
+                }
                 connection.outputStream.bufferedWriter().use { it.write(body.toString()) }
                 connection.readResponse()
             } finally {
@@ -384,17 +386,18 @@ internal object NuvioApi {
         body: JSONObject,
         retryOnTransient: Boolean = true
     ): HttpResponse = requestWithRetry("QR $endpoint", retryOnTransient) {
-        val connection = (URL(baseUrl + endpoint).openConnection() as HttpURLConnection).apply {
-            requestMethod = "POST"
-            doOutput = true
-            setRequestProperty("apikey", publishableKey)
-            setRequestProperty("Authorization", "Bearer $publishableKey")
-            setRequestProperty("Accept", "application/json")
-            setRequestProperty("Content-Type", "application/json")
-            connectTimeout = REQUEST_TIMEOUT_MS
-            readTimeout = REQUEST_TIMEOUT_MS
-        }
+        val connection = URL(baseUrl + endpoint).openConnection() as HttpURLConnection
         try {
+            connection.apply {
+                requestMethod = "POST"
+                doOutput = true
+                setRequestProperty("apikey", publishableKey)
+                setRequestProperty("Authorization", "Bearer $publishableKey")
+                setRequestProperty("Accept", "application/json")
+                setRequestProperty("Content-Type", "application/json")
+                connectTimeout = REQUEST_TIMEOUT_MS
+                readTimeout = REQUEST_TIMEOUT_MS
+            }
             connection.outputStream.bufferedWriter().use { it.write(body.toString()) }
             connection.readResponse()
         } finally {

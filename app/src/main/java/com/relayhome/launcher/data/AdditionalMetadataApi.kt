@@ -62,22 +62,30 @@ internal object AdditionalMetadataApi {
     /** The app path: only configured services are queried; empty optional results are successful. */
     suspend fun lookup(context: Context, item: MediaItem): Result<AdditionalMetadata> =
         withContext(Dispatchers.IO) {
-            val configured = listOf(MetadataKeyService.FANART, MetadataKeyService.TVDB).mapNotNull { service ->
-                RelaySettingsRepository.loadAdditionalMetadataApiKey(context, service)?.let { service to it }
+            try {
+                val configured = listOf(MetadataKeyService.FANART, MetadataKeyService.TVDB).mapNotNull { service ->
+                    RelaySettingsRepository.loadAdditionalMetadataApiKey(context, service)?.let { service to it }
+                }
+                if (configured.isEmpty()) return@withContext Result.success(AdditionalMetadata())
+                val values: List<AdditionalMetadata?> = coroutineScope {
+                    configured.map { (service, key) -> async {
+                        when (service) {
+                            MetadataKeyService.FANART -> lookupFanart(item, key).getOrNull()
+                            MetadataKeyService.TVDB -> lookupTvdb(item, key).getOrNull()
+                            else -> null
+                        }
+                    } }.awaitAll()
+                }
+                Result.success(values.filterNotNull().fold(AdditionalMetadata()) { acc, value ->
+                    AdditionalMetadata(value.fanart ?: acc.fanart, value.tvdb ?: acc.tvdb)
+                })
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Optional artwork cannot justify taking down Home. If settings or the provider
+                // binder fails outside an individual lookup, retain the empty/previous-good UI.
+                Result.success(AdditionalMetadata())
             }
-            if (configured.isEmpty()) return@withContext Result.success(AdditionalMetadata())
-            val values: List<AdditionalMetadata?> = coroutineScope {
-                configured.map { (service, key) -> async {
-                    when (service) {
-                        MetadataKeyService.FANART -> lookupFanart(item, key).getOrNull()
-                        MetadataKeyService.TVDB -> lookupTvdb(item, key).getOrNull()
-                        else -> null
-                    }
-                } }.awaitAll()
-            }
-            Result.success(values.filterNotNull().fold(AdditionalMetadata()) { acc, value ->
-                AdditionalMetadata(value.fanart ?: acc.fanart, value.tvdb ?: acc.tvdb)
-            })
         }
 
     /** Typed test seam using the exact production parsing, auth, fail-closed, and cache paths. */
@@ -236,15 +244,19 @@ internal object AdditionalMetadataApi {
 
     private object AndroidTransport : AdditionalMetadataTransport {
         override fun execute(request: AdditionalMetadataRequest): AdditionalMetadataHttpResponse {
-            val connection = (URL(request.url).openConnection() as HttpURLConnection).apply {
-                requestMethod = request.method
-                connectTimeout = REQUEST_TIMEOUT_MS
-                readTimeout = REQUEST_TIMEOUT_MS
-                instanceFollowRedirects = false
-                request.headers.forEach { (name, value) -> setRequestProperty(name, value) }
-                request.body?.let { body -> doOutput = true; outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) } }
-            }
+            val connection = URL(request.url).openConnection() as HttpURLConnection
             try {
+                connection.apply {
+                    requestMethod = request.method
+                    connectTimeout = REQUEST_TIMEOUT_MS
+                    readTimeout = REQUEST_TIMEOUT_MS
+                    instanceFollowRedirects = false
+                    request.headers.forEach { (name, value) -> setRequestProperty(name, value) }
+                    request.body?.let { body ->
+                        doOutput = true
+                        outputStream.use { it.write(body.toByteArray(Charsets.UTF_8)) }
+                    }
+                }
                 val status = connection.responseCode
                 if (connection.contentLengthLong > MAX_HTTP_RESPONSE_BYTES) throw IOException("metadata response exceeded the supported limit")
                 val stream = if (status in 200..299) connection.inputStream else connection.errorStream

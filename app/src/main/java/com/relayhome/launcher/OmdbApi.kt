@@ -190,12 +190,13 @@ internal object OmdbApi {
                 "${URLEncoder.encode(key, "UTF-8")}=${URLEncoder.encode(value, "UTF-8")}"
             }
         return requestWithRetry("title", request = {
-            val connection = (URL("$baseUrl?$query").openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = OMDB_REQUEST_TIMEOUT_MS
-                readTimeout = OMDB_REQUEST_TIMEOUT_MS
-            }
+            val connection = URL("$baseUrl?$query").openConnection() as HttpURLConnection
             try {
+                connection.apply {
+                    requestMethod = "GET"
+                    connectTimeout = OMDB_REQUEST_TIMEOUT_MS
+                    readTimeout = OMDB_REQUEST_TIMEOUT_MS
+                }
                 val status = connection.responseCode
                 if (connection.contentLengthLong > MAX_HTTP_RESPONSE_BYTES) {
                     throw OmdbResponseTooLargeException()

@@ -8,6 +8,7 @@ import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
+import com.relayhome.launcher.applicationContextSafely
 import com.relayhome.launcher.ui.shared.MediaItem
 import com.relayhome.launcher.ui.shared.contentKey
 import java.util.concurrent.atomic.AtomicReference
@@ -59,6 +60,7 @@ internal object RelayRatingsStore {
     private var collectorJob: Job? = null
     private var migrationJob: Job? = null
     private var pendingWrites = 0
+    private var lastPersistedSnapshot: Map<String, PersonalRating> = emptyMap()
 
     fun revision(context: Context): StateFlow<Long> {
         initialize(context)
@@ -84,8 +86,8 @@ internal object RelayRatingsStore {
         val normalizedKey = contentKey.trim()
         if (normalizedKey.isEmpty()) return
         initialize(context)
-        val optimistic = snapshot.get().toMutableMap().also { it[normalizedKey] = rating }.toMap()
         synchronized(lock) {
+            val optimistic = snapshot.get().toMutableMap().also { it[normalizedKey] = rating }.toMap()
             pendingWrites += 1
             snapshot.set(optimistic)
             _revision.value += 1
@@ -100,13 +102,16 @@ internal object RelayRatingsStore {
                     }
                 }
                 synchronized(lock) {
-                    snapshot.set(ratingsFrom(persisted))
+                    val persistedSnapshot = ratingsFrom(persisted)
+                    snapshot.set(persistedSnapshot)
+                    lastPersistedSnapshot = persistedSnapshot
                     pendingWrites -= 1
                     _revision.value += 1
                 }
             } catch (_: Throwable) {
                 synchronized(lock) {
                     pendingWrites -= 1
+                    if (pendingWrites == 0) snapshot.set(lastPersistedSnapshot)
                     _revision.value += 1
                 }
             }
@@ -119,8 +124,8 @@ internal object RelayRatingsStore {
         val normalizedKey = contentKey.trim()
         if (normalizedKey.isEmpty()) return
         initialize(context)
-        val optimistic = snapshot.get().toMutableMap().also { it.remove(normalizedKey) }.toMap()
         synchronized(lock) {
+            val optimistic = snapshot.get().toMutableMap().also { it.remove(normalizedKey) }.toMap()
             pendingWrites += 1
             snapshot.set(optimistic)
             _revision.value += 1
@@ -133,13 +138,16 @@ internal object RelayRatingsStore {
                     }
                 }
                 synchronized(lock) {
-                    snapshot.set(ratingsFrom(persisted))
+                    val persistedSnapshot = ratingsFrom(persisted)
+                    snapshot.set(persistedSnapshot)
+                    lastPersistedSnapshot = persistedSnapshot
                     pendingWrites -= 1
                     _revision.value += 1
                 }
             } catch (_: Throwable) {
                 synchronized(lock) {
                     pendingWrites -= 1
+                    if (pendingWrites == 0) snapshot.set(lastPersistedSnapshot)
                     _revision.value += 1
                 }
             }
@@ -150,25 +158,31 @@ internal object RelayRatingsStore {
     suspend fun awaitReady(context: Context) {
         initialize(context)
         migrationJob?.join()
-        context.applicationContext.relayRatingsDataStore.data.first()
+        applicationContextSafely(context).relayRatingsDataStore.data.first()
         awaitIdleForTesting(context)
     }
 
     private fun initialize(context: Context) {
-        val appContext = context.applicationContext
+        val appContext = applicationContextSafely(context)
         synchronized(lock) {
             if (initializedContext === appContext && collectorJob?.isActive == true) return
             initializedContext = appContext
             snapshot.set(emptyMap())
+            lastPersistedSnapshot = emptyMap()
             collectorJob?.cancel()
             migrationJob?.cancel()
             collectorJob = scope.launch {
                 appContext.relayRatingsDataStore.data
-                    .catch { emit(emptyPreferences()) }
+                    .catch {
+                        // Keep the last good snapshot when DataStore is temporarily unreadable;
+                        // an empty emission would make existing ratings disappear in the UI.
+                    }
                     .collect { values ->
                         synchronized(lock) {
                             if (pendingWrites == 0) {
-                                snapshot.set(ratingsFrom(values))
+                                val persisted = ratingsFrom(values)
+                                snapshot.set(persisted)
+                                lastPersistedSnapshot = persisted
                                 _revision.value += 1
                             }
                         }
@@ -205,7 +219,10 @@ internal object RelayRatingsStore {
 
     /** Copies the legacy one-value-per-content-key SharedPreferences format exactly once. */
     private fun copyLegacyInto(destination: MutablePreferences, context: Context) {
-        val legacy = context.getSharedPreferences(legacyPreferencesName, Context.MODE_PRIVATE)
+        // A stale/corrupt legacy XML file should not block the ratings DataStore from opening.
+        val legacy = runCatching {
+            context.applicationContext.getSharedPreferences(legacyPreferencesName, Context.MODE_PRIVATE)
+        }.getOrNull() ?: return
         safeAllKeys(legacy).forEach { legacyKey ->
             val rating = runCatching { legacy.getString(legacyKey, null) }
                 .getOrNull()
@@ -219,7 +236,7 @@ internal object RelayRatingsStore {
     // Test-only hooks mirror RelaySettingsRepository's migration tests without exposing the
     // underlying DataStore to UI callers.
     internal suspend fun resetForTesting(context: Context) {
-        val appContext = context.applicationContext
+        val appContext = applicationContextSafely(context)
         awaitIdleForTestingIfInitialized()
         synchronized(lock) {
             collectorJob?.cancel()
@@ -229,6 +246,7 @@ internal object RelayRatingsStore {
             initializedContext = null
             pendingWrites = 0
             snapshot.set(emptyMap())
+            lastPersistedSnapshot = emptyMap()
             _revision.value += 1
         }
         appContext.relayRatingsDataStore.updateData { emptyPreferences() }
@@ -245,6 +263,7 @@ internal object RelayRatingsStore {
             initializedContext = null
             pendingWrites = 0
             snapshot.set(emptyMap())
+            lastPersistedSnapshot = emptyMap()
             _revision.value += 1
         }
     }
@@ -253,16 +272,20 @@ internal object RelayRatingsStore {
         initialize(context)
         migrationJob?.join()
         awaitIdleForTestingIfInitialized()
-        val values = context.applicationContext.relayRatingsDataStore.data.first()
+        val values = applicationContextSafely(context).relayRatingsDataStore.data.first()
         synchronized(lock) {
-            if (pendingWrites == 0) snapshot.set(ratingsFrom(values))
+            if (pendingWrites == 0) {
+                val persisted = ratingsFrom(values)
+                snapshot.set(persisted)
+                lastPersistedSnapshot = persisted
+            }
             _revision.value += 1
         }
     }
 
     internal suspend fun storedKeysForTesting(context: Context): Set<String> {
         awaitReady(context)
-        return context.applicationContext.relayRatingsDataStore.data.first().asMap().keys.map { it.name }.toSet()
+        return applicationContextSafely(context).relayRatingsDataStore.data.first().asMap().keys.map { it.name }.toSet()
     }
 
     private suspend fun awaitIdleForTestingIfInitialized() {

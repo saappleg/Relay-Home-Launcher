@@ -47,17 +47,19 @@ internal object NuvioSessionStore {
         session
     }.getOrElse {
         // A corrupt/undecryptable token must not reset the nonsecret profile selection.
-        preferences(context).edit().remove(tokenKey).apply()
+        writeSharedPreferencesSafely(context, preferencesName) { it.remove(tokenKey) }
         null
     }
 
     fun save(context: Context, session: NuvioSession) {
         require(session.accessToken.isNotBlank()) { "Nuvio session token cannot be blank." }
-        saveEncrypted(context, JSONObject()
-            .put("access_token", session.accessToken)
-            .put("refresh_token", session.refreshToken)
-            .put("expires_at", session.expiresAtEpochSeconds)
-            .toString())
+        runCatching {
+            saveEncrypted(context, JSONObject()
+                .put("access_token", session.accessToken)
+                .put("refresh_token", session.refreshToken)
+                .put("expires_at", session.expiresAtEpochSeconds)
+                .toString())
+        }
     }
 
     /** Test-only seam for exercising upgrades from the original encrypted token-only format. */
@@ -70,17 +72,27 @@ internal object NuvioSessionStore {
         val encryptor = cipher(Cipher.ENCRYPT_MODE)
         val ciphertext = encryptor.doFinal(plaintext.encodeToByteArray())
         val payload = "${Base64.encodeToString(encryptor.iv, Base64.NO_WRAP)}:${Base64.encodeToString(ciphertext, Base64.NO_WRAP)}"
-        preferences(context).edit().putString(tokenKey, payload).apply()
+        check(writeSharedPreferencesSafely(context, preferencesName) { it.putString(tokenKey, payload) }) {
+            "Nuvio session could not be saved."
+        }
     }
 
     fun clear(context: Context) {
-        preferences(context).edit().remove(tokenKey).remove(profileKey).apply()
+        writeSharedPreferencesSafely(context, preferencesName) {
+            it.remove(tokenKey).remove(profileKey)
+        }
     }
 
-    fun loadProfile(context: Context): Int = preferences(context).getInt(profileKey, 1)
+    fun loadProfile(context: Context): Int = readSharedPreferencesSafely(
+        context,
+        preferencesName,
+        1
+    ) { it.getInt(profileKey, 1).coerceAtLeast(1) }
 
     fun saveProfile(context: Context, profileIndex: Int) {
-        preferences(context).edit().putInt(profileKey, profileIndex).apply()
+        writeSharedPreferencesSafely(context, preferencesName) {
+            it.putInt(profileKey, profileIndex.coerceAtLeast(1))
+        }
     }
 
     private fun preferences(context: Context) = context.applicationContext.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)

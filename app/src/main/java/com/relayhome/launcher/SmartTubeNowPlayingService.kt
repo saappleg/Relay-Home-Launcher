@@ -16,6 +16,7 @@ import android.service.notification.StatusBarNotification
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.Snapshot
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.concurrent.Executors
@@ -47,9 +48,20 @@ internal object SmartTubePlaybackStore {
     var activeProfileId by mutableStateOf<String?>(null)
 
     fun initialize(context: Context) {
-        val prefs = preferences(context)
-        activeProfileId = normalizeRelayTubeProfileId(prefs.getString(RELAY_TUBE_ACTIVE_PROFILE, null))
-        activeProfileId?.let { activateProfile(context, it) }
+        val storedProfileId = readSharedPreferencesResult(context, RELAY_TUBE_CACHE_PREFS) {
+            it.getString(RELAY_TUBE_ACTIVE_PROFILE, null)
+        }.getOrElse { return }
+        val normalizedProfileId = normalizeRelayTubeProfileId(storedProfileId)
+        if (normalizedProfileId != null) {
+            activateProfile(context, normalizedProfileId)
+        } else {
+            Snapshot.withMutableSnapshot {
+                activeProfileId = null
+                subscriptionVideos = emptyList()
+                continueWatchingVideos = emptyList()
+                nowPlaying = null
+            }
+        }
     }
 
     /**
@@ -76,25 +88,23 @@ internal object SmartTubePlaybackStore {
     }
 
     fun loadSubscriptionVideos(context: Context, profileId: String? = activeProfileId): List<SmartTubeSubscriptionVideo> =
-        parseSubscriptionVideos(preferences(context).getString(cacheKey(RELAY_TUBE_CACHE_SUBSCRIPTIONS, profileId), null))
+        parseSubscriptionVideos(readCachedPayload(context, RELAY_TUBE_CACHE_SUBSCRIPTIONS, profileId))
 
     fun saveSubscriptionVideos(context: Context, profileId: String, payload: String, videos: List<SmartTubeSubscriptionVideo>) {
         val cleanProfileId = normalizeRelayTubeProfileId(profileId) ?: return
-        if (cleanProfileId == activeProfileId) subscriptionVideos = videos
-        preferences(context).edit()
-            .putString(cacheKey(RELAY_TUBE_CACHE_SUBSCRIPTIONS, cleanProfileId), payload)
-            .apply()
+        if (writeCachedPayload(context, RELAY_TUBE_CACHE_SUBSCRIPTIONS, cleanProfileId, payload) &&
+            cleanProfileId == activeProfileId
+        ) subscriptionVideos = videos
     }
 
     fun loadContinueWatchingVideos(context: Context, profileId: String? = activeProfileId): List<SmartTubeSubscriptionVideo> =
-        parseSubscriptionVideos(preferences(context).getString(cacheKey(RELAY_TUBE_CACHE_CONTINUE_WATCHING, profileId), null))
+        parseSubscriptionVideos(readCachedPayload(context, RELAY_TUBE_CACHE_CONTINUE_WATCHING, profileId))
 
     fun saveContinueWatchingVideos(context: Context, profileId: String, payload: String, videos: List<SmartTubeSubscriptionVideo>) {
         val cleanProfileId = normalizeRelayTubeProfileId(profileId) ?: return
-        if (cleanProfileId == activeProfileId) continueWatchingVideos = videos
-        preferences(context).edit()
-            .putString(cacheKey(RELAY_TUBE_CACHE_CONTINUE_WATCHING, cleanProfileId), payload)
-            .apply()
+        if (writeCachedPayload(context, RELAY_TUBE_CACHE_CONTINUE_WATCHING, cleanProfileId, payload) &&
+            cleanProfileId == activeProfileId
+        ) continueWatchingVideos = videos
     }
 
     fun updateProfiles(context: Context, selectedId: String?, next: List<RelayTubeProfile>) {
@@ -113,25 +123,47 @@ internal object SmartTubePlaybackStore {
         if (nextActiveProfile != null) {
             activateProfile(context, nextActiveProfile)
         } else {
-            activeProfileId = null
-            subscriptionVideos = emptyList()
-            continueWatchingVideos = emptyList()
-            nowPlaying = null
-            preferences(context).edit().remove(RELAY_TUBE_ACTIVE_PROFILE).apply()
+            if (writeSharedPreferencesSafely(context, RELAY_TUBE_CACHE_PREFS) {
+                it.remove(RELAY_TUBE_ACTIVE_PROFILE)
+            }) {
+                Snapshot.withMutableSnapshot {
+                    activeProfileId = null
+                    subscriptionVideos = emptyList()
+                    continueWatchingVideos = emptyList()
+                    nowPlaying = null
+                }
+            }
         }
     }
 
     fun activateProfile(context: Context, profileId: String) {
         val cleanProfileId = normalizeRelayTubeProfileId(profileId) ?: return
-        activeProfileId = cleanProfileId
-        preferences(context).edit().putString(RELAY_TUBE_ACTIVE_PROFILE, cleanProfileId).apply()
-        subscriptionVideos = loadSubscriptionVideos(context, cleanProfileId)
-        continueWatchingVideos = loadContinueWatchingVideos(context, cleanProfileId)
-        nowPlaying = null
+        if (!writeSharedPreferencesSafely(context, RELAY_TUBE_CACHE_PREFS) {
+                it.putString(RELAY_TUBE_ACTIVE_PROFILE, cleanProfileId)
+            }
+        ) return
+        // Publish the profile id and both profile-scoped feeds in one snapshot. Rapid D-pad/profile
+        // changes must never leave observers with a mixed profile or make them retain profile 1
+        // after the store has already moved to the final selection.
+        val nextSubscriptions = loadSubscriptionVideos(context, cleanProfileId)
+        val nextContinueWatching = loadContinueWatchingVideos(context, cleanProfileId)
+        Snapshot.withMutableSnapshot {
+            activeProfileId = cleanProfileId
+            subscriptionVideos = nextSubscriptions
+            continueWatchingVideos = nextContinueWatching
+            nowPlaying = null
+        }
     }
 
-    private fun preferences(context: Context) =
-        context.getSharedPreferences(RELAY_TUBE_CACHE_PREFS, Context.MODE_PRIVATE)
+    private fun readCachedPayload(context: Context, base: String, profileId: String?): String? =
+        readSharedPreferencesSafely(context, RELAY_TUBE_CACHE_PREFS, null as String?) {
+            it.getString(cacheKey(base, profileId), null)
+        }
+
+    private fun writeCachedPayload(context: Context, base: String, profileId: String, payload: String): Boolean =
+        writeSharedPreferencesSafely(context, RELAY_TUBE_CACHE_PREFS) {
+            it.putString(cacheKey(base, profileId), payload)
+        }
 
     private fun cacheKey(base: String, profileId: String?): String =
         "${base}_${normalizeRelayTubeProfileId(profileId) ?: "guest"}"
@@ -181,13 +213,20 @@ private fun dispatchRelayTubeBroadcastAsync(
     context: Context,
     intent: Intent
 ) {
-    val pendingResult = receiver.goAsync()
-    relayTubeBroadcastExecutor.execute {
-        try {
-            runCatching { dispatchRelayTubeBroadcast(context.applicationContext, intent) }
-        } finally {
-            pendingResult.finish()
+    // goAsync()/executor dispatch are framework and process-lifetime boundaries. If Android is
+    // tearing down the receiver or the executor rejects work, dropping the bridge payload is
+    // safer than crashing the broadcast process or leaking a pending result.
+    val pendingResult = runCatching { receiver.goAsync() }.getOrNull() ?: return
+    runCatching {
+        relayTubeBroadcastExecutor.execute {
+            try {
+                runCatching { dispatchRelayTubeBroadcast(context.applicationContext, intent) }
+            } finally {
+                runCatching { pendingResult.finish() }
+            }
         }
+    }.onFailure {
+        runCatching { pendingResult.finish() }
     }
 }
 
@@ -549,17 +588,19 @@ internal object SmartTubeChannelFilter {
     var hiddenChannelIds by mutableStateOf(emptySet<String>())
 
     fun load(context: Context) {
-        hiddenChannelIds = context.getSharedPreferences(RELAY_TUBE_CACHE_PREFS, Context.MODE_PRIVATE)
-            .getStringSet(RELAY_TUBE_HIDDEN_CHANNELS, emptySet())
-            .orEmpty()
+        readSharedPreferencesResult(
+            context,
+            RELAY_TUBE_CACHE_PREFS,
+        ) { it.getStringSet(RELAY_TUBE_HIDDEN_CHANNELS, emptySet()).orEmpty().toSet() }
+            .onSuccess { hiddenChannelIds = it }
     }
 
     fun setVisible(context: Context, channelId: String, visible: Boolean) {
-        hiddenChannelIds = if (visible) hiddenChannelIds - channelId else hiddenChannelIds + channelId
-        context.getSharedPreferences(RELAY_TUBE_CACHE_PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .putStringSet(RELAY_TUBE_HIDDEN_CHANNELS, hiddenChannelIds)
-            .apply()
+        val next = if (visible) hiddenChannelIds - channelId else hiddenChannelIds + channelId
+        if (writeSharedPreferencesSafely(context, RELAY_TUBE_CACHE_PREFS) {
+                it.putStringSet(RELAY_TUBE_HIDDEN_CHANNELS, next)
+            }
+        ) hiddenChannelIds = next
     }
 }
 private const val RELAY_TUBE_HIDDEN_CHANNELS = "hidden_channel_ids"
@@ -580,11 +621,12 @@ class SmartTubeNowPlayingService : NotificationListenerService() {
 
     override fun onListenerConnected() {
         super.onListenerConnected()
-        val manager = getSystemService(MediaSessionManager::class.java)
         val component = ComponentName(this, SmartTubeNowPlayingService::class.java)
         // Android TV can briefly connect this service while the permission switch is still
         // settling. Treat that state as "not connected" instead of crashing Relay.
         runCatching {
+            val manager = getSystemService(MediaSessionManager::class.java)
+                ?: error("Media session service is unavailable")
             manager.addOnActiveSessionsChangedListener(activeSessionsListener, component)
             sessionManager = manager
             manager.getActiveSessions(component)

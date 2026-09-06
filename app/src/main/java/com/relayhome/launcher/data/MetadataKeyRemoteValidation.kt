@@ -168,22 +168,25 @@ internal object RelayMetadataApiKeyRemoteValidation : MetadataKeyRemoteValidatio
                 // use the returned bearer token. This probe validates only the credential.
                 MetadataKeyService.TVDB -> "https://api4.thetvdb.com/v4/login"
             }
-            val connection = (URL(url).openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = VALIDATION_TIMEOUT_MS
-                readTimeout = VALIDATION_TIMEOUT_MS
-                instanceFollowRedirects = false
-                if (service == MetadataKeyService.FANART) {
-                    setRequestProperty("client-key", apiKey)
-                }
-                if (service == MetadataKeyService.TVDB) {
-                    requestMethod = "POST"
-                    doOutput = true
-                    setRequestProperty("Content-Type", "application/json")
-                    outputStream.use { it.write(JSONObject().put("apikey", apiKey).toString().toByteArray(Charsets.UTF_8)) }
-                }
-            }
+            val connection = URL(url).openConnection() as HttpURLConnection
             try {
+                connection.apply {
+                    requestMethod = "GET"
+                    connectTimeout = VALIDATION_TIMEOUT_MS
+                    readTimeout = VALIDATION_TIMEOUT_MS
+                    instanceFollowRedirects = false
+                    if (service == MetadataKeyService.FANART) {
+                        setRequestProperty("client-key", apiKey)
+                    }
+                    if (service == MetadataKeyService.TVDB) {
+                        requestMethod = "POST"
+                        doOutput = true
+                        setRequestProperty("Content-Type", "application/json")
+                        outputStream.use {
+                            it.write(JSONObject().put("apikey", apiKey).toString().toByteArray(Charsets.UTF_8))
+                        }
+                    }
+                }
                 val statusCode = connection.responseCode
                 if (connection.contentLengthLong > MAX_HTTP_RESPONSE_BYTES) {
                     throw IOException("validation response exceeded the supported limit")

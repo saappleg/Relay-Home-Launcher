@@ -48,14 +48,16 @@ internal object ProviderHandoff {
     fun isProviderPackage(packageName: String): Boolean =
         packageName == nuvioPackage || packageName == stremioPackage || isSmartTubePackage(packageName)
 
-    fun isNuvioInstalled(context: Context): Boolean =
+    fun isNuvioInstalled(context: Context): Boolean = runCatching {
         context.packageManager.getLaunchIntentForPackage(nuvioPackage) != null
+    }.getOrDefault(false)
 
-    fun isStremioInstalled(context: Context): Boolean =
+    fun isStremioInstalled(context: Context): Boolean = runCatching {
         context.packageManager.getLaunchIntentForPackage(stremioPackage) != null
+    }.getOrDefault(false)
 
     fun openNuvio(context: Context) {
-        val intent = context.packageManager.getLaunchIntentForPackage(nuvioPackage)
+        val intent = runCatching { context.packageManager.getLaunchIntentForPackage(nuvioPackage) }.getOrNull()
         if (intent == null) {
             notice(context, "Nuvio is not installed on this device.")
         } else {
@@ -75,7 +77,7 @@ internal object ProviderHandoff {
         val intent = Intent(Intent.ACTION_VIEW, uri)
             .setPackage(nuvioPackage)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        if (intent.resolveActivity(context.packageManager) == null) {
+        if (resolveActivitySafely(context, intent) == null) {
             openNuvio(context)
             return
         }
@@ -84,9 +86,7 @@ internal object ProviderHandoff {
     }
 
     fun openSmartTube(context: Context) {
-        val intent = smartTubePackages.asSequence()
-            .mapNotNull { context.packageManager.getLaunchIntentForPackage(it) }
-            .firstOrNull()
+        val intent = launchIntentForAnyPackage(context, smartTubePackages)
         if (intent == null) {
             notice(context, "RelayTube is not installed. Install RelayTube, then Relay will add it automatically.")
         } else {
@@ -116,7 +116,7 @@ internal object ProviderHandoff {
         val intent = Intent(Intent.ACTION_VIEW, uri)
             .setPackage(packageName)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        if (intent.resolveActivity(context.packageManager) == null) {
+        if (resolveActivitySafely(context, intent) == null) {
             notice(context, "This RelayTube build does not support direct video links.")
             openSmartTube(context)
             return
@@ -126,7 +126,7 @@ internal object ProviderHandoff {
     }
 
     fun openStremio(context: Context) {
-        val intent = context.packageManager.getLaunchIntentForPackage(stremioPackage)
+        val intent = runCatching { context.packageManager.getLaunchIntentForPackage(stremioPackage) }.getOrNull()
         if (intent == null) {
             notice(context, "Stremio is not installed on this device.")
         } else {
@@ -159,7 +159,7 @@ internal object ProviderHandoff {
                     Intent.ACTION_VIEW,
                     Uri.parse("nuvio://search").buildUpon().appendQueryParameter("query", cleanQuery).build()
                 ).setPackage(nuvioPackage).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                if (intent.resolveActivity(context.packageManager) != null) {
+                if (resolveActivitySafely(context, intent) != null) {
                     runCatching { context.startActivity(intent) }.onFailure { openNuvio(context) }
                 } else {
                     openNuvio(context)
@@ -177,7 +177,7 @@ internal object ProviderHandoff {
                 val intent = Intent(Intent.ACTION_VIEW, uri)
                     .setPackage(packageName)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                if (intent.resolveActivity(context.packageManager) != null) {
+                if (resolveActivitySafely(context, intent) != null) {
                     runCatching { context.startActivity(intent) }
                         .onFailure { openSmartTube(context) }
                 } else {
@@ -290,7 +290,7 @@ internal object ProviderHandoff {
         val intent = Intent(Intent.ACTION_VIEW, uri)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             .apply { packageName?.let { setPackage(it) } }
-        if (intent.resolveActivity(context.packageManager) == null) {
+        if (resolveActivitySafely(context, intent) == null) {
             notice(context, unavailableMessage)
             return
         }
@@ -299,8 +299,20 @@ internal object ProviderHandoff {
     }
 
     private fun notice(context: Context, message: String) {
-        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+        // Toast creation can fail while an OEM is tearing down the launcher process. The handoff
+        // is already fail-closed at that point, so a best-effort notice must not crash it again.
+        runCatching { Toast.makeText(context, message, Toast.LENGTH_LONG).show() }
     }
+
+    private fun resolveActivitySafely(context: Context, intent: Intent): android.content.ComponentName? =
+        runCatching { intent.resolveActivity(context.packageManager) }.getOrNull()
+
+    private fun launchIntentForAnyPackage(context: Context, packages: Iterable<String>): Intent? =
+        runCatching {
+            packages.asSequence()
+                .mapNotNull { context.packageManager.getLaunchIntentForPackage(it) }
+                .firstOrNull()
+        }.getOrNull()
 
     private val youtubeVideoIdPattern = Regex("[A-Za-z0-9_-]{11}")
     private val youtubeHosts = setOf("youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be")

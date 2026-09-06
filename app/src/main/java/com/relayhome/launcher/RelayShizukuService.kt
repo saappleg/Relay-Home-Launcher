@@ -3,6 +3,9 @@ package com.relayhome.launcher
 import android.os.Build
 import android.util.Log
 import androidx.annotation.Keep
+import java.util.concurrent.TimeUnit
+
+private const val SHELL_COMMAND_TIMEOUT_MS = 8_000L
 
 /**
  * Runs as Shizuku's shell/root identity after the user approves Relay. It deliberately exposes
@@ -340,11 +343,22 @@ class RelayShizukuService : IRelayHomeShell.Stub() {
 
     private fun runCommand(vararg command: String): String {
         val process = ProcessBuilder(*command).redirectErrorStream(true).start()
-        val output = process.inputStream.bufferedReader().use { it.readText().trim() }
-        check(process.waitFor() == 0) {
-            output.ifBlank { "Package manager command failed: ${command.joinToString(" ")}" }
+        return try {
+            // A shell command is a remote/binder boundary in practice. Bound it so a stuck
+            // package-manager service cannot strand the Shizuku worker forever.
+            check(process.waitFor(SHELL_COMMAND_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                process.destroyForcibly()
+                "Package manager command timed out."
+            }
+            val output = process.inputStream.bufferedReader().use { it.readText().trim() }
+            check(process.exitValue() == 0) {
+                output.ifBlank { "Package manager command failed: ${command.joinToString(" ")}" }
+            }
+            output.ifBlank { "Command completed." }
+        } finally {
+            runCatching { process.inputStream.close() }
+            if (process.isAlive) process.destroyForcibly()
         }
-        return output.ifBlank { "Command completed." }
     }
 
     private fun failure(
@@ -448,10 +462,18 @@ private class LauncherDiagnosticRecorder(
             "/system/bin/cmd", "package", "resolve-activity", "--brief", "--user", "0",
             "-a", "android.intent.action.MAIN", "-c", "android.intent.category.HOME"
         ).redirectErrorStream(true).start()
-        val output = process.inputStream.bufferedReader().use { it.readText().trim() }
-        process.waitFor()
-        output.ifBlank { null }
+        try {
+            if (!process.waitFor(SHELL_COMMAND_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                process.destroyForcibly()
+                return@runCatching null
+            }
+            process.inputStream.bufferedReader().use { it.readText().trim() }.ifBlank { null }
+        } finally {
+            runCatching { process.inputStream.close() }
+            if (process.isAlive) process.destroyForcibly()
+        }
     }.getOrNull()
+
 }
 
 private data class LauncherTarget(

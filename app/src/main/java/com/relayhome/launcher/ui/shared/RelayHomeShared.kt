@@ -1,6 +1,8 @@
 package com.relayhome.launcher.ui.shared
 
 import com.relayhome.launcher.SmartTubeNowPlaying
+import com.relayhome.launcher.readSharedPreferencesSafely
+import com.relayhome.launcher.writeSharedPreferencesSafely
 import com.relayhome.launcher.data.RelaySettingsRepository
 import com.relayhome.launcher.data.AdditionalMetadata
 import android.content.Context
@@ -255,8 +257,9 @@ internal enum class RelayAppearance(val label: String, private val storageValue:
     }
 
     fun save(context: Context) {
-        context.getSharedPreferences("relay_appearance", Context.MODE_PRIVATE)
-            .edit().putString("appearance", storageValue).apply()
+        writeSharedPreferencesSafely(context, "relay_appearance") {
+            it.putString("appearance", storageValue)
+        }
     }
 }
 
@@ -286,8 +289,9 @@ internal enum class AppIconShape(val label: String, internal val storageValue: S
 
 internal fun loadRelayAppearance(context: Context): RelayAppearance =
     RelayAppearance.fromStorage(
-        context.getSharedPreferences("relay_appearance", Context.MODE_PRIVATE)
-            .getString("appearance", null)
+        readSharedPreferencesSafely(context, "relay_appearance", null as String?) {
+            it.getString("appearance", null)
+        }
     )
 
 internal fun dynamicRelayColorScheme(context: Context): androidx.compose.material3.ColorScheme? =
@@ -327,8 +331,9 @@ internal object HomeRowOrderStore {
     private const val orderKey = "row_order"
 
     fun load(context: Context): List<HomeRow> {
-        val stored = context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
-            .getString(orderKey, null)
+        val stored = readSharedPreferencesSafely(context, preferencesName, null as String?) {
+            it.getString(orderKey, null)
+        }
             ?.split(',')
             ?.mapNotNull { value -> runCatching { HomeRow.valueOf(value) }.getOrNull() }
             .orEmpty()
@@ -336,10 +341,9 @@ internal object HomeRowOrderStore {
     }
 
     fun save(context: Context, order: List<HomeRow>) {
-        context.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
-            .edit()
-            .putString(orderKey, order.distinct().joinToString(",") { it.name })
-            .apply()
+        writeSharedPreferencesSafely(context, preferencesName) {
+            it.putString(orderKey, order.distinct().joinToString(",") { it.name })
+        }
     }
 
     fun loadHiddenRows(context: Context): Set<HomeRow> =
