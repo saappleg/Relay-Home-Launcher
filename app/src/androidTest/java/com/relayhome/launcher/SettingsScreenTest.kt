@@ -9,8 +9,6 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
-import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.assertIsFocused
 import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -48,7 +46,7 @@ class SettingsScreenTest {
     fun rootRendersCategoriesOnly_withoutInlineSettingsControls() {
         setSettings()
 
-        composeRule.onNodeWithTag("settings-category-root").assertIsDisplayed()
+        composeRule.awaitDisplayed(composeRule.onNodeWithTag("settings-category-root"))
         SettingsCategory.entries.forEach { category ->
             composeRule.onNodeWithText(category.label).assertExists()
         }
@@ -65,16 +63,16 @@ class SettingsScreenTest {
         category.performScrollTo()
         category.performClick()
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("settings-category-detail-DEVICE_SETTINGS").assertIsDisplayed()
-        composeRule.onNodeWithText("Home launcher").performScrollTo().assertIsDisplayed()
+        composeRule.awaitDisplayed(composeRule.onNodeWithTag("settings-category-detail-DEVICE_SETTINGS"))
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Home launcher").performScrollTo())
 
         // This uses the same Android TV Back key event that the detail page handles in addition
         // to the activity BackHandler.
         composeRule.onNodeWithText("Make Relay Home the default").performKeyInput { pressKey(Key.Back) }
         composeRule.waitForIdle()
 
-        composeRule.onNodeWithTag("settings-category-root").assertIsDisplayed()
-        composeRule.onNodeWithText(SettingsCategory.DEVICE_SETTINGS.label).assertIsFocused()
+        composeRule.awaitDisplayed(composeRule.onNodeWithTag("settings-category-root"))
+        composeRule.awaitFocused(composeRule.onNodeWithText(SettingsCategory.DEVICE_SETTINGS.label))
     }
 
     @Test
@@ -104,17 +102,18 @@ class SettingsScreenTest {
         )
 
         composeRule.onNodeWithText(SettingsCategory.APPEARANCE.label).performClick()
-        composeRule.onNodeWithText("Theme").assertIsDisplayed()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Theme"))
         composeRule.onNodeWithText("Violet").performClick()
-        composeRule.onNodeWithText("From backdrop").assertIsDisplayed().performClick()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("From backdrop"))
+        composeRule.onNodeWithText("From backdrop").performClick()
         composeRule.onNodeWithText("MM/DD/YYYY").performClick()
         assertEquals(RelayAppearance.FROM_BACKDROP, selectedAppearance)
         assertEquals(RelayDateFormat.US, selectedDateFormat)
         composeRule.onNodeWithText("Back to Settings").performClick()
 
         composeRule.onNodeWithText(SettingsCategory.HOME_LAYOUT.label).performClick()
-        composeRule.onNodeWithText("Home rows").assertIsDisplayed()
-        composeRule.onNodeWithText("Minimal / Wallpaper Home").assertIsDisplayed()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Home rows"))
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Minimal / Wallpaper Home"))
         composeRule.onNodeWithTag("hero-cap-increment").performScrollTo().performClick()
         composeRule.onNodeWithTag("hero-source-SUBSCRIPTIONS").performScrollTo().performClick()
         composeRule.onNodeWithTag("hero-auto-rotate").performScrollTo().performClick()
@@ -127,15 +126,15 @@ class SettingsScreenTest {
         composeRule.onNodeWithText("Back to Settings").performClick()
 
         composeRule.onNodeWithText(SettingsCategory.PROVIDERS_ACCOUNTS.label).performClick()
-        composeRule.onNodeWithText("Profile").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Subscriptions").performScrollTo().assertIsDisplayed()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Profile").performScrollTo())
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Subscriptions").performScrollTo())
         composeRule.onAllNodesWithText("Open")[0].performScrollTo().performClick()
         assertEquals(Provider.NUVIO, managedProvider)
         composeRule.onNodeWithText("Back to Settings").performClick()
 
         composeRule.onNodeWithText(SettingsCategory.WEATHER_WIDGETS.label).performClick()
-        composeRule.onNodeWithText("Local weather").assertIsDisplayed()
-        composeRule.onNodeWithText("Home clock").assertIsDisplayed()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Local weather"))
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Home clock"))
         composeRule.onNodeWithTag("weather-unit-FAHRENHEIT").performScrollTo().performClick()
         assertEquals(WeatherTemperatureUnit.FAHRENHEIT, temperatureUnit)
         composeRule.onNodeWithTag("home-clock-setting").performClick()
@@ -145,11 +144,11 @@ class SettingsScreenTest {
         composeRule.onNodeWithText("Back to Settings").performClick()
 
         composeRule.onNodeWithText(SettingsCategory.APPS.label).performClick()
-        composeRule.onNodeWithText("All Apps").assertIsDisplayed()
-        composeRule.onNodeWithText("Sort order").assertIsDisplayed()
-        composeRule.onNodeWithText("Icon shape").assertIsDisplayed()
-        composeRule.onNodeWithText("Hidden apps").assertIsDisplayed()
-        composeRule.onNodeWithText("Rounded square").assertIsDisplayed()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("All Apps"))
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Sort order"))
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Icon shape"))
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Hidden apps"))
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Rounded square"))
         composeRule.onNodeWithText("Back to Settings").performClick()
         composeRule.waitForIdle()
 
@@ -169,12 +168,12 @@ class SettingsScreenTest {
             *HomeRow.entries.map { "home-row-switch-${it.name}" }.toTypedArray()
         )
         composeRule.onNodeWithTag(switches.first()).performSemanticsAction(SemanticsActions.RequestFocus)
-        composeRule.onNodeWithTag(switches.first()).assertIsFocused()
+        composeRule.awaitFocused(composeRule.onNodeWithTag(switches.first()))
         switches.drop(1).forEach { tag ->
             composeRule.onNodeWithTag(switches[switches.indexOf(tag) - 1]).performKeyInput {
                 pressKey(Key.DirectionDown)
             }
-            composeRule.onNodeWithTag(tag).assertIsFocused()
+            composeRule.awaitFocused(composeRule.onNodeWithTag(tag))
         }
     }
 
@@ -187,11 +186,11 @@ class SettingsScreenTest {
         val clock = composeRule.onNodeWithTag("home-clock-setting", useUnmergedTree = true).performScrollTo()
         clock.performSemanticsAction(SemanticsActions.RequestFocus)
         val celsius = composeRule.onNodeWithTag("weather-unit-CELSIUS", useUnmergedTree = true).performScrollTo()
-        clock.assertIsFocused()
+        composeRule.awaitFocused(clock)
         clock.performKeyInput { pressKey(Key.DirectionDown) }
-        celsius.assertIsFocused()
+        composeRule.awaitFocused(celsius)
         celsius.performKeyInput { pressKey(Key.DirectionUp) }
-        clock.assertIsFocused()
+        composeRule.awaitFocused(clock)
     }
 
     @Test
@@ -211,13 +210,13 @@ class SettingsScreenTest {
         firstChannel.performSemanticsAction(SemanticsActions.RequestFocus)
         channelTags.forEachIndexed { index, tag ->
             val channel = composeRule.onNodeWithTag(tag, useUnmergedTree = true)
-            channel.assertIsFocused()
+            composeRule.awaitFocused(channel)
             if (index < channelTags.lastIndex) {
                 channel.performKeyInput { pressKey(Key.DirectionDown) }
             }
         }
         composeRule.onNodeWithTag(channelTags.last(), useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionUp) }
-        composeRule.onNodeWithTag(channelTags[channelTags.lastIndex - 1], useUnmergedTree = true).assertIsFocused()
+        composeRule.awaitFocused(composeRule.onNodeWithTag(channelTags[channelTags.lastIndex - 1], useUnmergedTree = true))
     }
 
     @Test
@@ -226,28 +225,28 @@ class SettingsScreenTest {
 
         composeRule.onNodeWithText(SettingsCategory.DEVICE_SETTINGS.label).performScrollTo().performClick()
         composeRule.waitForIdle()
-        composeRule.onNodeWithText("Choose a launcher mode").performScrollTo().assertIsDisplayed()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Choose a launcher mode").performScrollTo())
         composeRule.onNodeWithTag("launcher-active-mode")
             .performScrollTo()
             .assertTextContains("No launcher mode verified")
         composeRule.onNodeWithText("Shizuku-based. No Accessibility service, with better performance and a stronger launcher override when supported.")
             .performScrollTo()
-            .assertIsDisplayed()
+            .also { composeRule.awaitDisplayed(it) }
         composeRule.onNodeWithText("Accessibility-service-based auto-start. Easier on TVs that reject overrides, but it has a documented system performance cost.")
             .performScrollTo()
-            .assertIsDisplayed()
+            .also { composeRule.awaitDisplayed(it) }
 
         composeRule.onNodeWithTag("launcher-mode-compatibility").performClick()
         composeRule.waitForIdle()
-        composeRule.onNodeWithText("Compatibility Mode setup").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Open Accessibility setup").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Selected for setup").performScrollTo().assertIsDisplayed()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Compatibility Mode setup").performScrollTo())
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Open Accessibility setup").performScrollTo())
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Selected for setup").performScrollTo())
 
         composeRule.onNodeWithTag("launcher-mode-advanced").performClick()
         composeRule.waitForIdle()
-        composeRule.onNodeWithText("Advanced Mode setup").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Shizuku connection").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithText("Selected for setup").performScrollTo().assertIsDisplayed()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Advanced Mode setup").performScrollTo())
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Shizuku connection").performScrollTo())
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Selected for setup").performScrollTo())
     }
 
     @Test
@@ -255,9 +254,9 @@ class SettingsScreenTest {
         setSettings()
 
         composeRule.onNodeWithText(SettingsCategory.LAUNCHER_UPDATES.label).performScrollTo().performClick()
-        composeRule.onNodeWithText("Check for updates").performScrollTo().assertIsDisplayed()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Check for updates").performScrollTo())
         composeRule.onNodeWithText("Home launcher").assertDoesNotExist()
-        composeRule.onNodeWithText("Check now").performScrollTo().assertIsDisplayed()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Check now").performScrollTo())
     }
 
     @Test
@@ -265,14 +264,14 @@ class SettingsScreenTest {
         setSettings()
 
         composeRule.onNodeWithText(SettingsCategory.DEVICE_SETTINGS.label).performScrollTo().performClick()
-        composeRule.onNodeWithTag("settings-category-detail-DEVICE_SETTINGS").assertIsDisplayed()
-        composeRule.onNodeWithText("Home launcher").performScrollTo().assertIsDisplayed()
+        composeRule.awaitDisplayed(composeRule.onNodeWithTag("settings-category-detail-DEVICE_SETTINGS"))
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Home launcher").performScrollTo())
         composeRule.onNodeWithText("Relay updates").assertDoesNotExist()
         composeRule.onNodeWithText("Back to Settings").performClick()
 
         composeRule.onNodeWithText(SettingsCategory.LAUNCHER_UPDATES.label).performScrollTo().performClick()
-        composeRule.onNodeWithTag("settings-category-detail-LAUNCHER_UPDATES").assertIsDisplayed()
-        composeRule.onNodeWithText("Check for updates").performScrollTo().assertIsDisplayed()
+        composeRule.awaitDisplayed(composeRule.onNodeWithTag("settings-category-detail-LAUNCHER_UPDATES"))
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Check for updates").performScrollTo())
         composeRule.onNodeWithText("Home launcher").assertDoesNotExist()
     }
 
@@ -312,21 +311,21 @@ class SettingsScreenTest {
         )
 
         composeRule.onNodeWithText(SettingsCategory.PROVIDERS_ACCOUNTS.label).performClick()
-        composeRule.onNodeWithText("Profile pairing").performScrollTo().assertIsDisplayed()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Profile pairing").performScrollTo())
         val trigger = composeRule.onNodeWithTag("profile-mapping-91").performScrollTo()
         trigger.performSemanticsAction(SemanticsActions.RequestFocus)
-        trigger.assertIsFocused()
+        composeRule.awaitFocused(trigger)
         trigger.performClick()
         composeRule.waitForIdle()
         // DropdownMenu is rendered in a separate popup window; assert its visible option rather
         // than relying on the popup container's semantics crossing that window boundary.
         val relayA = composeRule.onNodeWithText("RelayTube · Living Room")
         relayA.performSemanticsAction(SemanticsActions.RequestFocus)
-        relayA.assertIsFocused()
+        composeRule.awaitFocused(relayA)
         relayA.performClick()
         assertEquals(91 to "relay-a", selectedPairing)
         composeRule.waitForIdle()
-        trigger.assertIsFocused()
+        composeRule.awaitFocused(trigger)
         trigger.performClick()
         val automaticAgain = composeRule.onNodeWithText("Automatic / not paired")
         automaticAgain.performKeyInput {
@@ -334,11 +333,11 @@ class SettingsScreenTest {
             pressKey(Key.DirectionDown)
         }
         val relayB = composeRule.onNodeWithText("RelayTube · Bedroom")
-        relayB.assertIsFocused()
+        composeRule.awaitFocused(relayB)
         relayB.performClick()
         assertEquals(91 to "relay-b", selectedPairing)
         composeRule.waitForIdle()
-        trigger.assertIsFocused()
+        composeRule.awaitFocused(trigger)
         runBlocking {
             RelaySettingsRepository.clearProfileMapping(context, 91)
             RelaySettingsRepository.awaitIdleForTesting(context)
@@ -387,20 +386,20 @@ class SettingsScreenTest {
         composeRule.waitForIdle()
         val anchor = composeRule.onNodeWithTag("profile-switcher-anchor")
         anchor.performSemanticsAction(SemanticsActions.RequestFocus)
-        anchor.assertIsFocused()
+        composeRule.awaitFocused(anchor)
         anchor.performClick()
-        composeRule.onNodeWithText("Who’s watching?").assertIsDisplayed()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Who’s watching?"))
 
         val livingRoom = composeRule.onNodeWithText("Living Room")
-        livingRoom.assertIsFocused()
+        composeRule.awaitFocused(livingRoom)
         livingRoom.performKeyInput { pressKey(Key.DirectionDown) }
         val bedroom = composeRule.onNodeWithText("Bedroom")
-        bedroom.assertIsDisplayed()
-        bedroom.assertIsFocused()
+        composeRule.awaitDisplayed(bedroom)
+        composeRule.awaitFocused(bedroom)
         bedroom.performClick()
         composeRule.waitForIdle()
         assertEquals(2, selectedProfile.value)
-        anchor.assertIsFocused()
+        composeRule.awaitFocused(anchor)
     }
 
     private fun setSettings(

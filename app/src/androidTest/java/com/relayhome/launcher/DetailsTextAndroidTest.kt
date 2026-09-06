@@ -4,7 +4,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollTo
@@ -53,10 +52,11 @@ class DetailsTextAndroidTest {
                 )
             }
         }
-        composeRule.onNodeWithText(title, substring = true).assertIsDisplayed()
-        composeRule.onNodeWithText("About this title").assertIsDisplayed()
-        composeRule.onNodeWithText("Your rating").assertIsDisplayed()
-        composeRule.onNodeWithText("Continue watching").performScrollTo().assertIsDisplayed()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText(title, substring = true))
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("About this title"))
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Your rating"))
+        val continueWatching = composeRule.onNodeWithText("Continue watching").performScrollTo()
+        composeRule.awaitDisplayed(continueWatching)
     }
 
     @Test
@@ -93,8 +93,8 @@ class DetailsTextAndroidTest {
             }
         }
 
-        composeRule.onNodeWithText("TheTVDB", substring = true).assertIsDisplayed()
-        composeRule.onNodeWithText("Continuing", substring = true).assertIsDisplayed()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("TheTVDB", substring = true))
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Continuing", substring = true))
     }
 
     @Test
@@ -168,20 +168,20 @@ class DetailsTextAndroidTest {
 
             val title = fixture.item.title.visibleRelayText().ifBlank { "Untitled" }
             val titleNode = composeRule.onNodeWithText(title, substring = false, useUnmergedTree = true)
-            titleNode.assertIsDisplayed()
+            composeRule.awaitDisplayed(titleNode)
             val titleBounds = titleNode.fetchSemanticsNode().boundsInRoot
             assertTrue("${fixture.name}: title must have measurable bounds", titleBounds.width > 0f && titleBounds.height > 0f)
             assertTrue("${fixture.name}: title must remain bounded: $titleBounds", titleBounds.height < 260f)
 
-            composeRule.onNodeWithText(fixture.expectedSource, substring = false, useUnmergedTree = true).assertIsDisplayed()
-            composeRule.onNodeWithText("About this title", useUnmergedTree = true).assertIsDisplayed()
-            composeRule.onNodeWithText("Your rating", useUnmergedTree = true).assertIsDisplayed()
+            composeRule.awaitDisplayed(composeRule.onNodeWithText(fixture.expectedSource, substring = false, useUnmergedTree = true))
+            composeRule.awaitDisplayed(composeRule.onNodeWithText("About this title", useUnmergedTree = true))
+            composeRule.awaitDisplayed(composeRule.onNodeWithText("Your rating", useUnmergedTree = true))
             composeRule.onNodeWithText(fixture.expectedDescription, substring = true, useUnmergedTree = true).assertExists()
             fixture.expectedMetadata.forEach { metadata ->
-                composeRule.onNodeWithText(metadata, substring = true, useUnmergedTree = true).assertIsDisplayed()
+                composeRule.awaitDisplayed(composeRule.onNodeWithText(metadata, substring = true, useUnmergedTree = true))
             }
             if (fixture.item.episodeInfo != null) {
-                composeRule.onNodeWithText("Choose episode", substring = true, useUnmergedTree = true).assertIsDisplayed()
+                composeRule.awaitDisplayed(composeRule.onNodeWithText("Choose episode", substring = true, useUnmergedTree = true))
             }
 
             assertActionRowIsReadable(fixture.name, fixture.expectedAction)

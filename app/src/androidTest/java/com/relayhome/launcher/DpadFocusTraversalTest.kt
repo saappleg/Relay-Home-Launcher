@@ -33,8 +33,6 @@ import androidx.compose.ui.input.key.key
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.test.assertIsFocused
-import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
@@ -211,10 +209,11 @@ class DpadFocusTraversalTest {
             topNavigationRequester.requestFocus()
         }
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("live-top-navigation").assertIsFocused()
+        composeRule.awaitFocused(composeRule.onNodeWithTag("live-top-navigation"))
+        composeRule.onNodeWithTag("live-top-navigation")
             .performKeyInput { pressKey(Key.DirectionDown) }
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("live-continue-watching-row").assertIsFocused()
+        composeRule.awaitFocused(composeRule.onNodeWithTag("live-continue-watching-row"))
     }
 
     @Test
@@ -263,14 +262,14 @@ class DpadFocusTraversalTest {
         }
         composeRule.waitForIdle()
 
-        composeRule.onNodeWithTag("hero-play").assertIsDisplayed()
+        composeRule.awaitDisplayed(composeRule.onNodeWithTag("hero-play"))
         composeRule.onNodeWithText("▶  Play").assertTextEquals("▶  Play")
         composeRule.onNodeWithTag("hero-play").performKeyInput { pressKey(Key.DirectionDown) }
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).assertIsFocused()
+        composeRule.awaitFocused(composeRule.onNodeWithTag("hero-details", useUnmergedTree = true))
         composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionDown) }
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("first-row-entry").assertIsFocused()
+        composeRule.awaitFocused(composeRule.onNodeWithTag("first-row-entry"))
     }
 
     @Test
@@ -358,17 +357,19 @@ class DpadFocusTraversalTest {
             LaunchedEffect(hero.item?.contentKey()) { resumeRequester.requestFocus() }
         }
         composeRule.waitForIdle()
-        composeRule.onNodeWithText("▶  Resume").assertIsDisplayed().assertIsFocused()
-        composeRule.onNodeWithText("ⓘ  Details").assertIsDisplayed()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("▶  Resume"))
+        composeRule.awaitFocused(composeRule.onNodeWithText("▶  Resume"))
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("ⓘ  Details"))
 
         // Keep the same Resume label while changing the item. This catches stale/reused text
         // content, not only the ordinary Play -> Resume string change.
         composeRule.runOnIdle { heroState.value = nextHero }
         composeRule.waitForIdle()
-        composeRule.onNodeWithText("President Curtis").assertIsDisplayed()
-        composeRule.onNodeWithText("S01 • E06").assertIsDisplayed()
-        composeRule.onNodeWithText("▶  Resume").assertIsDisplayed().assertIsFocused()
-        composeRule.onNodeWithText("ⓘ  Details").assertIsDisplayed()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("President Curtis"))
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("S01 • E06"))
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("▶  Resume"))
+        composeRule.awaitFocused(composeRule.onNodeWithText("▶  Resume"))
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("ⓘ  Details"))
     }
 
     @Test
@@ -439,18 +440,18 @@ class DpadFocusTraversalTest {
         val initialHeroTop = composeRule.onNodeWithTag("hero-panel", useUnmergedTree = true).getUnclippedBoundsInRoot().top.value
         composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionDown) }
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).assertIsFocused()
+        composeRule.awaitFocused(composeRule.onNodeWithTag("hero-details", useUnmergedTree = true))
 
         // This is the state-holder's timer changing the candidate while the user is still in the
         // hero action group. The focused action must remain the same mounted target.
         composeRule.runOnIdle { heroState.value = heroForTest(rotatedItem) }
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).assertIsFocused()
-        composeRule.onNodeWithText("September Nintendo Direct").assertIsDisplayed()
+        composeRule.awaitFocused(composeRule.onNodeWithTag("hero-details", useUnmergedTree = true))
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("September Nintendo Direct"))
 
         composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionUp) }
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true).assertIsFocused()
+        composeRule.awaitFocused(composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true))
         assertEquals("Candidate rotation must not move the hero during action focus", initialHeroTop,
             composeRule.onNodeWithTag("hero-panel", useUnmergedTree = true).getUnclippedBoundsInRoot().top.value, 0.5f)
         assertEquals("Candidate rotation must preserve the rotated hero", rotatedItem.contentKey(), heroState.value.item?.contentKey())
@@ -526,16 +527,16 @@ class DpadFocusTraversalTest {
         val initialPanelBounds = composeRule.onNodeWithTag("hero-panel", useUnmergedTree = true).getUnclippedBoundsInRoot()
         val initialHeadingBounds = composeRule.onNodeWithTag("hero-heading", useUnmergedTree = true).getUnclippedBoundsInRoot()
         val initialActionBounds = composeRule.onNodeWithTag("hero-action-column", useUnmergedTree = true).getUnclippedBoundsInRoot()
-        composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true).assertIsFocused()
+        composeRule.awaitFocused(composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true))
 
         // Long-title Resume -> Details -> Resume must not let automatic relocation reposition the
         // bounded hero composition or clip its heading under the top navigation.
         composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionDown) }
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).assertIsFocused()
+        composeRule.awaitFocused(composeRule.onNodeWithTag("hero-details", useUnmergedTree = true))
         composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionUp) }
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true).assertIsFocused()
+        composeRule.awaitFocused(composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true))
         assertEquals(initialPanelBounds.top.value, composeRule.onNodeWithTag("hero-panel", useUnmergedTree = true).getUnclippedBoundsInRoot().top.value, 0.5f)
         assertEquals(initialHeadingBounds.top.value, composeRule.onNodeWithTag("hero-heading", useUnmergedTree = true).getUnclippedBoundsInRoot().top.value, 0.5f)
         assertEquals(initialActionBounds.top.value, composeRule.onNodeWithTag("hero-action-column", useUnmergedTree = true).getUnclippedBoundsInRoot().top.value, 0.5f)
@@ -546,16 +547,16 @@ class DpadFocusTraversalTest {
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionDown) }
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true).assertIsFocused()
+        composeRule.awaitFocused(composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true))
         check(observedScrollOffset.get() > 0) {
             "Continue Watching entry must own the first downward scroll for the long-title hero"
         }
         composeRule.runOnIdle { heroState.value = heroForTest(rotatedLongItem) }
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true).assertIsFocused()
+        composeRule.awaitFocused(composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true))
         composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionUp) }
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true).assertIsFocused()
+        composeRule.awaitFocused(composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true))
         assertEquals(initialPanelBounds.top.value, composeRule.onNodeWithTag("hero-panel", useUnmergedTree = true).getUnclippedBoundsInRoot().top.value, 0.5f)
         assertEquals(initialHeadingBounds.top.value, composeRule.onNodeWithTag("hero-heading", useUnmergedTree = true).getUnclippedBoundsInRoot().top.value, 0.5f)
         assertEquals(initialActionBounds.top.value, composeRule.onNodeWithTag("hero-action-column", useUnmergedTree = true).getUnclippedBoundsInRoot().top.value, 0.5f)
@@ -617,22 +618,23 @@ class DpadFocusTraversalTest {
         }
         composeRule.waitForIdle()
 
-        composeRule.onNodeWithText("▶  Play").assertIsFocused()
-        composeRule.onNodeWithTag("hero-pagination").assertIsDisplayed()
+        composeRule.awaitFocused(composeRule.onNodeWithText("▶  Play"))
+        composeRule.awaitDisplayed(composeRule.onNodeWithTag("hero-pagination"))
 
         // Left from the first candidate wraps to the final candidate. The action button itself
         // stays focused while only its label/content is rebound.
         composeRule.onNodeWithText("▶  Play").performKeyInput { pressKey(Key.DirectionLeft) }
         composeRule.waitForIdle()
-        composeRule.onNodeWithText("Last Movie").assertIsDisplayed()
-        composeRule.onNodeWithText("▶  Play").assertIsFocused()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Last Movie"))
+        composeRule.awaitFocused(composeRule.onNodeWithText("▶  Play"))
 
         // Move to the middle item and verify Play -> Resume is a real rebinding, not stale text.
         composeRule.onNodeWithText("▶  Play").performKeyInput { pressKey(Key.DirectionRight) }
         composeRule.onNodeWithText("▶  Play").performKeyInput { pressKey(Key.DirectionRight) }
         composeRule.waitForIdle()
-        composeRule.onNodeWithText("Resume Show").assertIsDisplayed()
-        composeRule.onNodeWithText("▶  Resume").assertIsDisplayed().assertIsFocused()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Resume Show"))
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("▶  Resume"))
+        composeRule.awaitFocused(composeRule.onNodeWithText("▶  Resume"))
         composeRule.onNodeWithText("▶  Play").assertDoesNotExist()
 
         // A burst of repeated input must remain deterministic and never strand the focused
@@ -657,8 +659,8 @@ class DpadFocusTraversalTest {
             ),
             directions
         )
-        composeRule.onNodeWithText("First Movie").assertIsDisplayed()
-        composeRule.onNodeWithText("▶  Play").assertIsFocused()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("First Movie"))
+        composeRule.awaitFocused(composeRule.onNodeWithText("▶  Play"))
     }
 
     private fun heroForTest(item: MediaItem): Hero = Hero(
@@ -754,18 +756,18 @@ class DpadFocusTraversalTest {
         composeRule.waitForIdle()
 
         composeRule.onNodeWithText(expectedAction)
-            .assertIsDisplayed()
-            .assertIsFocused()
-        composeRule.onNodeWithText("ⓘ  Details").assertIsDisplayed()
+            .also { composeRule.awaitDisplayed(it) }
+        composeRule.awaitFocused(composeRule.onNodeWithText(expectedAction))
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("ⓘ  Details"))
 
         // The vertical bridge keeps Details reachable while Left/Right remains reserved for
         // changing the hero candidate.
         composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionDown) }
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).assertIsFocused()
+        composeRule.awaitFocused(composeRule.onNodeWithTag("hero-details", useUnmergedTree = true))
         composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionDown) }
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("first-row-entry").assertIsFocused()
+        composeRule.awaitFocused(composeRule.onNodeWithTag("first-row-entry"))
     }
 
     @Test
@@ -850,10 +852,10 @@ class DpadFocusTraversalTest {
         check(initialActionBounds.bottom.value <= initialHeroBounds.bottom.value) {
             "Hero actions extend below the hero panel: ${initialActionBounds.bottom} > ${initialHeroBounds.bottom}"
         }
-        composeRule.onNodeWithText("▶  Resume").assertIsFocused()
+        composeRule.awaitFocused(composeRule.onNodeWithText("▶  Resume"))
         composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionDown) }
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).assertIsFocused()
+        composeRule.awaitFocused(composeRule.onNodeWithTag("hero-details", useUnmergedTree = true))
         assertEquals(
             "Details must not move the hero under the top navigation",
             0f,
@@ -868,7 +870,7 @@ class DpadFocusTraversalTest {
 
         composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionDown) }
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true).assertIsFocused()
+        composeRule.awaitFocused(composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true))
         check(observedScrollOffset.get() > 0) {
             "Entering Continue Watching should be the first transition that scrolls Home"
         }
@@ -877,7 +879,7 @@ class DpadFocusTraversalTest {
         // wins after Up returns focus to the still-mounted hero action group.
         composeRule.runOnIdle { heroState.value = heroForTest(rotatedItem) }
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true).assertIsFocused()
+        composeRule.awaitFocused(composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true))
 
         // Returning upward is the TV reproduction that exposed the race: the row has already
         // scrolled the parent, and focus relocation can otherwise leave the hero permanently
@@ -885,7 +887,7 @@ class DpadFocusTraversalTest {
         composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true)
             .performKeyInput { pressKey(Key.DirectionUp) }
         composeRule.waitForIdle()
-        composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true).assertIsFocused()
+        composeRule.awaitFocused(composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true))
         assertEquals(
             "Returning from Continue Watching must restore the full hero anchor",
             0f,
@@ -912,15 +914,15 @@ class DpadFocusTraversalTest {
         val bottomLeft = composeRule.onNodeWithTag("$screen-bottom-left")
         val bottomRight = composeRule.onNodeWithTag("$screen-bottom-right")
 
-        topLeft.assertIsFocused()
+        composeRule.awaitFocused(topLeft)
         topLeft.performKeyInput { pressKey(Key.DirectionRight) }
-        topRight.assertIsFocused()
+        composeRule.awaitFocused(topRight)
         topRight.performKeyInput { pressKey(Key.DirectionDown) }
-        bottomRight.assertIsFocused()
+        composeRule.awaitFocused(bottomRight)
         bottomRight.performKeyInput { pressKey(Key.DirectionLeft) }
-        bottomLeft.assertIsFocused()
+        composeRule.awaitFocused(bottomLeft)
         bottomLeft.performKeyInput { pressKey(Key.DirectionUp) }
-        topLeft.assertIsFocused()
+        composeRule.awaitFocused(topLeft)
     }
 }
 
