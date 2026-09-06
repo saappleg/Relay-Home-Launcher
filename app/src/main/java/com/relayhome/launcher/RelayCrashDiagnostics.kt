@@ -99,5 +99,6 @@ class RelayHomeApplication : android.app.Application() {
     override fun onCreate() {
         super.onCreate()
         RelayCrashDiagnostics.install(this)
+        RelayDebugSafetyNets.install()
     }
 }
