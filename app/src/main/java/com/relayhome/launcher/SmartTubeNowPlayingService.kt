@@ -97,23 +97,6 @@ internal object SmartTubePlaybackStore {
             .apply()
     }
 
-    /**
-     * A failed RelayTube request must not fall back to the previous profile's disk cache. Public
-     * SmartTube media-session data can still arrive independently and will repopulate nowPlaying.
-     */
-    fun clearUnavailableRelayTubeData(context: Context, profileId: String? = activeProfileId) {
-        if (profileId == activeProfileId) {
-            subscriptionVideos = emptyList()
-            continueWatchingVideos = emptyList()
-            profiles = emptyList()
-            nowPlaying = null
-        }
-        preferences(context).edit()
-            .remove(cacheKey(RELAY_TUBE_CACHE_SUBSCRIPTIONS, profileId))
-            .remove(cacheKey(RELAY_TUBE_CACHE_CONTINUE_WATCHING, profileId))
-            .apply()
-    }
-
     fun updateProfiles(context: Context, selectedId: String?, next: List<RelayTubeProfile>) {
         val validProfiles = next
             .mapNotNull { profile ->
@@ -466,11 +449,19 @@ internal object RelayTubeProfileBridge {
     private var refreshGeneration = 0L
 
     fun requestProfiles(context: Context) {
+        requestProfiles(context, findEndpoint(context))
+    }
+
+    internal fun requestProfilesWithoutProviderForTest(context: Context) {
+        requestProfiles(context, endpoint = null)
+    }
+
+    private fun requestProfiles(context: Context, endpoint: RelayTubeEndpoint?) {
         val generation = ++refreshGeneration
-        // Treat each request as a fresh public snapshot. If RelayTube is absent, stopped, or a
-        // stock SmartTube build is installed, the launcher should settle on an empty state.
-        SmartTubePlaybackStore.clearUnavailableRelayTubeData(context)
-        val endpoint = findEndpoint(context) ?: return
+        // Keep the last-known-good per-profile feed while the companion is unavailable or a
+        // refresh fails. A valid feed response, including an explicit empty array, replaces the
+        // corresponding snapshot in readFeeds().
+        endpoint ?: return
         if (!readProvider(context, endpoint, "profiles", null)) {
             runCatching { context.sendBroadcast(Intent(requestAction).setPackage(endpoint.packageName)) }
         } else {
@@ -484,11 +475,17 @@ internal object RelayTubeProfileBridge {
     }
 
     fun selectProfile(context: Context, profileId: String) {
+        selectProfile(context, profileId, findEndpoint(context))
+    }
+
+    internal fun selectProfileWithoutProviderForTest(context: Context, profileId: String) {
+        selectProfile(context, profileId, endpoint = null)
+    }
+
+    private fun selectProfile(context: Context, profileId: String, endpoint: RelayTubeEndpoint?) {
         val cleanProfileId = normalizeRelayTubeProfileId(profileId) ?: return
         val generation = ++refreshGeneration
         SmartTubePlaybackStore.activateProfile(context, cleanProfileId)
-        SmartTubePlaybackStore.clearUnavailableRelayTubeData(context, cleanProfileId)
-        val endpoint = findEndpoint(context)
         if (endpoint != null && !readProvider(context, endpoint, "select", cleanProfileId)) {
             runCatching {
                 context.sendBroadcast(Intent(selectAction).setPackage(endpoint.packageName).putExtra(RELAY_TUBE_EXTRA_PROFILE_ID, cleanProfileId))

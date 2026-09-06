@@ -144,15 +144,67 @@ jobs:
           RELAY_VERSION_CODE: ${{ inputs.version_code }}
           RELAY_VERSION_NAME: ${{ inputs.version_name }}
         with:
-          api-level: 35
+          # API 34's hosted x86_64 image is substantially more established than the API 35
+          # image and avoids the boot/console instability seen in run 34015242412.
+          api-level: 34
           target: google_apis
           arch: x86_64
           profile: pixel_2
-          cores: 2
-          ram-size: 2048M
-          heap-size: 512M
+          cores: 4
+          ram-size: 4096M
+          heap-size: 1024M
           disable-animations: true
+          emulator-options: "-no-window -noaudio -no-boot-anim -gpu swiftshader_indirect -no-snapshot"
           script: ./gradlew :app:connectedCheck --stacktrace --console=plain
+
+      - name: Capture emulator diagnostics
+        if: failure()
+        continue-on-error: true
+        run: |
+          set +e
+          DIAG_DIR="$RUNNER_TEMP/relay-emulator-diagnostics"
+          mkdir -p "$DIAG_DIR"
+
+          # Capture only device state, logcat, and test reports. Never dump the job environment
+          # or any GitHub secret into the workflow log or artifact.
+          adb devices -l > "$DIAG_DIR/adb-devices.txt" 2>&1
+          while read -r serial state _; do
+            [[ "$serial" == "List" || "$state" != "device" ]] && continue
+            safe_serial="${serial//[^A-Za-z0-9_.-]/_}"
+            adb -s "$serial" get-state > "$DIAG_DIR/state-$safe_serial.txt" 2>&1
+            adb -s "$serial" logcat -d -v threadtime > "$DIAG_DIR/logcat-$safe_serial.txt" 2>&1
+          done < <(adb devices)
+
+          for report_root in app/build/reports/androidTests app/build/test-results app/build/outputs/androidTest-results; do
+            if [[ -d "$report_root" ]]; then
+              report_name="$(basename "$report_root")"
+              mkdir -p "$DIAG_DIR/$report_name"
+              cp -R "$report_root"/. "$DIAG_DIR/$report_name/" 2>/dev/null
+            fi
+          done
+
+          # Remove common credential-shaped log lines before the artifact is uploaded. This is
+          # intentionally conservative and does not print the captured contents to the log.
+          while IFS= read -r -d '' file; do
+            case "$file" in
+              *.txt|*.log|*.xml|*.json|*.html)
+                sed -E \
+                  -e '/(api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret|authorization|bearer)/I s/^(.*(api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret|authorization|bearer)).*$/\1 [REDACTED]/I' \
+                  -e 's/(gh[pousr]_[A-Za-z0-9_=-]+|github_pat_[A-Za-z0-9_=-]+)/[REDACTED]/g' \
+                  "$file" > "$file.redacted" 2>/dev/null && mv "$file.redacted" "$file"
+                ;;
+            esac
+          done < <(find "$DIAG_DIR" -type f -print0)
+
+      - name: Upload emulator diagnostics
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: relay-emulator-diagnostics-${{ github.run_id }}
+          path: ${{ runner.temp }}/relay-emulator-diagnostics
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Configure release signing
         env:
