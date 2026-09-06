@@ -174,9 +174,11 @@ class SettingsScreenTest {
     fun weatherClockSwitch_isConnectedToTemperatureFocusChain() {
         setSettings()
 
-        composeRule.onNodeWithText(SettingsCategory.WEATHER_WIDGETS.label).performClick()
-        val clock = composeRule.onNodeWithTag("home-clock-setting")
-        val celsius = composeRule.onNodeWithTag("weather-unit-CELSIUS")
+        composeRule.onNodeWithText(SettingsCategory.WEATHER_WIDGETS.label).performScrollTo().performClick()
+        composeRule.waitForIdle()
+        val clock = composeRule.onNodeWithTag("home-clock-setting", useUnmergedTree = true).performScrollTo()
+        clock.performSemanticsAction(SemanticsActions.RequestFocus)
+        val celsius = composeRule.onNodeWithTag("weather-unit-CELSIUS", useUnmergedTree = true).performScrollTo()
         clock.assertIsFocused()
         clock.performKeyInput { pressKey(Key.DirectionDown) }
         celsius.assertIsFocused()
