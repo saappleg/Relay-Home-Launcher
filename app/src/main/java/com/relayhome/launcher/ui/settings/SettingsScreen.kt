@@ -71,6 +71,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.dynamicDarkColorScheme
@@ -113,6 +115,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.Key as ComposeKey
@@ -771,6 +775,11 @@ private fun HomeLayoutSettings(
     onClearWallpaper: () -> Unit,
     moveHomeRow: (Int, Int) -> Unit
 ) {
+    val context = LocalContext.current
+    val settingsRevision by RelaySettingsRepository.revision(context).collectAsState()
+    var heroRotateIntervalSeconds by remember(settingsRevision) {
+        mutableStateOf(RelaySettingsRepository.loadHeroAutoRotateIntervalSeconds(context))
+    }
     val rowSwitchRequesters = remember(homeRowOrder) {
         homeRowOrder.associateWith { FocusRequester() }
     }
@@ -863,6 +872,32 @@ private fun HomeLayoutSettings(
         modifier = Modifier.testTag("hero-auto-rotate"),
         onClick = { onHeroAutoRotateChanged(!heroAutoRotate) }
     )
+    Spacer(Modifier.height(10.dp))
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        Text("Rotation interval: ${heroRotateIntervalSeconds}s", color = ivory, fontSize = 15.sp)
+        ActionButton(
+            "−",
+            palette,
+            primary = false,
+            modifier = Modifier.testTag("hero-rotate-interval-decrement"),
+            onClick = {
+                val next = (heroRotateIntervalSeconds - 1).coerceIn(3, 30)
+                heroRotateIntervalSeconds = next
+                RelaySettingsRepository.saveHeroAutoRotateIntervalSeconds(context, next)
+            }
+        )
+        ActionButton(
+            "+",
+            palette,
+            primary = false,
+            modifier = Modifier.testTag("hero-rotate-interval-increment"),
+            onClick = {
+                val next = (heroRotateIntervalSeconds + 1).coerceIn(3, 30)
+                heroRotateIntervalSeconds = next
+                RelaySettingsRepository.saveHeroAutoRotateIntervalSeconds(context, next)
+            }
+        )
+    }
     Spacer(Modifier.height(18.dp))
     homeRowOrder.forEachIndexed { index, row ->
         key(row.name) {
@@ -1125,6 +1160,8 @@ private fun ProvidersAccountsSettings(
             palette = palette,
             nuvioProfiles = nuvioProfiles,
             relayTubeProfiles = relayTubeProfiles,
+            firstFocusRequester = firstFocusRequester,
+            backFocusRequester = backFocusRequester,
             onProfileMappingChanged = onProfileMappingChanged
         )
     }
@@ -1158,6 +1195,8 @@ private fun ProfileMappingSettings(
     palette: RelayPalette,
     nuvioProfiles: List<NuvioProfile>,
     relayTubeProfiles: List<RelayTubeProfile>,
+    firstFocusRequester: FocusRequester,
+    backFocusRequester: FocusRequester,
     onProfileMappingChanged: (Int, String?) -> Unit
 ) {
     val context = LocalContext.current
@@ -1171,6 +1210,10 @@ private fun ProfileMappingSettings(
             }
         )
     }
+    val mappingFocusRequesters = remember(nuvioProfiles) {
+        nuvioProfiles.associate { it.index to FocusRequester() }
+    }
+    var expandedProfileIndex by remember { mutableStateOf<Int?>(null) }
 
     SettingsSectionTitle(
         "Profile pairing",
@@ -1178,7 +1221,7 @@ private fun ProfileMappingSettings(
     )
     Spacer(Modifier.height(14.dp))
     Text(
-        "Automatic name matching is used until you choose a pairing. Select a profile button to cycle through RelayTube profiles or clear it.",
+        "Automatic name matching is used until you choose a pairing. Open a profile button to select a RelayTube profile or clear the pairing.",
         color = muted,
         fontSize = 14.sp,
         lineHeight = 20.sp
@@ -1186,10 +1229,12 @@ private fun ProfileMappingSettings(
     Spacer(Modifier.height(14.dp))
     nuvioProfiles.forEach { nuvioProfile ->
         val selectedId = selectedMappings[nuvioProfile.index]
-        val selectedIndex = availableProfiles.indexOfFirst { it.id == selectedId }
-        val nextIndex = if (selectedIndex < 0) 0 else (selectedIndex + 1) % (availableProfiles.size + 1)
-        val nextId = availableProfiles.getOrNull(nextIndex)?.id
         val selectedName = availableProfiles.firstOrNull { it.id == selectedId }?.name ?: "Automatic / not paired"
+        val options: List<Pair<String?, String>> = listOf(null to "Automatic / not paired") + availableProfiles.map { it.id to it.name }
+        val optionFocusRequesters: Map<String, FocusRequester> = remember(nuvioProfile.index, expandedProfileIndex) {
+            options.associate { (id, _) -> (id ?: "automatic") to FocusRequester() }
+        }
+        val focusRequester = mappingFocusRequesters.getValue(nuvioProfile.index)
         Row(
             modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
@@ -1199,16 +1244,54 @@ private fun ProfileMappingSettings(
                 Text(nuvioProfile.name, color = ivory, fontSize = 16.sp, fontWeight = FontWeight.Medium)
                 Text("Nuvio profile ${nuvioProfile.index}", color = muted, fontSize = 13.sp)
             }
-            ActionButton(
-                label = selectedName,
-                palette = palette,
-                primary = selectedId != null,
-                modifier = Modifier.widthIn(min = 220.dp).testTag("profile-mapping-${nuvioProfile.index}"),
-                onClick = {
-                    selectedMappings = selectedMappings + (nuvioProfile.index to nextId)
-                    onProfileMappingChanged(nuvioProfile.index, nextId)
+            Box {
+                ActionButton(
+                    label = selectedName,
+                    palette = palette,
+                    primary = selectedId != null,
+                    focusRequester = focusRequester,
+                    upFocusRequester = if (nuvioProfile == nuvioProfiles.firstOrNull()) firstFocusRequester else mappingFocusRequesters[nuvioProfiles.getOrNull(nuvioProfiles.indexOf(nuvioProfile) - 1)?.index],
+                    downFocusRequester = mappingFocusRequesters[nuvioProfiles.getOrNull(nuvioProfiles.indexOf(nuvioProfile) + 1)?.index],
+                    modifier = Modifier.widthIn(min = 220.dp).testTag("profile-mapping-${nuvioProfile.index}"),
+                    onClick = { expandedProfileIndex = nuvioProfile.index }
+                )
+                DropdownMenu(
+                    expanded = expandedProfileIndex == nuvioProfile.index,
+                    onDismissRequest = { expandedProfileIndex = null },
+                    properties = androidx.compose.ui.window.PopupProperties(focusable = true),
+                    modifier = Modifier.testTag("profile-mapping-menu-${nuvioProfile.index}")
+                ) {
+                    LaunchedEffect(expandedProfileIndex, nuvioProfile.index) {
+                        if (expandedProfileIndex == nuvioProfile.index) {
+                            withFrameNanos { }
+                            optionFocusRequesters.getValue(options.first().first ?: "automatic").requestFocus()
+                        }
+                    }
+                    options.forEach { (id, name) ->
+                        key("profile-option-${nuvioProfile.index}-${id ?: "automatic"}") {
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        if (id == null) name else "RelayTube · $name",
+                                        modifier = Modifier.testTag("profile-mapping-option-${nuvioProfile.index}-${id ?: "automatic"}")
+                                    )
+                                },
+                                onClick = {
+                                    selectedMappings = selectedMappings + (nuvioProfile.index to id)
+                                    onProfileMappingChanged(nuvioProfile.index, id)
+                                    expandedProfileIndex = null
+                                    focusRequester.requestFocus()
+                                },
+                                modifier = Modifier
+                                    .focusRequester(optionFocusRequesters.getValue(id ?: "automatic"))
+                                    .semantics {
+                                        contentDescription = "profile-mapping-option-${nuvioProfile.index}-${id ?: "automatic"}"
+                                    }
+                            )
+                        }
+                    }
                 }
-            )
+            }
         }
     }
 }

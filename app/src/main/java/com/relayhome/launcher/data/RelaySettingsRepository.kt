@@ -34,7 +34,7 @@ import kotlinx.coroutines.sync.withLock
 
 private const val dataStoreName = "relay_settings_data"
 private const val schemaVersionKey = "_schema_version"
-private const val currentSchemaVersion = 6
+private const val currentSchemaVersion = 7
 
 private const val enabledProvidersKey = "providers.enabled_names"
 private const val searchProviderKey = "search.default_provider"
@@ -52,6 +52,7 @@ private const val heroContinueWatchingKey = "home.hero.include_continue_watching
 private const val heroSubscriptionsKey = "home.hero.include_subscriptions"
 private const val heroNowPlayingKey = "home.hero.include_now_playing"
 private const val heroAutoRotateKey = "home.hero.auto_rotate"
+private const val heroAutoRotateIntervalSecondsKey = "home.hero.auto_rotate_interval_seconds"
 private const val hiddenAppPackagesKey = "apps.hidden_packages"
 private const val appSortOrderKey = "apps.sort_order"
 private const val appIconShapeKey = "apps.icon_shape"
@@ -251,6 +252,18 @@ internal object RelaySettingsRepository {
 
     fun saveHeroAutoRotate(context: Context, enabled: Boolean) {
         updateSnapshotAndPersist(context) { it[booleanPreferencesKey(heroAutoRotateKey)] = enabled }
+    }
+
+    fun loadHeroAutoRotateIntervalSeconds(context: Context): Int {
+        initialize(context)
+        return (snapshot.get().values[intPreferencesKey(heroAutoRotateIntervalSecondsKey)] ?: 11)
+            .coerceIn(3, 30)
+    }
+
+    fun saveHeroAutoRotateIntervalSeconds(context: Context, seconds: Int) {
+        updateSnapshotAndPersist(context) {
+            it[intPreferencesKey(heroAutoRotateIntervalSecondsKey)] = seconds.coerceIn(3, 30)
+        }
     }
 
     fun loadHiddenAppPackages(context: Context): Set<String> {
@@ -589,6 +602,22 @@ internal object RelaySettingsRepository {
             val idle = synchronized(lock) { pendingWrites == 0 }
             if (idle) break
             delay(10)
+        }
+        awaitReady(context)
+    }
+
+    /** Reloads the in-memory facade from the existing DataStore without deleting user settings. */
+    internal suspend fun reloadForTesting(context: Context) {
+        awaitIdleForTesting(context)
+        synchronized(lock) {
+            collectorJob?.cancel()
+            migrationJob?.cancel()
+            collectorJob = null
+            migrationJob = null
+            initializedContext = null
+            pendingWrites = 0
+            snapshot.set(Snapshot(emptyPreferences()))
+            _revision.value += 1
         }
         awaitReady(context)
     }

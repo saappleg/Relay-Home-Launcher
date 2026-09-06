@@ -2,6 +2,11 @@ package com.relayhome.launcher
 
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.foundation.layout.Box
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
@@ -21,12 +26,15 @@ import androidx.test.core.app.ApplicationProvider
 import com.relayhome.launcher.data.RelaySettingsRepository
 import com.relayhome.launcher.ui.settings.SettingsCategory
 import com.relayhome.launcher.ui.state.HeroSource
+import com.relayhome.launcher.ui.home.ActionButton
+import com.relayhome.launcher.ui.home.ProfileSwitcher
 import com.relayhome.launcher.ui.settings.SettingsScreen
 import com.relayhome.launcher.ui.shared.HomeRow
 import com.relayhome.launcher.ui.shared.Provider
 import com.relayhome.launcher.ui.shared.RelayAppearance
 import com.relayhome.launcher.ui.shared.orbitalPalette
 import com.relayhome.launcher.WeatherTemperatureUnit
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Rule
 import org.junit.Test
@@ -253,12 +261,49 @@ class SettingsScreenTest {
     }
 
     @Test
-    fun profileMappings_areVisibleAndCycleThroughRelayTubeProfiles() {
+    fun deviceSettings_andLauncherUpdates_areDistinctDestinations() {
+        setSettings()
+
+        composeRule.onNodeWithText(SettingsCategory.DEVICE_SETTINGS.label).performScrollTo().performClick()
+        composeRule.onNodeWithTag("settings-category-detail-DEVICE_SETTINGS").assertIsDisplayed()
+        composeRule.onNodeWithText("Home launcher").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Relay updates").assertDoesNotExist()
+        composeRule.onNodeWithText("Back to Settings").performClick()
+
+        composeRule.onNodeWithText(SettingsCategory.LAUNCHER_UPDATES.label).performScrollTo().performClick()
+        composeRule.onNodeWithTag("settings-category-detail-LAUNCHER_UPDATES").assertIsDisplayed()
+        composeRule.onNodeWithText("Check for updates").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Home launcher").assertDoesNotExist()
+    }
+
+    @Test
+    fun heroRotationInterval_isSavedAndSurvivesRepositoryReload() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
-        RelaySettingsRepository.clearProfileMapping(context, 1)
+        runBlocking { RelaySettingsRepository.resetForTesting(context) }
+        setSettings()
+
+        composeRule.onNodeWithText(SettingsCategory.HOME_LAYOUT.label).performClick()
+        composeRule.onNodeWithTag("hero-rotate-interval-increment").performScrollTo().performClick()
+        composeRule.waitForIdle()
+        runBlocking {
+            RelaySettingsRepository.awaitIdleForTesting(context)
+            assertEquals(12, RelaySettingsRepository.loadHeroAutoRotateIntervalSeconds(context))
+            RelaySettingsRepository.reloadForTesting(context)
+            assertEquals(12, RelaySettingsRepository.loadHeroAutoRotateIntervalSeconds(context))
+            RelaySettingsRepository.resetForTesting(context)
+        }
+    }
+
+    @Test
+    fun profileMappings_useAnchoredDropdown_andReturnFocusAfterSelection() {
+        val context = ApplicationProvider.getApplicationContext<android.content.Context>()
+        runBlocking {
+            RelaySettingsRepository.clearProfileMapping(context, 91)
+            RelaySettingsRepository.awaitIdleForTesting(context)
+        }
         var selectedPairing: Pair<Int, String?>? = null
         setSettings(
-            nuvioProfiles = listOf(NuvioProfile(1, "Living Room", "blue", null)),
+            nuvioProfiles = listOf(NuvioProfile(91, "Living Room", "blue", null)),
             relayTubeProfiles = listOf(
                 RelayTubeProfile("relay-a", "Living Room", null, false),
                 RelayTubeProfile("relay-b", "Bedroom", null, false)
@@ -268,13 +313,94 @@ class SettingsScreenTest {
 
         composeRule.onNodeWithText(SettingsCategory.PROVIDERS_ACCOUNTS.label).performClick()
         composeRule.onNodeWithText("Profile pairing").performScrollTo().assertIsDisplayed()
-        composeRule.onNodeWithTag("profile-mapping-1").performScrollTo().performClick()
-        assertEquals(1 to "relay-a", selectedPairing)
-        composeRule.onNodeWithTag("profile-mapping-1").performClick()
-        assertEquals(1 to "relay-b", selectedPairing)
-        composeRule.onNodeWithTag("profile-mapping-1").performClick()
-        assertEquals(1 to null, selectedPairing)
-        RelaySettingsRepository.clearProfileMapping(context, 1)
+        val trigger = composeRule.onNodeWithTag("profile-mapping-91").performScrollTo()
+        trigger.performSemanticsAction(SemanticsActions.RequestFocus)
+        trigger.assertIsFocused()
+        trigger.performClick()
+        composeRule.waitForIdle()
+        // DropdownMenu is rendered in a separate popup window; assert its visible option rather
+        // than relying on the popup container's semantics crossing that window boundary.
+        val relayA = composeRule.onNodeWithText("RelayTube · Living Room")
+        relayA.performSemanticsAction(SemanticsActions.RequestFocus)
+        relayA.assertIsFocused()
+        relayA.performClick()
+        assertEquals(91 to "relay-a", selectedPairing)
+        composeRule.waitForIdle()
+        trigger.assertIsFocused()
+        trigger.performClick()
+        val automaticAgain = composeRule.onNodeWithText("Automatic / not paired")
+        automaticAgain.performKeyInput {
+            pressKey(Key.DirectionDown)
+            pressKey(Key.DirectionDown)
+        }
+        val relayB = composeRule.onNodeWithText("RelayTube · Bedroom")
+        relayB.assertIsFocused()
+        relayB.performClick()
+        assertEquals(91 to "relay-b", selectedPairing)
+        composeRule.waitForIdle()
+        trigger.assertIsFocused()
+        runBlocking {
+            RelaySettingsRepository.clearProfileMapping(context, 91)
+            RelaySettingsRepository.awaitIdleForTesting(context)
+        }
+    }
+
+    @Test
+    fun homeProfileSwitcher_movesWithDpad_selectsProfile_andReturnsFocusToAnchor() {
+        val isOpen = mutableStateOf(false)
+        val selectedProfile = mutableStateOf<Int?>(null)
+        val triggerRequester = FocusRequester()
+        composeRule.setContent {
+            MaterialTheme(colorScheme = darkColorScheme()) {
+                Box {
+                    ActionButton(
+                        label = "Open profile switcher",
+                        palette = orbitalPalette,
+                        primary = false,
+                        focusRequester = triggerRequester,
+                        modifier = Modifier.testTag("profile-switcher-anchor"),
+                        onClick = { isOpen.value = true }
+                    )
+                    if (isOpen.value) {
+                        ProfileSwitcher(
+                            palette = orbitalPalette,
+                            profiles = listOf(
+                                NuvioProfile(1, "Living Room", "blue"),
+                                NuvioProfile(2, "Bedroom", "green")
+                            ),
+                            relayTubeProfiles = listOf(
+                                RelayTubeProfile("relay-a", "Living Room", null, false),
+                                RelayTubeProfile("relay-b", "Bedroom", null, false)
+                            ),
+                            activeProfile = 1,
+                            profileImageUri = null,
+                            onSelect = {
+                                selectedProfile.value = it
+                                isOpen.value = false
+                            },
+                            onDismiss = { isOpen.value = false }
+                        )
+                    }
+                }
+            }
+        }
+        composeRule.waitForIdle()
+        val anchor = composeRule.onNodeWithTag("profile-switcher-anchor")
+        anchor.performSemanticsAction(SemanticsActions.RequestFocus)
+        anchor.assertIsFocused()
+        anchor.performClick()
+        composeRule.onNodeWithText("Who’s watching?").assertIsDisplayed()
+
+        val livingRoom = composeRule.onNodeWithText("Living Room")
+        livingRoom.assertIsFocused()
+        livingRoom.performKeyInput { pressKey(Key.DirectionDown) }
+        val bedroom = composeRule.onNodeWithText("Bedroom")
+        bedroom.assertIsDisplayed()
+        bedroom.assertIsFocused()
+        bedroom.performClick()
+        composeRule.waitForIdle()
+        assertEquals(2, selectedProfile.value)
+        anchor.assertIsFocused()
     }
 
     private fun setSettings(
