@@ -61,6 +61,14 @@ internal object FavoriteAppsStore {
     }
 
     fun ensureDefaults(context: Context, apps: List<InstalledApp>): Set<String> {
+        return ensureDefaults(context, apps, emptySet())
+    }
+
+    fun ensureDefaults(
+        context: Context,
+        apps: List<InstalledApp>,
+        hiddenPackages: Set<String>
+    ): Set<String> {
         val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         // An explicit empty set and a user toggle both count as an intentional choice.
         if (preferences.contains(KEY_PACKAGES)) return favoritePackages
@@ -68,7 +76,7 @@ internal object FavoriteAppsStore {
         // Relay itself is never a candidate because it is the launcher, but provider apps are
         // intentionally eligible. They are discoverable in All Apps and can be selected as
         // favorites for direct launching; this does not affect ProviderHandoff's trust checks.
-        val excludedPackages = setOf(context.packageName)
+        val excludedPackages = setOf(context.packageName) + hiddenPackages
         val defaults = selectDefaultFavoritePackages(
             availableApps = apps.map { FavoriteAppCandidate(it.packageName, it.label) },
             excludedPackages = excludedPackages

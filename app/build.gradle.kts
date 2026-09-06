@@ -1,4 +1,5 @@
 import java.util.Properties
+import java.util.concurrent.TimeUnit
 
 plugins {
     alias(libs.plugins.android.application)
@@ -28,9 +29,26 @@ val releaseSigningConfigured = listOf(
     releaseKeyPassword
 ).all { it.isNotBlank() }
 val relayTmdbApiKey = configuredValue("tmdb.apiKey", "RELAY_TMDB_API_KEY")
-val relayVersionCode = providers.environmentVariable("RELAY_VERSION_CODE").orNull?.toIntOrNull() ?: 24
-val relayVersionName = providers.environmentVariable("RELAY_VERSION_NAME").orNull?.takeIf { it.isNotBlank() }
-    ?: "0.1.0-beta.1"
+val relayVersionCodeOverride = providers.environmentVariable("RELAY_VERSION_CODE").orNull
+val relayVersionNameOverride = providers.environmentVariable("RELAY_VERSION_NAME").orNull
+
+// The newest published release is v0.1.0-beta.4 (versionCode 27). Keep local debug/test builds
+// visibly on the next unreleased identity instead of silently presenting an obsolete beta. This
+// fallback is never accepted for release packaging; releases must receive explicit version inputs.
+val localNextVersionCode = 28
+val localNextVersionName = "0.1.0-beta.5"
+val relayVersionCode = relayVersionCodeOverride?.toIntOrNull() ?: localNextVersionCode
+val relayVersionName = relayVersionNameOverride?.takeIf { it.isNotBlank() } ?: localNextVersionName
+val releaseVersionCodePattern = Regex("^[1-9][0-9]{0,9}$")
+val releaseVersionNamePattern = Regex(
+    """^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta)\.[1-9][0-9]*)?$"""
+)
+val releaseVersionConfigured =
+    relayVersionCodeOverride?.let { rawCode ->
+        releaseVersionCodePattern.matches(rawCode) &&
+            rawCode.toLongOrNull()?.let { it in 1..2_100_000_000L } == true
+    } == true &&
+        relayVersionNameOverride?.let { releaseVersionNamePattern.matches(it) } == true
 
 // Never accidentally package an unsigned (or debug-signed) release APK. Keep this
 // guard limited to tasks that can emit the production release artifact: release
@@ -43,9 +61,51 @@ val releasePackagingTasks = setOf(
     "packageReleaseUniversalApk",
     "signReleaseBundle"
 )
+
+/**
+ * The Android connected-test harness owns the target package lifecycle. Running connected tests
+ * against a real TV can alter launcher state or clean up a Relay variant during test teardown.
+ * CI uses an emulator; fail closed locally when any physical ADB target is attached instead of
+ * allowing a destructive test install.
+ */
+fun assertConnectedTestsAreEmulatorOnly() {
+    val adb = runCatching {
+        ProcessBuilder("adb", "devices", "-l")
+            .redirectErrorStream(true)
+            .start()
+    }.getOrElse { error ->
+        error("Could not verify ADB targets before connected tests: ${error.message ?: error::class.java.simpleName}")
+    }
+    val output = adb.inputStream.bufferedReader().use { it.readText() }
+    check(adb.waitFor(10, TimeUnit.SECONDS)) {
+        adb.destroyForcibly()
+        "Could not verify ADB targets before connected tests: adb did not respond in time."
+    }
+    check(adb.exitValue() == 0) {
+        "Could not verify ADB targets before connected tests (adb exit ${adb.exitValue()})."
+    }
+    val physicalTargets = output.lineSequence()
+        .map(String::trim)
+        .filter { it.isNotBlank() && !it.startsWith("List of devices attached") }
+        .filter { it.substringAfterLast(' ', "").startsWith("device") || it.contains(" device ") }
+        .filterNot { it.substringBefore(' ').startsWith("emulator-") }
+        .toList()
+    check(physicalTargets.isEmpty()) {
+        "Refusing connected Android tests while a physical ADB target is attached: " +
+            physicalTargets.joinToString { it.substringBefore(' ') } +
+            ". The Android test harness can remove a Relay package during cleanup; " +
+            "disconnect physical targets and run the tests on an emulator."
+    }
+}
+
 tasks.configureEach {
     if (name in releasePackagingTasks) {
         doFirst {
+            check(releaseVersionConfigured) {
+                "Release version is missing or invalid. Set RELAY_VERSION_CODE and " +
+                    "RELAY_VERSION_NAME explicitly to a valid SemVer/channel value; the local " +
+                    "$localNextVersionName/$localNextVersionCode fallback is for non-release builds only."
+            }
             check(releaseSigningConfigured) {
                 "Release signing is not configured. Add relay.signing.* values to local.properties or RELAY_SIGNING_* environment variables."
             }
@@ -53,6 +113,22 @@ tasks.configureEach {
                 "Release keystore was not found at: $releaseStoreFile"
             }
         }
+    }
+    if (name == "connectedCheck" || (name.startsWith("connected") && name.endsWith("AndroidTest"))) {
+        doFirst { assertConnectedTestsAreEmulatorOnly() }
+    }
+}
+
+tasks.register("verifyRelayReleaseVersion") {
+    group = "verification"
+    description = "Fails unless an explicit valid release version is provided through the environment."
+    doLast {
+        check(releaseVersionConfigured) {
+            "Release version is missing or invalid. Set RELAY_VERSION_CODE and " +
+                "RELAY_VERSION_NAME explicitly to a valid SemVer/channel value; the local " +
+                "$localNextVersionName/$localNextVersionCode fallback is for non-release builds only."
+        }
+        logger.lifecycle("Relay release version: $relayVersionName (code $relayVersionCode)")
     }
 }
 
@@ -85,6 +161,11 @@ android {
     }
 
     buildTypes {
+        getByName("debug") {
+            // Keep debug/test installs isolated from the signed production launcher. This is a
+            // second line of defense if a connected-test command is ever run on a real TV.
+            applicationIdSuffix = ".debug"
+        }
         getByName("release") {
             if (releaseSigningConfigured) {
                 signingConfig = signingConfigs.getByName("release")

@@ -1,5 +1,6 @@
 package com.relayhome.launcher
 
+import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
 import kotlinx.coroutines.CancellationException
@@ -11,6 +12,7 @@ import androidx.compose.ui.graphics.Color
 import com.relayhome.launcher.ui.shared.MediaItem
 import com.relayhome.launcher.ui.shared.Provider
 import com.relayhome.launcher.ui.shared.visibleRelayText
+import com.relayhome.launcher.data.RelaySettingsRepository
 import java.io.IOException
 import java.io.InterruptedIOException
 import java.net.ConnectException
@@ -38,6 +40,11 @@ internal data class TmdbTitleMatch(
     val result: JSONObject,
     val confidence: TmdbMatchConfidence,
     val score: Double
+)
+
+internal data class TmdbExternalMetadata(
+    val imdbId: String?,
+    val tmdbRating: Double?
 )
 
 internal open class TmdbApiException(message: String, cause: Throwable? = null) : IOException(message, cause)
@@ -77,6 +84,23 @@ internal class TmdbResponseTooLargeException : TmdbApiException(
 )
 
 internal data class TmdbHttpResponse(val statusCode: Int, val body: String)
+
+/** Runtime access to user-configured metadata keys without exposing them to UI or logs. */
+internal object MetadataApiKeyAccess {
+    @Volatile
+    private var applicationContext: Context? = null
+
+    fun configure(context: Context) {
+        applicationContext = context.applicationContext
+    }
+
+    fun tmdbApiKey(): String = applicationContext
+        ?.let { RelaySettingsRepository.loadTmdbApiKey(it) }
+        ?: BuildConfig.TMDB_API_KEY
+
+    /** OMDb intentionally has no build-time fallback: it is opt-in and user-supplied only. */
+    fun omdbApiKey(): String? = applicationContext?.let { RelaySettingsRepository.loadOmdbApiKey(it) }
+}
 
 /** Conservative title matcher: exact normalized matches win; fuzzy matches need a clear margin. */
 internal object TmdbTitleMatcher {
@@ -175,7 +199,7 @@ internal object TmdbTitleMatcher {
 /** Read-only metadata supplement for Nuvio episodes. Nuvio remains the progress authority. */
 internal object TmdbApi {
     private const val baseUrl = "https://api.themoviedb.org/3"
-    private val apiKey get() = BuildConfig.TMDB_API_KEY
+    private val apiKey get() = MetadataApiKeyAccess.tmdbApiKey()
 
     fun enrichEpisodes(items: List<MediaItem>): List<MediaItem> =
         enrichEpisodesResult(items).getOrDefault(items)
@@ -199,6 +223,52 @@ internal object TmdbApi {
         if (apiKey.isBlank()) Result.failure(TmdbNotConfiguredException())
         else tmdbCall { enrichEpisode(item) }
     }
+
+    /**
+     * Resolves the stable IMDb identifier for an item without changing the item's provider id.
+     * TMDB ids already attached by Relay skip search; provider-owned items use the same
+     * high-confidence title matching as the rest of this API before external_ids is requested.
+     */
+    internal suspend fun externalMetadataFor(item: MediaItem): Result<TmdbExternalMetadata?> = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) return@withContext Result.failure(TmdbNotConfiguredException())
+        tmdbCall {
+            val isTv = item.contentType.lowercase(Locale.ROOT) in setOf("tv", "show", "series", "episode")
+            val mediaType = if (isTv) "tv" else "movie"
+            val attachedTmdbId = item.providerContentId
+                ?.trim()
+                ?.takeIf { it.startsWith("tmdb:", ignoreCase = true) }
+                ?.substringAfter(':')
+                ?.toIntOrNull()
+                ?.takeIf { it > 0 }
+            val matchedResult = if (attachedTmdbId == null) {
+                val query = (item.showTitle ?: item.title).trim()
+                if (query.isBlank()) return@tmdbCall null
+                val search = JSONObject(get("/search/$mediaType", mapOf("query" to query)))
+                val titleKeys = if (isTv) arrayOf("name", "original_name") else arrayOf("title", "original_title")
+                findTmdbTitleMatch(search.optJSONArray("results") ?: JSONArray(), query, *titleKeys)?.result
+            } else null
+            val tmdbId = attachedTmdbId ?: matchedResult
+                ?.optInt("id", -1)
+                ?.takeIf { it > 0 }
+            if (tmdbId == null) {
+                return@tmdbCall matchedResult?.let { TmdbExternalMetadata(null, it.tmdbRating()) }
+            }
+            TmdbExternalMetadata(
+                imdbId = parseImdbIdFromExternalIds(JSONObject(get("/$mediaType/$tmdbId/external_ids"))),
+                // A provider-owned MediaItem.rating is not TMDB's score. Only use it for items
+                // explicitly carrying a TMDB id, where TmdbApi created that value.
+                tmdbRating = if (attachedTmdbId != null) item.rating?.takeIf { it.isFinite() && it in 0.1..10.0 }
+                else matchedResult?.tmdbRating()
+            )
+        }
+    }
+
+    internal suspend fun imdbIdFor(item: MediaItem): Result<String?> =
+        externalMetadataFor(item).map { it?.imdbId }
+
+    internal fun parseImdbIdFromExternalIds(payload: JSONObject): String? = payload.optString("imdb_id")
+        .trim()
+        .takeIf { IMDb_ID_PATTERN.matches(it) }
 
     private fun tmdbArtwork(path: String?, size: String): String? = path
         ?.trim()
@@ -456,6 +526,8 @@ internal object TmdbApi {
             }
         return names.distinct().takeIf { it.isNotEmpty() }?.joinToString(", ")
     }
+
+    private val IMDb_ID_PATTERN = Regex("tt\\d{5,12}")
 
     private suspend fun get(path: String, query: Map<String, String> = emptyMap()): String {
         val params = (query + ("api_key" to apiKey)).entries.joinToString("&") {

@@ -8,11 +8,14 @@ import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
+import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
 import com.relayhome.launcher.ui.shared.HomeRow
 import com.relayhome.launcher.ui.shared.Provider
+import com.relayhome.launcher.ui.shared.AppIconShape
+import com.relayhome.launcher.ui.shared.AppSortOrder
 import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -31,7 +34,7 @@ import kotlinx.coroutines.sync.withLock
 
 private const val dataStoreName = "relay_settings_data"
 private const val schemaVersionKey = "_schema_version"
-private const val currentSchemaVersion = 4
+private const val currentSchemaVersion = 6
 
 private const val enabledProvidersKey = "providers.enabled_names"
 private const val searchProviderKey = "search.default_provider"
@@ -40,6 +43,14 @@ private const val profileImageUriKey = "profile.custom_image_uri"
 private const val hiddenHomeRowsKey = "home.hidden_rows"
 private const val minimalHomeEnabledKey = "home.minimal_enabled"
 private const val weatherCityKey = "weather.city"
+private const val showHomeClockKey = "weather.show_home_clock"
+private const val hiddenAppPackagesKey = "apps.hidden_packages"
+private const val appSortOrderKey = "apps.sort_order"
+private const val appIconShapeKey = "apps.icon_shape"
+private const val appLastUsedPrefix = "apps.last_used."
+private const val appInstalledAtPrefix = "apps.installed_at."
+private const val tmdbApiKey = "data_sources.tmdb_api_key"
+private const val omdbApiKey = "data_sources.omdb_api_key"
 private const val continueWatchingLimitPrefix = "continue_watching.provider_limit_"
 private const val profileMappingPrefix = "profile_mapping."
 private const val resolvedProfileMappingPrefix = "resolved_nuvio_"
@@ -168,6 +179,143 @@ internal object RelaySettingsRepository {
         updateSnapshotAndPersist(context) {
             it[stringPreferencesKey(weatherCityKey)] = city
         }
+    }
+
+    fun loadShowHomeClock(context: Context): Boolean {
+        initialize(context)
+        return snapshot.get().values[booleanPreferencesKey(showHomeClockKey)] ?: false
+    }
+
+    fun saveShowHomeClock(context: Context, enabled: Boolean) {
+        updateSnapshotAndPersist(context) {
+            it[booleanPreferencesKey(showHomeClockKey)] = enabled
+        }
+    }
+
+    fun loadHiddenAppPackages(context: Context): Set<String> {
+        initialize(context)
+        return snapshot.get().values[stringSetPreferencesKey(hiddenAppPackagesKey)].orEmpty()
+    }
+
+    fun saveHiddenAppPackages(context: Context, packages: Set<String>) {
+        updateSnapshotAndPersist(context) {
+            it[stringSetPreferencesKey(hiddenAppPackagesKey)] = packages
+                .map(String::trim)
+                .filter(String::isNotEmpty)
+                .toSet()
+        }
+    }
+
+    fun loadAppSortOrder(context: Context): AppSortOrder {
+        initialize(context)
+        return AppSortOrder.fromStorage(snapshot.get().values[stringPreferencesKey(appSortOrderKey)])
+    }
+
+    fun saveAppSortOrder(context: Context, order: AppSortOrder) {
+        updateSnapshotAndPersist(context) {
+            it[stringPreferencesKey(appSortOrderKey)] = order.storageValue
+        }
+    }
+
+    fun loadAppIconShape(context: Context): AppIconShape {
+        initialize(context)
+        return AppIconShape.fromStorage(snapshot.get().values[stringPreferencesKey(appIconShapeKey)])
+    }
+
+    fun saveAppIconShape(context: Context, shape: AppIconShape) {
+        updateSnapshotAndPersist(context) {
+            it[stringPreferencesKey(appIconShapeKey)] = shape.storageValue
+        }
+    }
+
+    /** Small, non-sensitive launch metadata used only to order the local All Apps grid. */
+    fun loadAppLastUsed(context: Context): Map<String, Long> {
+        initialize(context)
+        return loadLongMetadata(appLastUsedPrefix)
+    }
+
+    fun loadAppInstalledAt(context: Context): Map<String, Long> {
+        initialize(context)
+        return loadLongMetadata(appInstalledAtPrefix)
+    }
+
+    fun recordAppLaunched(context: Context, packageName: String, timestampMs: Long = System.currentTimeMillis()) {
+        val normalized = packageName.trim()
+        if (normalized.isEmpty()) return
+        updateSnapshotAndPersist(context) {
+            it[longPreferencesKey(appLastUsedPrefix + normalized)] = timestampMs.coerceAtLeast(0L)
+        }
+    }
+
+    fun recordDiscoveredAppPackages(
+        context: Context,
+        packageNames: Set<String>,
+        timestampMs: Long = System.currentTimeMillis()
+    ) {
+        val normalized = packageNames.map(String::trim).filter(String::isNotEmpty).toSet()
+        if (normalized.isEmpty()) return
+        updateSnapshotAndPersist(context) {
+            normalized.forEach { packageName ->
+                val key = longPreferencesKey(appInstalledAtPrefix + packageName)
+                if (it[key] == null) it[key] = timestampMs.coerceAtLeast(0L)
+            }
+        }
+    }
+
+    private fun loadLongMetadata(prefix: String): Map<String, Long> = snapshot.get().values.asMap()
+        .keys
+        .mapNotNull { key ->
+            key.name.takeIf { it.startsWith(prefix) }
+                ?.removePrefix(prefix)
+                ?.takeIf { it.isNotBlank() }
+                ?.let { packageName ->
+                    snapshot.get().values[longPreferencesKey(key.name)]?.let { packageName to it }
+                }
+        }
+        .toMap()
+
+    /** Returns only a syntactically valid user key; malformed persisted values fail closed. */
+    fun loadTmdbApiKey(context: Context): String? {
+        initialize(context)
+        return snapshot.get().values[stringPreferencesKey(tmdbApiKey)]
+            ?.trim()
+            ?.takeIf(RelayMetadataApiKeyRules::isValidTmdb)
+    }
+
+    /** Returns false without writing when the caller supplies an invalid key. */
+    fun saveTmdbApiKey(context: Context, value: String): Boolean {
+        if (!RelayMetadataApiKeyValidationHook.validate(MetadataKeyService.TMDB, value).isValid) return false
+        val normalized = value.trim()
+        updateSnapshotAndPersist(context) {
+            it[stringPreferencesKey(tmdbApiKey)] = normalized
+        }
+        return true
+    }
+
+    fun clearTmdbApiKey(context: Context) {
+        updateSnapshotAndPersist(context) { it.remove(stringPreferencesKey(tmdbApiKey)) }
+    }
+
+    /** Returns only a syntactically valid user key; malformed persisted values fail closed. */
+    fun loadOmdbApiKey(context: Context): String? {
+        initialize(context)
+        return snapshot.get().values[stringPreferencesKey(omdbApiKey)]
+            ?.trim()
+            ?.takeIf(RelayMetadataApiKeyRules::isValidOmdb)
+    }
+
+    /** Returns false without writing when the caller supplies an invalid key. */
+    fun saveOmdbApiKey(context: Context, value: String): Boolean {
+        if (!RelayMetadataApiKeyValidationHook.validate(MetadataKeyService.OMDB, value).isValid) return false
+        val normalized = value.trim()
+        updateSnapshotAndPersist(context) {
+            it[stringPreferencesKey(omdbApiKey)] = normalized
+        }
+        return true
+    }
+
+    fun clearOmdbApiKey(context: Context) {
+        updateSnapshotAndPersist(context) { it.remove(stringPreferencesKey(omdbApiKey)) }
     }
 
     fun loadContinueWatchingLimit(
@@ -368,6 +516,18 @@ internal object RelaySettingsRepository {
         source.getStringSafely(dateFormatKey)?.let { if (!destination.contains(stringPreferencesKey(dateFormatKey))) destination[stringPreferencesKey(dateFormatKey)] = it }
         source.getStringSafely(profileImageUriKey)?.let { if (!destination.contains(stringPreferencesKey(profileImageUriKey))) destination[stringPreferencesKey(profileImageUriKey)] = it }
         source.getStringSetSafely(hiddenHomeRowsKey)?.let { if (!destination.contains(stringSetPreferencesKey(hiddenHomeRowsKey))) destination[stringSetPreferencesKey(hiddenHomeRowsKey)] = it }
+        source.getBooleanSafely(minimalHomeEnabledKey)?.let { if (!destination.contains(booleanPreferencesKey(minimalHomeEnabledKey))) destination[booleanPreferencesKey(minimalHomeEnabledKey)] = it }
+        source.getStringSafely(weatherCityKey)?.let { if (!destination.contains(stringPreferencesKey(weatherCityKey))) destination[stringPreferencesKey(weatherCityKey)] = it }
+        source.getBooleanSafely(showHomeClockKey)?.let { if (!destination.contains(booleanPreferencesKey(showHomeClockKey))) destination[booleanPreferencesKey(showHomeClockKey)] = it }
+        source.getStringSetSafely(hiddenAppPackagesKey)?.let { if (!destination.contains(stringSetPreferencesKey(hiddenAppPackagesKey))) destination[stringSetPreferencesKey(hiddenAppPackagesKey)] = it }
+        source.getStringSafely(appSortOrderKey)?.let { if (!destination.contains(stringPreferencesKey(appSortOrderKey))) destination[stringPreferencesKey(appSortOrderKey)] = it }
+        source.getStringSafely(appIconShapeKey)?.let { if (!destination.contains(stringPreferencesKey(appIconShapeKey))) destination[stringPreferencesKey(appIconShapeKey)] = it }
+        source.getStringSafely(tmdbApiKey)?.trim()?.takeIf(RelayMetadataApiKeyRules::isValidTmdb)?.let {
+            if (!destination.contains(stringPreferencesKey(tmdbApiKey))) destination[stringPreferencesKey(tmdbApiKey)] = it
+        }
+        source.getStringSafely(omdbApiKey)?.trim()?.takeIf(RelayMetadataApiKeyRules::isValidOmdb)?.let {
+            if (!destination.contains(stringPreferencesKey(omdbApiKey))) destination[stringPreferencesKey(omdbApiKey)] = it
+        }
         copyTypedDynamicKeys(source, destination, useLegacyNames = false)
         source.getIntSafely(schemaVersionKey)?.let { destination[intPreferencesKey(schemaVersionKey)] = it }
     }
@@ -422,4 +582,75 @@ private class LegacySettingsMigration(private val context: Context) : DataMigrat
 private fun SharedPreferences.getStringSafely(key: String): String? = runCatching { getString(key, null) }.getOrNull()
 private fun SharedPreferences.getStringSetSafely(key: String): Set<String>? = runCatching { getStringSet(key, null)?.toSet() }.getOrNull()
 private fun SharedPreferences.getIntSafely(key: String): Int? = runCatching { if (contains(key)) getInt(key, 0) else null }.getOrNull()
+private fun SharedPreferences.getBooleanSafely(key: String): Boolean? = runCatching { if (contains(key)) getBoolean(key, false) else null }.getOrNull()
 private fun safeAllKeys(preferences: SharedPreferences): Set<String> = runCatching { preferences.all.keys }.getOrDefault(emptySet())
+
+/** The two metadata services whose keys can be configured by the user. */
+internal enum class MetadataKeyService {
+    TMDB,
+    OMDB
+}
+
+/** Result deliberately contains no candidate value, so accidental logging cannot print a key. */
+internal class MetadataKeyValidationResult private constructor(
+    val isValid: Boolean,
+    val errorMessage: String?
+) {
+    override fun toString(): String = if (isValid) "valid" else "invalid"
+
+    companion object {
+        fun valid() = MetadataKeyValidationResult(true, null)
+        fun invalid(message: String) = MetadataKeyValidationResult(false, message)
+    }
+}
+
+internal fun interface MetadataKeyValidationHook {
+    fun validate(service: MetadataKeyService, rawValue: String): MetadataKeyValidationResult
+}
+
+/** Conservative formats accepted by the public TMDB v3 and OMDb API-key forms. */
+internal object RelayMetadataApiKeyRules {
+    private val tmdbPattern = Regex("^[A-Za-z0-9]{32}$")
+    private val omdbPattern = Regex("^[A-Za-z0-9]{8}$")
+
+    fun isValidTmdb(value: String): Boolean = tmdbPattern.matches(value.trim())
+    fun isValidOmdb(value: String): Boolean = omdbPattern.matches(value.trim())
+}
+
+/**
+ * Offline, bounded validation used before a key can reach DataStore.
+ *
+ * Provider validity cannot be proven without sending the secret to that provider. Relay therefore
+ * intentionally does not perform a remote probe while saving: it would make saving dependent on
+ * network availability, expose the key during an unrelated settings action, and require an OMDb
+ * network client that is outside this scoped change. Exact provider formats plus the input bound
+ * are the strongest safe no-network validation available here. The repository repeats this hook
+ * even when the UI has already run it, so every caller fails closed before persistence.
+ */
+internal object RelayMetadataApiKeyValidationHook : MetadataKeyValidationHook {
+    private const val MAX_CANDIDATE_LENGTH = 128
+
+    override fun validate(service: MetadataKeyService, rawValue: String): MetadataKeyValidationResult {
+        if (rawValue.length > MAX_CANDIDATE_LENGTH) {
+            return MetadataKeyValidationResult.invalid("That key is too long.")
+        }
+
+        val normalized = rawValue.trim()
+        if (normalized.isEmpty()) {
+            return MetadataKeyValidationResult.invalid("Enter a key before saving.")
+        }
+
+        return when (service) {
+            MetadataKeyService.TMDB -> if (RelayMetadataApiKeyRules.isValidTmdb(normalized)) {
+                MetadataKeyValidationResult.valid()
+            } else {
+                MetadataKeyValidationResult.invalid("Enter the 32-character TMDB API key from your account.")
+            }
+            MetadataKeyService.OMDB -> if (RelayMetadataApiKeyRules.isValidOmdb(normalized)) {
+                MetadataKeyValidationResult.valid()
+            } else {
+                MetadataKeyValidationResult.invalid("Enter the 8-character OMDb API key from your account.")
+            }
+        }
+    }
+}

@@ -136,16 +136,35 @@ internal fun MediaItem.isUsableForPeek(): Boolean {
         (provider != Provider.NUVIO || artworkUrl.visibleRelayText().isNotBlank())
 }
 
-/** Palette extraction is intentionally small and off-main: TV navigation must win over tinting. */
-internal suspend fun relayArtworkAccent(drawable: android.graphics.drawable.Drawable): Color? =
+/**
+ * Palette extraction is intentionally small and off-main: TV navigation must win over tinting.
+ * The same result drives both the Home ambient image and the optional From backdrop appearance,
+ * so every surface can use the colors of the artwork currently under focus.
+ */
+internal suspend fun relayArtworkPalette(drawable: android.graphics.drawable.Drawable): RelayPalette? =
     withContext(Dispatchers.Default) {
         runCatching {
-            val palette = Palette.from(drawable.toBitmap(320, 180)).maximumColorCount(12).generate()
-            palette.vibrantSwatch?.rgb
-                ?: palette.lightVibrantSwatch?.rgb
-                ?: palette.dominantSwatch?.rgb
-        }.getOrNull()?.let { Color(it or 0xFF000000.toInt()) }
+            val palette = Palette.from(drawable.toBitmap(320, 180))
+                .maximumColorCount(12)
+                .generate()
+            relayPaletteFromSwatches(
+                accentRgb = palette.vibrantSwatch?.rgb
+                    ?: palette.lightVibrantSwatch?.rgb
+                    ?: palette.dominantSwatch?.rgb
+                    ?: palette.darkVibrantSwatch?.rgb,
+                backdropRgb = palette.darkVibrantSwatch?.rgb
+                    ?: palette.dominantSwatch?.rgb
+                    ?: palette.mutedSwatch?.rgb,
+                glowRgb = palette.lightVibrantSwatch?.rgb
+                    ?: palette.vibrantSwatch?.rgb
+                    ?: palette.lightMutedSwatch?.rgb
+            )
+        }.getOrNull()
     }
+
+/** Keep the older accent-only callers stable while sharing the same extraction choices. */
+internal suspend fun relayArtworkAccent(drawable: android.graphics.drawable.Drawable): Color? =
+    relayArtworkPalette(drawable)?.accent
 
 internal data class Hero(
     val title: String,
@@ -164,10 +183,39 @@ internal val muted = Color(0xFFB7B8C1)
 internal val orbitalPalette = RelayPalette(Color(0xFF6B9FFF), Color(0xFF192B61), Color(0xFF0D1932))
 internal val violetPalette = RelayPalette(Color(0xFFC187FF), Color(0xFF39205B), Color(0xFF1D112A))
 
+private fun opaqueRelayColor(rgb: Int): Color = Color((rgb and 0x00FFFFFF) or 0xFF000000.toInt())
+
+private fun darkenRelayColor(color: Color, amount: Float): Color = Color(
+    red = (color.red * amount).coerceIn(0f, 1f),
+    green = (color.green * amount).coerceIn(0f, 1f),
+    blue = (color.blue * amount).coerceIn(0f, 1f),
+    alpha = 1f
+)
+
+/**
+ * Converts Palette swatches into a complete Relay palette. Keeping this pure makes the selection
+ * deterministic in JVM tests and keeps image decoding out of the appearance-selection logic.
+ */
+internal fun relayPaletteFromSwatches(
+    accentRgb: Int?,
+    backdropRgb: Int?,
+    glowRgb: Int?
+): RelayPalette? {
+    val accent = accentRgb?.let(::opaqueRelayColor) ?: return null
+    val backdropSource = backdropRgb?.let(::opaqueRelayColor) ?: accent
+    val glowSource = glowRgb?.let(::opaqueRelayColor) ?: accent
+    return RelayPalette(
+        accent = accent,
+        glow = glowSource.copy(alpha = .72f),
+        backdrop = darkenRelayColor(backdropSource, .42f)
+    )
+}
+
 internal enum class RelayAppearance(val label: String, private val storageValue: String) {
     ORBITAL("Orbital", "orbital"),
     VIOLET("Violet", "violet"),
-    AUTOMATIC("Automatic (Material You)", "automatic");
+    AUTOMATIC("Automatic (Material You)", "automatic"),
+    FROM_BACKDROP("From backdrop", "from_backdrop");
 
     companion object {
         fun fromStorage(value: String?): RelayAppearance =
@@ -177,6 +225,30 @@ internal enum class RelayAppearance(val label: String, private val storageValue:
     fun save(context: Context) {
         context.getSharedPreferences("relay_appearance", Context.MODE_PRIVATE)
             .edit().putString("appearance", storageValue).apply()
+    }
+}
+
+/** Ordering options for the non-scrolling All Apps grid. */
+internal enum class AppSortOrder(val label: String, internal val storageValue: String) {
+    ALPHABETICAL("A–Z", "alphabetical"),
+    RECENTLY_USED("Recently used", "recently_used"),
+    RECENTLY_INSTALLED("Recently installed", "recently_installed");
+
+    companion object {
+        fun fromStorage(value: String?): AppSortOrder =
+            entries.firstOrNull { it.storageValue == value } ?: ALPHABETICAL
+    }
+}
+
+/** How Relay should shape the outer slot around each Android launcher icon. */
+internal enum class AppIconShape(val label: String, internal val storageValue: String) {
+    CIRCLE("Circle", "circle"),
+    ROUNDED_SQUARE("Rounded square", "rounded_square"),
+    MATCH_EACH_APP("Match each app", "match_each_app");
+
+    companion object {
+        fun fromStorage(value: String?): AppIconShape =
+            entries.firstOrNull { it.storageValue == value } ?: MATCH_EACH_APP
     }
 }
 
@@ -195,7 +267,8 @@ internal fun dynamicRelayColorScheme(context: Context): androidx.compose.materia
 
 internal fun relayPaletteForAppearance(
     appearance: RelayAppearance,
-    dynamicColorScheme: androidx.compose.material3.ColorScheme?
+    dynamicColorScheme: androidx.compose.material3.ColorScheme?,
+    focusedArtworkPalette: RelayPalette? = null
 ): RelayPalette = when (appearance) {
     RelayAppearance.ORBITAL -> orbitalPalette
     RelayAppearance.VIOLET -> violetPalette
@@ -206,6 +279,7 @@ internal fun relayPaletteForAppearance(
             backdrop = it.background
         )
     } ?: orbitalPalette
+    RelayAppearance.FROM_BACKDROP -> focusedArtworkPalette ?: orbitalPalette
 }
 
 internal enum class HomeRow(val label: String) {

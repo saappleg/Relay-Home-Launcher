@@ -12,13 +12,22 @@ The **Publish Relay Home release** workflow requires these repository secrets:
 - `KEY_PASSWORD`
 - `TMDB_API_KEY`
 
-Use a version code larger than every prior APK. Never replace the signing key
-after the first signed beta.
+Use a version code larger than every prior APK. The newest published release is
+`v0.1.0-beta.4` with version code `27`, so the next beta must use at least code
+`28`. Never replace the signing key after the first signed beta.
+
+Non-release local Gradle builds use the documented next-development identity
+`0.1.0-beta.5` / version code `28` so they cannot silently identify as the old
+beta.1 build. Release packaging fails closed unless both
+`RELAY_VERSION_NAME` and `RELAY_VERSION_CODE` are explicitly set to valid
+values; the GitHub workflow supplies and validates them. Do not publish a build
+made with the local fallback.
 
 The workflow validates the requested alpha, beta, or stable name, refuses to
-continue when any previously published APK cannot be inspected, and checks
-that the built APK's SHA-256 signing certificate matches the configured
-keystore. Historical APK inspection only downloads same-repository GitHub
+continue when any previously published APK cannot be inspected, runs the full
+connected Android test suite on an isolated API 35 emulator, and checks that
+the built APK's SHA-256 signing certificate matches the configured keystore.
+Historical APK inspection only downloads same-repository GitHub
 release assets over HTTPS, without forwarding the workflow token to the asset
 server. Release signing material is removed from the runner workspace at the
 end of the job. Signing values are passed to Gradle through job environment

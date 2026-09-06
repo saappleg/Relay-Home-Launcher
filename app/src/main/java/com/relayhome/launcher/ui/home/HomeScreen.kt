@@ -1,11 +1,12 @@
 package com.relayhome.launcher.ui.home
 
 import com.relayhome.launcher.*
+import com.relayhome.launcher.data.PersonalRating
 import com.relayhome.launcher.ui.apppeek.AppPeekPanel
 import com.relayhome.launcher.ui.apppeek.FocusedMediaInfoCard
 import com.relayhome.launcher.ui.shared.*
 import android.graphics.Bitmap
-import android.graphics.Canvas
+import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.app.role.RoleManager
 import android.content.ClipData
@@ -25,6 +26,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.ExperimentalFoundationApi
@@ -99,7 +101,11 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.ImageShader
+import androidx.compose.ui.graphics.ShaderBrush
+import androidx.compose.ui.graphics.TileMode
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.nativeCanvas
@@ -112,6 +118,7 @@ import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -136,6 +143,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import java.time.LocalTime
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.YearMonth
@@ -172,14 +182,17 @@ private data class HomeAmbientFocus(
     val app: InstalledApp? = null
 )
 
+/** Kept within Agent E's requested 3–6% range so the texture never competes with key art. */
+internal const val HOME_AMBIENT_GRAIN_ALPHA = 0.04f
+
 private fun ambientFocusFor(hero: Hero): HomeAmbientFocus = HomeAmbientFocus(
-    key = "hero:${hero.item?.contentKey() ?: hero.artworkUrl}",
+    key = "hero:${hero.item?.contentKey() ?: hero.artworkUrl}:${hero.artworkUrl}",
     artworkUrl = hero.artworkUrl.takeIf { it.isNotBlank() },
     fallbackPalette = hero.palette
 )
 
 private fun ambientFocusFor(item: MediaItem): HomeAmbientFocus = HomeAmbientFocus(
-    key = "media:${item.contentKey()}",
+    key = "media:${item.contentKey()}:${item.artworkUrl}",
     artworkUrl = item.artworkUrl.takeIf { it.isNotBlank() },
     fallbackPalette = paletteFor(item)
 )
@@ -268,18 +281,38 @@ internal fun HomeFocusAnchorHost(
  * low-alpha layer still provides an ambient treatment where platform blur is unavailable.
  */
 @Composable
-private fun HomeAmbientBackdrop(focus: HomeAmbientFocus) {
+private fun HomeAmbientBackdrop(
+    focus: HomeAmbientFocus,
+    onArtworkPalette: (String, RelayPalette?) -> Unit
+) {
     val context = LocalContext.current
+    val paletteScope = rememberCoroutineScope()
     val artworkRequest = remember(focus.artworkUrl) {
         focus.artworkUrl?.let { artworkUrl ->
             ImageRequest.Builder(context)
                 .data(artworkUrl)
                 .size(640, 360)
                 .crossfade(false)
-                .build()
+            .build()
         }
     }
+    LaunchedEffect(focus.key) {
+        // Clear the previous artwork immediately. The root appearance then uses Orbital while
+        // the newly focused image is still loading, and the keyed callback rejects late Coil
+        // completions from the card that just lost focus.
+        onArtworkPalette(focus.key, null)
+    }
     val backdrop = focus.fallbackPalette.backdrop
+    val grainBitmap = remember(context) {
+        BitmapFactory.decodeResource(context.resources, R.drawable.relay_ambient_grain)
+            .asImageBitmap()
+    }
+    val grainBrush = remember(grainBitmap) {
+        // Mirror tiling keeps the generated tile seamless at each edge even on renderers that
+        // sample the boundary pixel differently. The small nodpi asset also avoids a large
+        // density-scaled bitmap on 4K TV panels.
+        ShaderBrush(ImageShader(grainBitmap, TileMode.Mirror, TileMode.Mirror))
+    }
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -300,7 +333,13 @@ private fun HomeAmbientBackdrop(focus: HomeAmbientFocus) {
                             scaleY = 1.14f
                         }
                         .blur(42.dp)
-                        .alpha(.54f)
+                        .alpha(.54f),
+                    onSuccess = { success ->
+                        val focusKey = focus.key
+                        paletteScope.launch {
+                            onArtworkPalette(focusKey, relayArtworkPalette(success.result.drawable))
+                        }
+                    }
                 )
             }
         } else if (focus.app != null) {
@@ -319,6 +358,11 @@ private fun HomeAmbientBackdrop(focus: HomeAmbientFocus) {
                     .blur(48.dp)
                     .alpha(.20f)
             )
+        }
+        // A single repeated draw pass adds restrained film grain without another bitmap decode,
+        // blur, or animated work when focus changes. Keep it below the legibility gradients.
+        Canvas(Modifier.fillMaxSize()) {
+            drawRect(brush = grainBrush, alpha = HOME_AMBIENT_GRAIN_ALPHA)
         }
         // Keep text, focus rings, and the persistent navigation legible over bright key art.
         Box(
@@ -373,6 +417,8 @@ internal fun HomeScreen(
     hiddenSmartTubeChannels: Set<String>,
     continueWatchingLimits: Map<Provider, Int>,
     favoriteApps: Set<String>,
+    personalRatings: Map<String, PersonalRating>,
+    mediaScores: Map<String, MediaScores> = emptyMap(),
     onOpenRelayTube: () -> Unit,
     onPlayRelayTube: (MediaItem) -> Unit,
     suppressProviderPeek: Boolean,
@@ -381,7 +427,11 @@ internal fun HomeScreen(
     activeNuvioProfile: Int,
     profileImageUri: String?,
     onRefreshNuvio: () -> Unit,
-    onNuvioProfileSelected: (Int) -> Unit
+    onNuvioProfileSelected: (Int) -> Unit,
+    iconShape: AppIconShape = AppIconShape.MATCH_EACH_APP,
+    showHomeClock: Boolean = false,
+    onFocusedArtworkPalette: (String, RelayPalette?) -> Unit = { _, _ -> },
+    onOmdbRatingsRequested: (List<MediaItem>) -> Unit = {}
 ) {
     val context = LocalContext.current
     val homeFocusRequester = remember { FocusRequester() }
@@ -407,7 +457,9 @@ internal fun HomeScreen(
     // the hero remains the focused surface. A card/app focus owns the backdrop until it loses
     // focus, so a stale parent update cannot replace the artwork currently under the user.
     LaunchedEffect(hero.artworkUrl, hero.item?.contentKey()) {
-        if (ambientFocus.key.startsWith("hero:") || ambientFocus.key == "media:${hero.item?.contentKey()}") {
+        if (ambientFocus.key.startsWith("hero:") ||
+            ambientFocus.key.startsWith("media:${hero.item?.contentKey()}:")
+        ) {
             ambientFocus = ambientFocusFor(hero)
         }
     }
@@ -491,6 +543,14 @@ internal fun HomeScreen(
     val subscriptionItems = remember(providers, visibleSmartTubeSubscriptionItems) {
         if (Provider.SMARTTUBE in providers) visibleSmartTubeSubscriptionItems else emptyList()
     }
+    val omdbItems = remember(continueWatching, recommendationItems, subscriptionItems, upcomingEpisodes) {
+        (continueWatching + recommendationItems + subscriptionItems + upcomingEpisodes.map { it.item })
+            .distinctBy(MediaItem::contentKey)
+            .take(18)
+    }
+    LaunchedEffect(omdbItems.map(MediaItem::contentKey)) {
+        onOmdbRatingsRequested(omdbItems)
+    }
     // The settings screen owns persistence and supplies the requested order through this
     // boundary. Keep that order stable while also making the Home consumer resilient to an
     // older saved list when a new row is introduced.
@@ -539,7 +599,7 @@ internal fun HomeScreen(
         onHomeFocusRestored()
     }
     Box(modifier = Modifier.fillMaxSize()) {
-        HomeAmbientBackdrop(focus = ambientFocus)
+        HomeAmbientBackdrop(focus = ambientFocus, onArtworkPalette = onFocusedArtworkPalette)
         Column(
             modifier = Modifier
                 .fillMaxSize()
@@ -584,6 +644,7 @@ internal fun HomeScreen(
                         FavoriteAppsRail(
                             apps = favoriteInstalledApps,
                             palette = palette,
+                            iconShape = iconShape,
                             focusRequester = rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS),
                             upFocusRequester = homeFocusRequester,
                             downFocusRequester = null,
@@ -597,6 +658,7 @@ internal fun HomeScreen(
                         FavoriteAppsRail(
                             apps = favoriteInstalledApps,
                             palette = palette,
+                            iconShape = iconShape,
                             focusRequester = rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS),
                             upFocusRequester = heroFocusRequester,
                             downFocusRequester = null,
@@ -630,6 +692,8 @@ internal fun HomeScreen(
                                 onHeroChanged = onHeroChanged,
                                 onFocusedItem = showMediaAmbient,
                                 onItemSelected = onItemSelected,
+                                personalRatings = personalRatings,
+                                mediaScores = mediaScores,
                                 largeCards = true,
                                 upFocusRequester = previousRowEntryFocusRequester(rowIndex),
                                 firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.CONTINUE_WATCHING),
@@ -638,6 +702,7 @@ internal fun HomeScreen(
                             HomeRow.FAVORITE_APPS -> FavoriteAppsRail(
                                 apps = favoriteInstalledApps,
                                 palette = palette,
+                                iconShape = iconShape,
                                 focusRequester = rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS),
                                 upFocusRequester = previousRowEntryFocusRequester(rowIndex),
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
@@ -651,6 +716,8 @@ internal fun HomeScreen(
                                 onHeroChanged = onHeroChanged,
                                 onFocusedItem = showMediaAmbient,
                                 onItemSelected = onItemSelected,
+                                personalRatings = personalRatings,
+                                mediaScores = mediaScores,
                                 posters = true,
                                 upFocusRequester = previousRowEntryFocusRequester(rowIndex),
                                 firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.RECOMMENDATIONS),
@@ -664,6 +731,8 @@ internal fun HomeScreen(
                                 onHeroChanged = onHeroChanged,
                                 onFocusedItem = showMediaAmbient,
                                 onItemSelected = onItemSelected,
+                                personalRatings = personalRatings,
+                                mediaScores = mediaScores,
                                 largeCards = true,
                                 upFocusRequester = previousRowEntryFocusRequester(rowIndex),
                                 firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.SUBSCRIPTIONS),
@@ -677,6 +746,8 @@ internal fun HomeScreen(
                                 onHeroChanged = onHeroChanged,
                                 onFocusedItem = showMediaAmbient,
                                 onItemSelected = onItemSelected,
+                                personalRatings = personalRatings,
+                                mediaScores = mediaScores,
                                 showPremiereDate = true,
                                 largeCards = true,
                                 upFocusRequester = previousRowEntryFocusRequester(rowIndex),
@@ -715,7 +786,8 @@ internal fun HomeScreen(
                 nuvioProfiles = nuvioProfiles,
                 activeNuvioProfile = activeNuvioProfile,
                 profileImageUri = profileImageUri,
-                weatherCity = weatherCity
+                weatherCity = weatherCity,
+                showHomeClock = showHomeClock
             ) {
                 profilePickerVisible = true
             }
@@ -774,7 +846,7 @@ internal fun EmptyHomeState(palette: RelayPalette, onSettings: () -> Unit) {
 }
 
 @Composable
-private fun WeatherReadout(city: String, palette: RelayPalette) {
+private fun WeatherReadout(city: String, palette: RelayPalette, compact: Boolean = false) {
     if (city.isBlank()) return
     var weatherState by remember(city) { mutableStateOf<WeatherReadoutState>(WeatherReadoutState.Loading) }
     LaunchedEffect(city) {
@@ -787,24 +859,36 @@ private fun WeatherReadout(city: String, palette: RelayPalette) {
         }
     }
     when (val state = weatherState) {
-        WeatherReadoutState.Loading -> WeatherStatusChip("Weather…")
-        WeatherReadoutState.Unavailable -> WeatherStatusChip("Weather unavailable")
+        WeatherReadoutState.Loading -> WeatherStatusChip("Weather…", compact = compact)
+        WeatherReadoutState.Unavailable -> WeatherStatusChip("Weather unavailable", compact = compact)
         is WeatherReadoutState.Available -> {
             val current = state.current
             Row(
                 modifier = Modifier
                     .clip(RoundedCornerShape(12.dp))
                     .background(Color.White.copy(alpha = .07f))
-                    .padding(horizontal = 10.dp, vertical = 6.dp),
+                    .padding(
+                        horizontal = if (compact) 7.dp else 10.dp,
+                        vertical = if (compact) 6.dp else 6.dp
+                    )
+                    .testTag("weather-readout"),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
                     text = WeatherApi.weatherIcon(current.weatherCode),
                     color = palette.accent,
-                    fontSize = 17.sp,
-                    modifier = Modifier.padding(end = 6.dp)
+                    fontSize = if (compact) 15.sp else 17.sp,
+                    modifier = Modifier.padding(end = if (compact) 3.dp else 6.dp)
                 )
-                Column {
+                if (compact) {
+                    Text(
+                        text = "${current.temperatureCelsius.roundToInt()}°",
+                        color = ivory,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Medium,
+                        maxLines = 1
+                    )
+                } else Column {
                     Text(
                         text = "${current.temperatureCelsius.roundToInt()}°",
                         color = ivory,
@@ -826,6 +910,34 @@ private fun WeatherReadout(city: String, palette: RelayPalette) {
     }
 }
 
+@Composable
+internal fun HomeClock(palette: RelayPalette, compact: Boolean = false) {
+    var currentTime by remember { mutableStateOf(formatHomeClock(LocalTime.now())) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            currentTime = formatHomeClock(LocalTime.now())
+            kotlinx.coroutines.delay(30_000L)
+        }
+    }
+    Text(
+        text = currentTime,
+        color = ivory,
+        fontSize = if (compact) 13.sp else 15.sp,
+        fontWeight = FontWeight.Medium,
+        modifier = Modifier
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color.White.copy(alpha = .07f))
+            .padding(
+                horizontal = if (compact) 7.dp else 10.dp,
+                vertical = if (compact) 6.dp else 8.dp
+            )
+            .testTag("home-clock")
+    )
+}
+
+internal fun formatHomeClock(time: LocalTime): String =
+    time.format(DateTimeFormatter.ofPattern("h:mm a", Locale.getDefault()))
+
 private sealed interface WeatherReadoutState {
     data object Loading : WeatherReadoutState
     data class Available(val current: WeatherCurrent) : WeatherReadoutState
@@ -833,15 +945,22 @@ private sealed interface WeatherReadoutState {
 }
 
 @Composable
-private fun WeatherStatusChip(text: String) {
+private fun WeatherStatusChip(text: String, compact: Boolean = false) {
     Text(
-        text = text,
+        text = if (compact && text == "Weather unavailable") "Weather —" else text,
         color = muted,
-        fontSize = 13.sp,
+        fontSize = if (compact) 12.sp else 13.sp,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
         modifier = Modifier
             .clip(RoundedCornerShape(12.dp))
             .background(Color.White.copy(alpha = .07f))
-            .padding(horizontal = 10.dp, vertical = 8.dp)
+            .widthIn(max = if (compact) 92.dp else Dp.Infinity)
+            .padding(
+                horizontal = if (compact) 7.dp else 10.dp,
+                vertical = if (compact) 6.dp else 8.dp
+            )
+            .testTag("weather-readout")
     )
 }
 
@@ -865,6 +984,7 @@ internal fun TopBar(
     activeNuvioProfile: Int,
     profileImageUri: String?,
     weatherCity: String,
+    showHomeClock: Boolean = false,
     onProfileClick: () -> Unit
 ) {
     BoxWithConstraints(Modifier.fillMaxWidth()) {
@@ -882,7 +1002,16 @@ internal fun TopBar(
             Spacer(Modifier.width(if (compact) 12.dp else 26.dp))
             if (!compact) Spacer(Modifier.weight(1f))
             if (!compact) {
-                WeatherReadout(city = weatherCity, palette = palette)
+                Row(
+                    modifier = Modifier.testTag("top-bar-status"),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (showHomeClock) {
+                        HomeClock(palette)
+                        Spacer(Modifier.width(12.dp))
+                    }
+                    WeatherReadout(city = weatherCity, palette = palette)
+                }
                 Spacer(Modifier.width(18.dp))
             }
             TopDestination("Home", icon = relayHomeIcon, selected = peekProvider == null, palette = palette, compact = compact, focusRequester = homeFocusRequester, downFocusRequester = firstContentFocusRequester, onFocused = {
@@ -936,9 +1065,23 @@ internal fun TopBar(
                 onPeekProvider(null)
                 onDestination(Destination.APPS)
             }
-            // On a 1080p logical surface, keep the media destinations together but anchor
-            // profile/settings to the right safe edge rather than leaving them mid-screen.
-            if (compact) Spacer(Modifier.weight(1f))
+            // Compact 1080p surfaces still have useful room for status information once it is
+            // rendered as a deterministic one-line group. Keep it between the media destinations
+            // and profile/search/settings so the focusable navigation order is unchanged.
+            if (compact) {
+                Spacer(Modifier.weight(1f))
+                if (showHomeClock || weatherCity.isNotBlank()) {
+                    Row(
+                        modifier = Modifier.testTag("top-bar-status"),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (showHomeClock) HomeClock(palette, compact = true)
+                        WeatherReadout(city = weatherCity, palette = palette, compact = true)
+                    }
+                    Spacer(Modifier.width(8.dp))
+                }
+            }
             Spacer(Modifier.width(if (compact) 8.dp else 16.dp))
             if (nuvioProfiles.isNotEmpty()) {
                 ProfileAvatarButton(
@@ -1391,6 +1534,8 @@ internal fun MediaRail(
     posters: Boolean = false,
     showPremiereDate: Boolean = false,
     largeCards: Boolean = false,
+    personalRatings: Map<String, PersonalRating> = emptyMap(),
+    mediaScores: Map<String, MediaScores> = emptyMap(),
     upFocusRequester: FocusRequester,
     firstFocusRequester: FocusRequester? = null,
     downFocusRequester: FocusRequester? = null
@@ -1471,6 +1616,8 @@ internal fun MediaRail(
                         dateFormat = dateFormat,
                         showEpisodeInfo = title == "Continue Watching" || title == "Coming Up",
                         showPremiereDate = showPremiereDate,
+                        personalRating = personalRatings[item.contentKey()],
+                        mediaScores = mediaScores[item.contentKey()],
                         focusRequester = if (item.contentKey() == stableItems.firstOrNull()?.contentKey() && firstFocusRequester != null) firstCardFocusRequester else null,
                         upFocusRequester = upFocusRequester,
                         downFocusRequester = downFocusRequester,
@@ -1522,6 +1669,53 @@ internal fun MediaRail(
     }
 }
 
+/** Compact, source-labelled score badges. Only scores returned by the source are rendered. */
+@Composable
+internal fun MediaScoreBadges(
+    tmdbRating: Double?,
+    omdbRatings: OmdbRatings?,
+    palette: RelayPalette,
+    modifier: Modifier = Modifier
+) {
+    val tmdb = tmdbRating?.takeIf { it.isFinite() && it in 0.1..10.0 }
+    val rottenTomatoes = omdbRatings?.rottenTomatoesPercent
+    val metacritic = omdbRatings?.metacriticScore
+    if (tmdb == null && rottenTomatoes == null && metacritic == null) return
+
+    Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+        tmdb?.let {
+            ScoreBadge("TMDB ${String.format(Locale.US, "%.1f", it)}", palette.accent)
+        }
+        rottenTomatoes?.let { score ->
+            val fresh = score >= 60
+            ScoreBadge(
+                label = "RT $score%",
+                color = if (fresh) Color(0xFF55D18A) else Color(0xFFEF6D75)
+            )
+        }
+        metacritic?.let { score ->
+            ScoreBadge("MC $score", Color(0xFFE3B95F))
+        }
+    }
+}
+
+@Composable
+private fun ScoreBadge(label: String, color: Color) {
+    val shape = RoundedCornerShape(7.dp)
+    Text(
+        text = label,
+        color = ivory,
+        fontSize = 10.sp,
+        fontWeight = FontWeight.Bold,
+        maxLines = 1,
+        modifier = Modifier
+            .clip(shape)
+            .background(color.copy(alpha = .88f))
+            .border(1.dp, color.copy(alpha = .95f), shape)
+            .padding(horizontal = 6.dp, vertical = 4.dp)
+    )
+}
+
 @Composable
 internal fun MediaCard(
     item: MediaItem,
@@ -1531,6 +1725,8 @@ internal fun MediaCard(
     dateFormat: RelayDateFormat = RelayDateFormat.LOCAL,
     showEpisodeInfo: Boolean = false,
     showPremiereDate: Boolean = false,
+    personalRating: PersonalRating? = null,
+    mediaScores: MediaScores? = null,
     focusRequester: FocusRequester? = null,
     upFocusRequester: FocusRequester? = null,
     downFocusRequester: FocusRequester? = null,
@@ -1600,6 +1796,23 @@ internal fun MediaCard(
                 Box(modifier = Modifier.fillMaxWidth(item.infoProgress()).height(4.dp).background(item.provider.accent))
             }
         }
+        personalRating?.let { rating ->
+            Text(
+                rating.badge,
+                color = ivory,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.align(Alignment.TopStart).padding(top = 8.dp, start = 8.dp)
+                    .clip(RoundedCornerShape(8.dp)).background(Color(0xCC20252F))
+                    .padding(horizontal = 7.dp, vertical = 4.dp)
+            )
+        }
+        MediaScoreBadges(
+            tmdbRating = mediaScores?.tmdbRating,
+            omdbRatings = mediaScores?.omdbRatings,
+            palette = palette,
+            modifier = Modifier.align(Alignment.BottomEnd).padding(end = 10.dp, bottom = 10.dp)
+        )
         if (showEpisodeInfo && !poster) {
             Column(
                 modifier = Modifier.align(Alignment.BottomStart).fillMaxWidth()
@@ -1642,6 +1855,7 @@ internal fun MediaCard(
 internal fun FavoriteAppsRail(
     apps: List<InstalledApp>,
     palette: RelayPalette,
+    iconShape: AppIconShape = AppIconShape.MATCH_EACH_APP,
     focusRequester: FocusRequester? = null,
     upFocusRequester: FocusRequester? = null,
     downFocusRequester: FocusRequester? = null,
@@ -1690,6 +1904,7 @@ internal fun FavoriteAppsRail(
                 FavoriteAppCard(
                     app = app,
                     palette = palette,
+                    shapePreference = iconShape,
                     focusRequester = if (app.packageName == apps.firstOrNull()?.packageName && focusRequester != null) firstCardFocusRequester else null,
                     upFocusRequester = upFocusRequester,
                     downFocusRequester = downFocusRequester,
@@ -1704,6 +1919,7 @@ internal fun FavoriteAppsRail(
 internal fun FavoriteAppCard(
     app: InstalledApp,
     palette: RelayPalette,
+    shapePreference: AppIconShape = AppIconShape.MATCH_EACH_APP,
     focusRequester: FocusRequester? = null,
     upFocusRequester: FocusRequester? = null,
     downFocusRequester: FocusRequester? = null,
@@ -1729,6 +1945,7 @@ internal fun FavoriteAppCard(
             palette = palette,
             focused = focused,
             iconSize = 76.dp,
+            shapePreference = shapePreference,
             modifier = Modifier.graphicsLayer {
                 scaleX = scale
                 scaleY = scale
@@ -1747,10 +1964,33 @@ internal fun FavoriteAppCard(
 }
 
 /**
+ * The slot shape follows the metadata we got from Android rather than forcing every launcher
+ * icon into a circle. A plain legacy/OEM bitmap may already contain its own square background;
+ * placing that bitmap in another circular mask is the "square inside a circle" treatment seen in
+ * the favorites rail.
+ */
+internal enum class LauncherIconSlotShape {
+    CIRCULAR,
+    ROUNDED_SQUARE
+}
+
+internal fun launcherIconSlotShape(app: InstalledApp): LauncherIconSlotShape =
+    launcherIconSlotShape(app, AppIconShape.MATCH_EACH_APP)
+
+internal fun launcherIconSlotShape(app: InstalledApp, preference: AppIconShape): LauncherIconSlotShape =
+    if (preference == AppIconShape.CIRCLE ||
+        (preference == AppIconShape.MATCH_EACH_APP && (app.hasRoundIcon || app.useCircularMask))
+    ) {
+        LauncherIconSlotShape.CIRCULAR
+    } else {
+        LauncherIconSlotShape.ROUNDED_SQUARE
+    }
+
+/**
  * A single TV-friendly icon treatment shared by the Home favorites rail and the Apps page.
  * Always using the app icon (never a banner) keeps mixed launcher metadata from producing
- * stretched or visually mashed tiles. Favorites intentionally use one consistent circular
- * slot; the drawable itself is never bitmap-cropped before that presentation mask is applied.
+ * stretched or visually mashed tiles. Native round and adaptive icons keep their circular slot;
+ * legacy/pre-masked OEM icons use a rounded-square slot so they do not get a second circular mask.
  */
 @Composable
 internal fun LauncherAppIcon(
@@ -1758,27 +1998,36 @@ internal fun LauncherAppIcon(
     palette: RelayPalette,
     focused: Boolean,
     iconSize: Dp,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    shapePreference: AppIconShape = AppIconShape.MATCH_EACH_APP
 ) {
     val iconPainter = rememberNativeIconPainter(app.icon)
+    val slotShape: Shape = when (launcherIconSlotShape(app, shapePreference)) {
+        LauncherIconSlotShape.CIRCULAR -> CircleShape
+        LauncherIconSlotShape.ROUNDED_SQUARE -> RoundedCornerShape(18.dp)
+    }
     val iconInset = when {
+        shapePreference == AppIconShape.CIRCLE && app.hasRoundIcon -> 0.dp
+        shapePreference == AppIconShape.CIRCLE -> iconSize * (18f / 108f)
+        shapePreference == AppIconShape.ROUNDED_SQUARE -> 4.dp
         app.hasRoundIcon -> 0.dp
         app.useCircularMask -> iconSize * (18f / 108f)
         else -> 4.dp
     }
-    val slotShape = RoundedCornerShape(18.dp)
+    val fillIconBounds = shapePreference == AppIconShape.CIRCLE ||
+        (shapePreference == AppIconShape.MATCH_EACH_APP && app.useCircularMask)
     Box(
         modifier
             .size(iconSize)
-            .clip(CircleShape)
+            .clip(slotShape)
             .background(if (focused) palette.accent.copy(alpha = .30f) else Color(0xFF242730))
-            .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .10f), CircleShape),
+            .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .10f), slotShape),
         contentAlignment = Alignment.Center
     ) {
         Image(
             painter = iconPainter,
             contentDescription = app.label,
-            contentScale = if (app.useCircularMask) ContentScale.FillBounds else ContentScale.Fit,
+            contentScale = if (fillIconBounds) ContentScale.FillBounds else ContentScale.Fit,
             modifier = Modifier
                 .fillMaxSize()
                 // The outer slot is the one deliberate Relay favorite mask. Keep the native

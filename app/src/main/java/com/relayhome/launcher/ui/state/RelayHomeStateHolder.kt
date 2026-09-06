@@ -9,10 +9,13 @@ import com.relayhome.launcher.DateFormatSettings
 import com.relayhome.launcher.FavoriteAppsStore
 import com.relayhome.launcher.LauncherOverride
 import com.relayhome.launcher.LauncherState
+import com.relayhome.launcher.MetadataApiKeyAccess
 import com.relayhome.launcher.NuvioApi
 import com.relayhome.launcher.NuvioProfile
 import com.relayhome.launcher.NuvioSession
 import com.relayhome.launcher.NuvioSessionStore
+import com.relayhome.launcher.OmdbApi
+import com.relayhome.launcher.MediaScores
 import com.relayhome.launcher.ProviderHandoff
 import com.relayhome.launcher.ProfileImageSettings
 import com.relayhome.launcher.RelayDateFormat
@@ -27,13 +30,18 @@ import com.relayhome.launcher.TmdbApi
 import com.relayhome.launcher.WeatherApi
 import com.relayhome.launcher.WeatherCitySettings
 import com.relayhome.launcher.data.RelaySettingsRepository
+import com.relayhome.launcher.data.PersonalRating
+import com.relayhome.launcher.data.RelayRatingsStore
 import com.relayhome.launcher.ui.shared.Destination
+import com.relayhome.launcher.ui.shared.AppIconShape
+import com.relayhome.launcher.ui.shared.AppSortOrder
 import com.relayhome.launcher.ui.shared.Hero
 import com.relayhome.launcher.ui.shared.HomeRow
 import com.relayhome.launcher.ui.shared.MediaItem
 import com.relayhome.launcher.ui.shared.Provider
 import com.relayhome.launcher.ui.shared.HomeRowOrderStore
 import com.relayhome.launcher.ui.shared.RelayAppearance
+import com.relayhome.launcher.ui.shared.RelayPalette
 import com.relayhome.launcher.ui.shared.contentKey
 import com.relayhome.launcher.ui.shared.heroSubtitle
 import com.relayhome.launcher.ui.shared.midnight
@@ -45,6 +53,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -62,6 +73,9 @@ internal interface RelayHomeSystemActions {
     fun requestAutoStartAccessibility()
 }
 
+private const val MAX_OMDB_ITEMS_PER_BATCH = 18
+private const val OMDB_CONCURRENT_REQUESTS = 4
+
 internal data class RelayHomeUiState(
     val destination: Destination = Destination.HOME,
     val activeProvider: Provider = Provider.STREMIO,
@@ -77,8 +91,16 @@ internal data class RelayHomeUiState(
     val hiddenHomeRows: Set<HomeRow> = emptySet(),
     val minimalHomeEnabled: Boolean = false,
     val weatherCity: String = "",
+    val showHomeClock: Boolean = false,
     val profileImageUri: String? = null,
     val favoriteApps: Set<String> = emptySet(),
+    val hiddenApps: Set<String> = emptySet(),
+    val appSortOrder: AppSortOrder = AppSortOrder.ALPHABETICAL,
+    val appIconShape: AppIconShape = AppIconShape.MATCH_EACH_APP,
+    val personalRatings: Map<String, PersonalRating> = emptyMap(),
+    val mediaScores: Map<String, MediaScores> = emptyMap(),
+    val focusedArtworkKey: String? = null,
+    val focusedArtworkPalette: RelayPalette? = null,
     val smartTubeInstalled: Boolean = false,
     val continueWatchingLimits: Map<Provider, Int> = emptyMap(),
     val enabledProviders: Set<Provider> = emptySet(),
@@ -132,11 +154,14 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
     private var mediaJob: Job? = null
     private var tmdbJob: Job? = null
     private var detailEnrichmentJob: Job? = null
+    private var omdbJob: Job? = null
     private var heroRotationJob: Job? = null
     private var lastProfilePairingSignature: Pair<Int, List<String>>? = null
 
     init {
+        MetadataApiKeyAccess.configure(appContext)
         observeSettings()
+        observePersonalRatings()
         observeSmartTube()
         stateScope.launch {
             val initial = withContext(Dispatchers.IO) {
@@ -238,6 +263,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
     fun openMediaDetails(item: MediaItem) {
         detailEnrichmentJob?.cancel()
         _state.update { it.copy(selectedMedia = item, destination = Destination.DETAIL, peekProvider = null) }
+        requestOmdbRatings(listOf(item))
         if (Regex("(?i)S\\s*\\d+\\D{0,8}E\\s*\\d+").containsMatchIn(item.episodeInfo.orEmpty())) {
             detailEnrichmentJob = stateScope.launch {
                 val enriched = TmdbApi.enrichEpisodeDetails(item)
@@ -251,6 +277,20 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
 
     fun onHeroChanged(hero: Hero) {
         _state.update { it.copy(hero = hero) }
+    }
+
+    /**
+     * Home owns focus, but appearance is shared by every route. The key prevents a slow artwork
+     * extraction from a card that just lost focus from repainting Apps, Details, or Settings.
+     */
+    fun onFocusedArtworkPalette(key: String, palette: RelayPalette?) {
+        _state.update { current ->
+            if (palette != null && current.focusedArtworkKey != key) {
+                current
+            } else {
+                current.copy(focusedArtworkKey = key, focusedArtworkPalette = palette)
+            }
+        }
     }
 
     fun refreshNuvio() {
@@ -342,6 +382,45 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         }
     }
 
+    fun setPersonalRating(item: MediaItem, rating: PersonalRating) {
+        val key = item.contentKey()
+        _state.update { it.copy(personalRatings = it.personalRatings + (key to rating)) }
+        stateScope.launch(Dispatchers.IO) {
+            RelayRatingsStore.save(appContext, key, rating)
+        }
+    }
+
+    /** Requests optional score badges for currently visible media without blocking composition. */
+    fun requestOmdbRatings(items: List<MediaItem>) {
+        val targets = items
+            .asSequence()
+            .filter { it.title.isNotBlank() }
+            .distinctBy(MediaItem::contentKey)
+            .filterNot { it.contentKey() in _state.value.mediaScores }
+            .take(MAX_OMDB_ITEMS_PER_BATCH)
+            .toList()
+        if (targets.isEmpty()) return
+
+        omdbJob?.cancel()
+        omdbJob = stateScope.launch {
+            val fetched = targets.chunked(OMDB_CONCURRENT_REQUESTS).flatMap { batch ->
+                coroutineScope {
+                    batch.map { item ->
+                        async(Dispatchers.IO) {
+                            item.contentKey() to OmdbApi.metadataFor(item).getOrNull()
+                        }
+                    }.awaitAll()
+                }
+            }.mapNotNull { (key, ratings) ->
+                ratings?.takeIf { it.tmdbRating != null || it.omdbRatings?.isEmpty == false }
+                    ?.let { key to it }
+            }.toMap()
+            if (fetched.isNotEmpty()) {
+                _state.update { it.copy(mediaScores = it.mediaScores + fetched) }
+            }
+        }
+    }
+
     fun setContinueWatchingLimit(provider: Provider, limit: Int) {
         val next = _state.value.continueWatchingLimits + (provider to limit)
         _state.update { it.copy(continueWatchingLimits = next) }
@@ -382,6 +461,37 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         stateScope.launch(Dispatchers.IO) { WeatherCitySettings.save(appContext, normalized) }
     }
 
+    fun setShowHomeClock(enabled: Boolean) {
+        _state.update { it.copy(showHomeClock = enabled) }
+        stateScope.launch(Dispatchers.IO) {
+            RelaySettingsRepository.saveShowHomeClock(appContext, enabled)
+        }
+    }
+
+    fun setHiddenApp(packageName: String, hidden: Boolean) {
+        val normalized = packageName.trim()
+        if (normalized.isEmpty()) return
+        val next = if (hidden) _state.value.hiddenApps + normalized else _state.value.hiddenApps - normalized
+        _state.update { it.copy(hiddenApps = next) }
+        stateScope.launch(Dispatchers.IO) {
+            RelaySettingsRepository.saveHiddenAppPackages(appContext, next)
+        }
+    }
+
+    fun setAppSortOrder(order: AppSortOrder) {
+        _state.update { it.copy(appSortOrder = order) }
+        stateScope.launch(Dispatchers.IO) {
+            RelaySettingsRepository.saveAppSortOrder(appContext, order)
+        }
+    }
+
+    fun setAppIconShape(shape: AppIconShape) {
+        _state.update { it.copy(appIconShape = shape) }
+        stateScope.launch(Dispatchers.IO) {
+            RelaySettingsRepository.saveAppIconShape(appContext, shape)
+        }
+    }
+
     fun setProfileImage(uri: String?) {
         _state.update { it.copy(profileImageUri = uri) }
         stateScope.launch(Dispatchers.IO) {
@@ -406,6 +516,15 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         }
     }
 
+    private fun observePersonalRatings() {
+        stateScope.launch {
+            RelayRatingsStore.revision(appContext).collect {
+                val ratings = withContext(Dispatchers.IO) { RelayRatingsStore.loadAll(appContext) }
+                _state.update { it.copy(personalRatings = ratings) }
+            }
+        }
+    }
+
     private suspend fun reloadSettings() {
         val loaded = withContext(Dispatchers.IO) {
             val session = _state.value.nuvioSession
@@ -420,8 +539,12 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 hiddenHomeRows = HomeRowOrderStore.loadHiddenRows(appContext),
                 minimalHomeEnabled = HomeRowOrderStore.loadMinimalHomeEnabled(appContext),
                 weatherCity = WeatherCitySettings.load(appContext),
+                showHomeClock = RelaySettingsRepository.loadShowHomeClock(appContext),
                 profileImageUri = ProfileImageSettings.load(appContext),
                 favoriteApps = FavoriteAppsStore.load(appContext),
+                hiddenApps = RelaySettingsRepository.loadHiddenAppPackages(appContext),
+                appSortOrder = RelaySettingsRepository.loadAppSortOrder(appContext),
+                appIconShape = RelaySettingsRepository.loadAppIconShape(appContext),
                 smartTubeInstalled = ProviderHandoff.isSmartTubeInstalled(appContext),
                 continueWatchingLimits = ContinueWatchingLimits.load(appContext),
                 enabledProviders = com.relayhome.launcher.ProviderSettingsStore.load(appContext, defaults)
@@ -435,8 +558,12 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 hiddenHomeRows = loaded.hiddenHomeRows,
                 minimalHomeEnabled = loaded.minimalHomeEnabled,
                 weatherCity = loaded.weatherCity,
+                showHomeClock = loaded.showHomeClock,
                 profileImageUri = loaded.profileImageUri,
                 favoriteApps = loaded.favoriteApps,
+                hiddenApps = loaded.hiddenApps,
+                appSortOrder = loaded.appSortOrder,
+                appIconShape = loaded.appIconShape,
                 smartTubeInstalled = loaded.smartTubeInstalled,
                 continueWatchingLimits = loaded.continueWatchingLimits,
                 enabledProviders = loaded.enabledProviders
@@ -452,8 +579,12 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         val hiddenHomeRows: Set<HomeRow>,
         val minimalHomeEnabled: Boolean,
         val weatherCity: String,
+        val showHomeClock: Boolean,
         val profileImageUri: String?,
         val favoriteApps: Set<String>,
+        val hiddenApps: Set<String>,
+        val appSortOrder: AppSortOrder,
+        val appIconShape: AppIconShape,
         val smartTubeInstalled: Boolean,
         val continueWatchingLimits: Map<Provider, Int>,
         val enabledProviders: Set<Provider>

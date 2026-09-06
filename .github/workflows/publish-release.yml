@@ -135,6 +135,24 @@ jobs:
             exit 1
           }
 
+      - name: Run emulator instrumentation suite
+        # Keep release validation on the same emulator path as the normal CI connected suite.
+        # app/build.gradle.kts refuses physical ADB targets, so this cannot clean up a real TV.
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          RELAY_VERSION_CODE: ${{ inputs.version_code }}
+          RELAY_VERSION_NAME: ${{ inputs.version_name }}
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_2
+          cores: 2
+          ram-size: 2048M
+          heap-size: 512M
+          disable-animations: true
+          script: ./gradlew :app:connectedCheck
+
       - name: Configure release signing
         env:
           SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
@@ -169,7 +187,7 @@ jobs:
         run: |
           set -euo pipefail
           chmod +x gradlew
-          ./gradlew :app:lintRelease :app:testReleaseUnitTest :app:assembleRelease
+          ./gradlew :app:verifyRelayReleaseVersion :app:lintRelease :app:testReleaseUnitTest :app:assembleRelease
           mkdir -p release-assets
           APK="app/build/outputs/apk/release/app-release.apk"
           test -s "$APK"

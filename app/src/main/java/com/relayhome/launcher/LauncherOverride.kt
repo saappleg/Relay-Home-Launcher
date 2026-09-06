@@ -15,7 +15,7 @@ internal data class LauncherState(
     val stockLauncherOverride: StockLauncherOverride?,
     val diagnostics: LauncherDiagnostics = LauncherDiagnostics.empty()
 ) {
-    val relayIsDefault: Boolean get() = resolvedPackageName == RELAY_PACKAGE
+    val relayIsDefault: Boolean get() = resolvedPackageName == BuildConfig.APPLICATION_ID
 }
 
 internal data class StockLauncherOverride(
@@ -229,7 +229,7 @@ internal object LauncherOverride {
             stockLauncherOverride = detectedStock ?: rememberedStock,
             diagnostics = loadDiagnostics(
                 context,
-                resolvedPackage == RELAY_PACKAGE,
+                resolvedPackage == BuildConfig.APPLICATION_ID,
                 resolvedPackage?.let { packageName -> "$packageName/${resolvedActivity ?: "?"}" },
                 detectedStock ?: rememberedStock
             )
@@ -406,5 +406,3 @@ private fun JSONObject.optNullableString(key: String): String? =
 
 private fun launcherDeviceDescription(): String =
     "${Build.MANUFACTURER} ${Build.MODEL} · Android ${Build.VERSION.SDK_INT}"
-
-private const val RELAY_PACKAGE = "com.relayhome.launcher"

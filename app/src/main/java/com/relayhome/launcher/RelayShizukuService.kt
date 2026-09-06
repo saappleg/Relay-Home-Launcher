@@ -361,7 +361,7 @@ class RelayShizukuService : IRelayHomeShell.Stub() {
 
     private companion object {
         const val USER_ID = "0"
-        const val RELAY_PACKAGE = "com.relayhome.launcher"
+        val RELAY_PACKAGE = BuildConfig.APPLICATION_ID
         const val RELAY_ACTIVITY = "com.relayhome.launcher.MainActivity"
         val packagePattern = Regex("[A-Za-z0-9_.]+")
         val activityPattern = Regex("[A-Za-z0-9_.$]+")

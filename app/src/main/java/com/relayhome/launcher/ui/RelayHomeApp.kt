@@ -24,9 +24,8 @@ import com.relayhome.launcher.ui.shared.Destination
 import com.relayhome.launcher.ui.shared.dynamicRelayColorScheme
 import com.relayhome.launcher.ui.shared.ivory
 import com.relayhome.launcher.ui.shared.midnight
-import com.relayhome.launcher.ui.shared.paletteFor
 import com.relayhome.launcher.ui.shared.relayPaletteForAppearance
-import com.relayhome.launcher.ui.shared.violetPalette
+import com.relayhome.launcher.ui.shared.contentKey
 import com.relayhome.launcher.ui.state.RelayHomeStateHolder
 import com.relayhome.launcher.ui.state.RelayHomeSystemActions
 
@@ -42,11 +41,23 @@ internal fun RelayHomeApp(
     val context = LocalContext.current
     val state by stateHolder.state.collectAsState()
     val dynamicColorScheme = remember(context) { dynamicRelayColorScheme(context) }
-    val palette = relayPaletteForAppearance(state.appearance, dynamicColorScheme)
-    val materialColorScheme = if (state.appearance == com.relayhome.launcher.ui.shared.RelayAppearance.AUTOMATIC && dynamicColorScheme != null) {
-        dynamicColorScheme
-    } else {
-        darkColorScheme(background = midnight, onBackground = ivory)
+    val palette = relayPaletteForAppearance(
+        appearance = state.appearance,
+        dynamicColorScheme = dynamicColorScheme,
+        focusedArtworkPalette = state.focusedArtworkPalette
+    )
+    val materialColorScheme = when {
+        state.appearance == com.relayhome.launcher.ui.shared.RelayAppearance.AUTOMATIC && dynamicColorScheme != null -> dynamicColorScheme
+        state.appearance == com.relayhome.launcher.ui.shared.RelayAppearance.FROM_BACKDROP && state.focusedArtworkPalette != null ->
+            darkColorScheme(
+                primary = palette.accent,
+                primaryContainer = palette.glow,
+                background = palette.backdrop,
+                surface = midnight,
+                onBackground = ivory,
+                onSurface = ivory
+            )
+        else -> darkColorScheme(background = midnight, onBackground = ivory)
     }
 
     MaterialTheme(colorScheme = materialColorScheme) {
@@ -83,6 +94,7 @@ internal fun RelayHomeApp(
                     hiddenHomeRows = state.hiddenHomeRows,
                     minimalHomeEnabled = state.minimalHomeEnabled,
                     weatherCity = state.weatherCity,
+                    showHomeClock = state.showHomeClock,
                     smartTubeNowPlaying = state.smartTubeNowPlaying,
                     smartTubeFeedLoading = state.smartTubeFeedLoading,
                     smartTubeSubscriptions = state.smartTubeSubscriptions,
@@ -90,27 +102,38 @@ internal fun RelayHomeApp(
                     hiddenSmartTubeChannels = state.hiddenSmartTubeChannels,
                     continueWatchingLimits = state.continueWatchingLimits,
                     favoriteApps = state.favoriteApps,
+                    personalRatings = state.personalRatings,
+                    mediaScores = state.mediaScores,
                     nuvioProfiles = state.nuvioProfiles,
                     activeNuvioProfile = state.activeNuvioProfile,
                     profileImageUri = state.profileImageUri,
                     onRefreshNuvio = stateHolder::refreshNuvio,
-                    onNuvioProfileSelected = stateHolder::selectNuvioProfile
+                    onNuvioProfileSelected = stateHolder::selectNuvioProfile,
+                    onFocusedArtworkPalette = stateHolder::onFocusedArtworkPalette,
+                    onOmdbRatingsRequested = stateHolder::requestOmdbRatings
                 )
 
                 Destination.DETAIL -> DetailsScreen(
                     item = state.selectedMedia,
-                    palette = paletteFor(state.selectedMedia),
+                    palette = palette,
                     dateFormat = state.dateFormat,
                     nuvioSession = state.nuvioSession,
                     nuvioProfileId = state.activeNuvioProfile,
                     onLibraryChanged = stateHolder::refreshNuvio,
-                    onBackHome = stateHolder::returnHome
+                    onBackHome = stateHolder::returnHome,
+                    personalRating = state.personalRatings[state.selectedMedia.contentKey()],
+                    onPersonalRatingChanged = { rating -> stateHolder.setPersonalRating(state.selectedMedia, rating) },
+                    mediaScores = state.mediaScores[state.selectedMedia.contentKey()]
                 )
 
                 Destination.APPS -> AppsScreen(
                     palette = palette,
                     favoriteApps = state.favoriteApps,
+                    hiddenApps = state.hiddenApps,
+                    appSortOrder = state.appSortOrder,
+                    iconShape = state.appIconShape,
                     onFavoriteChanged = { packageName, _ -> stateHolder.toggleFavorite(packageName) },
+                    onHiddenChanged = stateHolder::setHiddenApp,
                     onBackHome = stateHolder::returnHome
                 )
 
@@ -146,6 +169,14 @@ internal fun RelayHomeApp(
                     onMinimalHomeEnabledChanged = stateHolder::setMinimalHomeEnabled,
                     weatherCity = state.weatherCity,
                     onWeatherCityChanged = stateHolder::setWeatherCity,
+                    showHomeClock = state.showHomeClock,
+                    onShowHomeClockChanged = stateHolder::setShowHomeClock,
+                    hiddenApps = state.hiddenApps,
+                    appSortOrder = state.appSortOrder,
+                    appIconShape = state.appIconShape,
+                    onHiddenAppChanged = stateHolder::setHiddenApp,
+                    onAppSortOrderChanged = stateHolder::setAppSortOrder,
+                    onAppIconShapeChanged = stateHolder::setAppIconShape,
                     profileImageUri = state.profileImageUri,
                     onProfileImageChanged = stateHolder::setProfileImage,
                     relayIsDefault = state.launcherState.relayIsDefault,
@@ -188,7 +219,7 @@ internal fun RelayHomeApp(
                 )
 
                 Destination.NUVIO_CONNECT -> NuvioConnectScreen(
-                    palette = violetPalette,
+                    palette = palette,
                     connected = state.nuvioSession != null,
                     reauthRequired = state.nuvioAuthRequired,
                     onConnected = stateHolder::onNuvioConnected,

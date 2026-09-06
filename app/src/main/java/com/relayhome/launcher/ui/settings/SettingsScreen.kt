@@ -14,7 +14,6 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
-import android.view.KeyEvent
 import android.view.ViewConfiguration
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -77,12 +76,14 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
@@ -111,8 +112,13 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.Key as ComposeKey
+import androidx.compose.ui.input.key.key as composeKey
+import androidx.compose.ui.input.key.type as composeKeyType
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.vectorResource
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -129,6 +135,12 @@ import androidx.core.graphics.drawable.toBitmap
 import androidx.palette.graphics.Palette
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.relayhome.launcher.data.MetadataKeyService
+import com.relayhome.launcher.data.MetadataKeyRemoteValidationHook
+import com.relayhome.launcher.data.MetadataKeyValidationHook
+import com.relayhome.launcher.data.RelayMetadataApiKeyValidationHook
+import com.relayhome.launcher.data.RelayMetadataApiKeyRemoteValidation
+import com.relayhome.launcher.data.RelaySettingsRepository
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.EncodeHintType
 import com.google.zxing.MultiFormatWriter
@@ -142,8 +154,43 @@ import java.time.LocalDate
 import java.time.YearMonth
 
 
-internal enum class SettingsPage(val label: String) {
-    STATUS("Relay status"), DISPLAY("Display"), PROVIDERS("Providers"), PROFILE("Profile"), SUBSCRIPTIONS("Subscriptions"), UPDATES("Updates"), LAUNCHER("Launcher"), SYSTEM("System")
+internal enum class SettingsCategory(val label: String, val description: String) {
+    APPEARANCE("Appearance", "Theme and date presentation"),
+    HOME_LAYOUT("Home Layout", "Rows, visibility, and wallpaper mode"),
+    APPS("Apps", "All Apps and favorite app preferences"),
+    PROVIDERS_ACCOUNTS("Providers & Accounts", "Connections, profiles, and subscriptions"),
+    WEATHER_WIDGETS("Weather & Widgets", "Local weather shown on Home"),
+    DATA_SOURCES("Data Sources", "Metadata services and API keys"),
+    LAUNCHER_UPDATES("Launcher & Updates", "Home role, diagnostics, and releases")
+}
+
+internal enum class LauncherSetupMode(val label: String) {
+    ADVANCED("Advanced Mode"),
+    COMPATIBILITY("Compatibility Mode")
+}
+
+/**
+ * Maps the persisted launcher evidence to the user-facing setup mode. A compatibility event is
+ * intentionally treated as observed rather than verified: Accessibility can launch Relay, but it
+ * cannot prove that Android's Home resolver selected it.
+ */
+internal fun launcherSetupModeForDiagnostics(
+    diagnostics: LauncherDiagnostics,
+    relayIsDefault: Boolean
+): LauncherSetupMode? {
+    val advancedStrategy = diagnostics.activeStrategyKey in setOf(
+        LauncherOverrideStrategy.COMPONENT_DISABLE,
+        LauncherOverrideStrategy.PACKAGE_LEVEL,
+        LauncherOverrideStrategy.HOME_PRIORITY
+    )
+    if (relayIsDefault && advancedStrategy) return LauncherSetupMode.ADVANCED
+
+    val latestAccessibilityEvent = diagnostics.events
+        .asReversed()
+        .firstOrNull { it.strategy == LauncherOverrideStrategy.ACCESSIBILITY }
+    return latestAccessibilityEvent
+        ?.takeIf { it.outcome == "started" || it.outcome == "unverified" }
+        ?.let { LauncherSetupMode.COMPATIBILITY }
 }
 
 internal data class SystemSettingsEntry(val label: String, val action: String, val symbol: String)
@@ -166,6 +213,13 @@ internal fun openSystemSettings(context: android.content.Context, action: String
     val fallback = Intent(Settings.ACTION_SETTINGS)
     runCatching {
         context.startActivity(if (requested.resolveActivity(context.packageManager) != null) requested else fallback)
+    }
+}
+
+internal fun openExternalUrl(context: Context, url: String) {
+    runCatching {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url))
+        if (intent.resolveActivity(context.packageManager) != null) context.startActivity(intent)
     }
 }
 
@@ -202,6 +256,14 @@ internal fun SettingsScreen(
     onMinimalHomeEnabledChanged: (Boolean) -> Unit,
     weatherCity: String,
     onWeatherCityChanged: (String) -> Unit,
+    showHomeClock: Boolean = false,
+    onShowHomeClockChanged: (Boolean) -> Unit = {},
+    hiddenApps: Set<String> = emptySet(),
+    appSortOrder: AppSortOrder = AppSortOrder.ALPHABETICAL,
+    appIconShape: AppIconShape = AppIconShape.MATCH_EACH_APP,
+    onHiddenAppChanged: (String, Boolean) -> Unit = { _, _ -> },
+    onAppSortOrderChanged: (AppSortOrder) -> Unit = {},
+    onAppIconShapeChanged: (AppIconShape) -> Unit = {},
     profileImageUri: String?,
     onProfileImageChanged: (String?) -> Unit,
     relayIsDefault: Boolean,
@@ -209,9 +271,11 @@ internal fun SettingsScreen(
     onLauncherChanged: () -> Unit
 ) {
     val context = LocalContext.current
-    var page by remember { mutableStateOf(SettingsPage.DISPLAY) }
+    val installedApps = rememberInstalledApps(context)
+    val settingsRevision by RelaySettingsRepository.revision(context).collectAsState()
+    var selectedCategory by remember { mutableStateOf<SettingsCategory?>(null) }
+    var lastFocusedRootCategory by remember { mutableStateOf(SettingsCategory.APPEARANCE) }
     var showAdvancedHomeSetup by remember { mutableStateOf(false) }
-    var showSmartTubeAdbSetup by remember { mutableStateOf(false) }
     var shizukuMessage by remember { mutableStateOf<String?>(null) }
     var shizukuWorking by remember { mutableStateOf(false) }
     var includeBetaUpdates by remember { mutableStateOf(RelayUpdateSettings.includesBetas(context)) }
@@ -229,11 +293,10 @@ internal fun SettingsScreen(
         reordered.add(to, moved)
         onHomeRowOrderChanged(reordered)
     }
-    // The previous one-item LazyColumn made focus treat an entire Settings page as a single
-    // oversized target, causing it to jump when crossing between the left and right columns.
-    // A regular scroll container lets focus reveal only the actual control being selected.
-    val settingsContentState = rememberScrollState()
-    val settingsNavigationState = rememberScrollState()
+    val rootScrollState = rememberScrollState()
+    val detailScrollStates = remember {
+        SettingsCategory.entries.associateWith { androidx.compose.foundation.ScrollState(0) }
+    }
     val shizukuReadinessRevision = RelayShizuku.readinessRevisionForUi
     val shizukuReady = remember(shizukuReadinessRevision) { RelayShizuku.isReady() }
     val launcherDiagnostics = LauncherOverride.loadDiagnostics(
@@ -241,6 +304,12 @@ internal fun SettingsScreen(
         relayIsDefault = relayIsDefault,
         stockLauncherOverride = stockLauncherOverride
     )
+    val diagnosticLauncherMode = launcherSetupModeForDiagnostics(launcherDiagnostics, relayIsDefault)
+    var selectedLauncherMode by remember(
+        diagnosticLauncherMode,
+        launcherDiagnostics.lastOperation,
+        launcherDiagnostics.events.size
+    ) { mutableStateOf(diagnosticLauncherMode ?: LauncherSetupMode.ADVANCED) }
     fun applyRelayHomeWithShizuku() {
         if (shizukuWorking) return
         if (!shizukuReady) {
@@ -283,41 +352,188 @@ internal fun SettingsScreen(
             onProfileImageChanged(it.toString())
         }
     }
-    // A selected Settings category can reuse this screen while its old list offset is still
-    // remembered. Reset it before handing focus to the newly-selected content so its heading
-    // is never left above the rounded panel.
-    val backHomeFocusRequester = remember { FocusRequester() }
-    val pageNavigationFocusRequesters = remember {
-        SettingsPage.entries.associateWith { FocusRequester() }
+    val rootFocusRequesters = remember {
+        SettingsCategory.entries.associateWith { FocusRequester() }
     }
-    val pageContentFocusRequester = remember(page) { FocusRequester() }
-    val pageContentRouteRequester = remember { FocusRequester() }
-    var pageContentRouteFocused by remember { mutableStateOf(false) }
-    LaunchedEffect(pageContentRouteFocused, page) {
-        if (pageContentRouteFocused) {
-            // The page's first control changes with the selected category. Route navigation to a
-            // permanent bridge, then hand focus to the newly mounted control after composition.
+    val rootBackFocusRequester = remember { FocusRequester() }
+    val detailBackFocusRequester = remember { FocusRequester() }
+    val detailFirstFocusRequester = remember(selectedCategory) { FocusRequester() }
+
+    LaunchedEffect(selectedCategory) {
+        if (selectedCategory == null) {
             withFrameNanos { }
-            if (runCatching { pageContentFocusRequester.requestFocus() }.isFailure) {
-                runCatching { pageNavigationFocusRequesters.getValue(page).requestFocus() }
+            runCatching { rootFocusRequesters.getValue(lastFocusedRootCategory).requestFocus() }
+        } else {
+            detailScrollStates.getValue(selectedCategory!!).scrollTo(0)
+            withFrameNanos { }
+            runCatching { detailFirstFocusRequester.requestFocus() }
+        }
+    }
+
+    BackHandler {
+        if (selectedCategory == null) onBackHome() else selectedCategory = null
+    }
+
+    if (selectedCategory == null) {
+        SettingsCategoryRoot(
+            palette = palette,
+            scrollState = rootScrollState,
+            focusRequesters = rootFocusRequesters,
+            backFocusRequester = rootBackFocusRequester,
+            onCategoryFocused = { lastFocusedRootCategory = it },
+            onCategorySelected = {
+                lastFocusedRootCategory = it
+                selectedCategory = it
+            },
+            onBackHome = onBackHome
+        )
+    } else {
+        val category = selectedCategory!!
+        SettingsCategoryDetail(
+            category = category,
+            palette = palette,
+            scrollState = detailScrollStates.getValue(category),
+            backFocusRequester = detailBackFocusRequester,
+            firstContentFocusRequester = detailFirstFocusRequester,
+            onBack = { selectedCategory = null }
+        ) {
+            when (category) {
+                SettingsCategory.APPEARANCE -> AppearanceSettings(
+                    appearance = appearance,
+                    dateFormat = dateFormat,
+                    palette = palette,
+                    firstFocusRequester = detailFirstFocusRequester,
+                    backFocusRequester = detailBackFocusRequester,
+                    onAppearanceChanged = onAppearanceChanged,
+                    onDateFormatChanged = onDateFormatChanged
+                )
+                SettingsCategory.HOME_LAYOUT -> HomeLayoutSettings(
+                    palette = palette,
+                    homeRowOrder = homeRowOrder,
+                    hiddenHomeRows = hiddenHomeRows,
+                    minimalHomeEnabled = minimalHomeEnabled,
+                    firstFocusRequester = detailFirstFocusRequester,
+                    backFocusRequester = detailBackFocusRequester,
+                    onHomeRowOrderChanged = onHomeRowOrderChanged,
+                    onHomeRowVisibilityChanged = onHomeRowVisibilityChanged,
+                    onMinimalHomeEnabledChanged = onMinimalHomeEnabledChanged,
+                    moveHomeRow = ::moveHomeRow
+                )
+                SettingsCategory.APPS -> AppsSettings(
+                    palette = palette,
+                    installedApps = installedApps,
+                    hiddenApps = hiddenApps,
+                    appSortOrder = appSortOrder,
+                    appIconShape = appIconShape,
+                    firstFocusRequester = detailFirstFocusRequester,
+                    backFocusRequester = detailBackFocusRequester,
+                    onHiddenAppChanged = onHiddenAppChanged,
+                    onAppSortOrderChanged = onAppSortOrderChanged,
+                    onAppIconShapeChanged = onAppIconShapeChanged,
+                    onClearHiddenApps = { hiddenApps.forEach { onHiddenAppChanged(it, false) } }
+                )
+                SettingsCategory.PROVIDERS_ACCOUNTS -> ProvidersAccountsSettings(
+                    palette = palette,
+                    providers = providers,
+                    onProviderToggle = onProviderToggle,
+                    onManageProvider = onManageProvider,
+                    continueWatchingLimits = continueWatchingLimits,
+                    onContinueWatchingLimitChanged = onContinueWatchingLimitChanged,
+                    nuvioConnected = nuvioConnected,
+                    nuvioSyncing = nuvioSyncing,
+                    nuvioItemCount = nuvioItemCount,
+                    nuvioSyncError = nuvioSyncError,
+                    onRefreshNuvio = onRefreshNuvio,
+                    smartTubeSubscriptions = smartTubeSubscriptions,
+                    smartTubeInstalled = smartTubeInstalled,
+                    hiddenSmartTubeChannels = hiddenSmartTubeChannels,
+                    onSmartTubeChannelVisible = onSmartTubeChannelVisible,
+                    profileImageUri = profileImageUri,
+                    webProfileUrl = webProfileUrl,
+                    profileUrlError = profileUrlError,
+                    firstFocusRequester = detailFirstFocusRequester,
+                    backFocusRequester = detailBackFocusRequester,
+                    onProfileImageChanged = onProfileImageChanged,
+                    onPickProfileImage = { profileImagePicker.launch(arrayOf("image/*")) },
+                    onWebProfileUrlChanged = { webProfileUrl = it; profileUrlError = null },
+                    onProfileUrlError = { profileUrlError = it }
+                )
+                SettingsCategory.WEATHER_WIDGETS -> WeatherWidgetsSettings(
+                    palette = palette,
+                    weatherCityDraft = weatherCityDraft,
+                    showHomeClock = showHomeClock,
+                    firstFocusRequester = detailFirstFocusRequester,
+                    backFocusRequester = detailBackFocusRequester,
+                    onDraftChanged = { weatherCityDraft = it.take(80) },
+                    onWeatherCityChanged = {
+                        val normalized = WeatherApi.normalizeCity(weatherCityDraft)
+                        weatherCityDraft = normalized
+                        onWeatherCityChanged(normalized)
+                    },
+                    onClear = {
+                        weatherCityDraft = ""
+                        onWeatherCityChanged("")
+                    },
+                    onShowHomeClockChanged = onShowHomeClockChanged
+                )
+                SettingsCategory.DATA_SOURCES -> DataSourcesSettings(
+                    palette = palette,
+                    context = context,
+                    settingsRevision = settingsRevision,
+                    firstFocusRequester = detailFirstFocusRequester,
+                    backFocusRequester = detailBackFocusRequester
+                )
+                SettingsCategory.LAUNCHER_UPDATES -> LauncherUpdatesSettings(
+                    context = context,
+                    palette = palette,
+                    relayIsDefault = relayIsDefault,
+                    stockLauncherOverride = stockLauncherOverride,
+                    launcherDiagnostics = launcherDiagnostics,
+                    selectedLauncherMode = selectedLauncherMode,
+                    activeLauncherMode = diagnosticLauncherMode,
+                    shizukuReady = shizukuReady,
+                    shizukuWorking = shizukuWorking,
+                    shizukuMessage = shizukuMessage,
+                    includeBetaUpdates = includeBetaUpdates,
+                    availableRelease = availableRelease,
+                    updateMessage = updateMessage,
+                    updateWorking = updateWorking,
+                    showAdvancedHomeSetup = showAdvancedHomeSetup,
+                    firstFocusRequester = detailFirstFocusRequester,
+                    backFocusRequester = detailBackFocusRequester,
+                    onRequestHome = onRequestHome,
+                    onRequestAutoStart = onRequestAutoStart,
+                    onLauncherModeSelected = { selectedLauncherMode = it },
+                    onShizukuMessage = { shizukuMessage = it },
+                    onIncludeBetaUpdates = {
+                        includeBetaUpdates = it
+                        RelayUpdateSettings.setIncludesBetas(context, it)
+                        availableRelease = null
+                        updateMessage = null
+                    },
+                    onAvailableRelease = { availableRelease = it },
+                    onUpdateMessage = { updateMessage = it },
+                    onUpdateWorking = { updateWorking = it },
+                    onToggleAdvancedHomeSetup = { showAdvancedHomeSetup = !showAdvancedHomeSetup },
+                    onApplyRelayHomeWithShizuku = ::applyRelayHomeWithShizuku,
+                    onRestoreStockLauncherWithShizuku = ::restoreStockLauncherWithShizuku,
+                    updateScope = updateScope
+                )
             }
         }
     }
-    var settingsHasInitialFocus by remember { mutableStateOf(false) }
-    LaunchedEffect(page) {
-        settingsContentState.scrollTo(0)
-        withFrameNanos { }
-        if (!settingsHasInitialFocus) {
-            settingsHasInitialFocus = true
-            pageContentFocusRequester.requestFocus()
-        } else {
-            // Keep the selected category visible while opening its content at the top. Focusing
-            // the first control here makes Compose center that control and hides the section
-            // heading on long pages, which is especially confusing on a TV.
-            pageNavigationFocusRequesters[page]?.requestFocus()
-        }
-    }
-    BackHandler(onBack = onBackHome)
+}
+
+@Composable
+internal fun SettingsCategoryRoot(
+    palette: RelayPalette,
+    scrollState: androidx.compose.foundation.ScrollState,
+    focusRequesters: Map<SettingsCategory, FocusRequester>,
+    backFocusRequester: FocusRequester,
+    onCategoryFocused: (SettingsCategory) -> Unit,
+    onCategorySelected: (SettingsCategory) -> Unit,
+    onBackHome: () -> Unit
+) {
     Column(Modifier.fillMaxSize().padding(horizontal = 58.dp, vertical = 42.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Settings", color = ivory, fontSize = 34.sp, fontWeight = FontWeight.Light)
@@ -326,644 +542,1211 @@ internal fun SettingsScreen(
                 "Back to Home",
                 palette,
                 primary = false,
-                focusRequester = backHomeFocusRequester,
-                downFocusRequester = pageNavigationFocusRequesters[page],
+                focusRequester = backFocusRequester,
+                downFocusRequester = focusRequesters[SettingsCategory.APPEARANCE],
                 onClick = onBackHome
             )
         }
         Spacer(Modifier.height(24.dp))
-        Row(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(24.dp)) {
-            Column(
-                Modifier.width(230.dp).fillMaxHeight().clip(RoundedCornerShape(18.dp))
-                    .background(Color(0xFF101218)).verticalScroll(settingsNavigationState).padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .clip(RoundedCornerShape(18.dp))
+                .background(Color(0xFF101218))
+                .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(18.dp))
+                .verticalScroll(scrollState)
+                .padding(30.dp)
+                .testTag("settings-category-root"),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            SettingsCategory.entries.forEach { category ->
+                SettingsCategoryEntry(
+                    category = category,
+                    palette = palette,
+                    focusRequester = focusRequesters.getValue(category),
+                    upFocusRequester = if (category == SettingsCategory.APPEARANCE) backFocusRequester else null,
+                    onFocused = { if (it) onCategoryFocused(category) },
+                    onClick = { onCategorySelected(category) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun SettingsCategoryEntry(
+    category: SettingsCategory,
+    palette: RelayPalette,
+    focusRequester: FocusRequester,
+    upFocusRequester: FocusRequester?,
+    onFocused: (Boolean) -> Unit,
+    onClick: () -> Unit
+) {
+    val source = remember { MutableInteractionSource() }
+    val focused by source.collectIsFocusedAsState()
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .focusRequester(focusRequester)
+            .then(if (upFocusRequester != null) Modifier.focusProperties { up = upFocusRequester } else Modifier)
+            .onFocusChanged { onFocused(it.hasFocus) }
+            .clip(RoundedCornerShape(14.dp))
+            .background(if (focused) palette.accent.copy(alpha = .20f) else Color(0xFF171A20))
+            .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .08f), RoundedCornerShape(14.dp))
+            .clickable(interactionSource = source, indication = null, onClick = onClick)
+            .padding(horizontal = 22.dp, vertical = 18.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(category.label, color = ivory, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(4.dp))
+            Text(category.description, color = muted, fontSize = 14.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        }
+        Text("›", color = if (focused) palette.accent else muted, fontSize = 30.sp, fontWeight = FontWeight.Light)
+    }
+}
+
+@Composable
+internal fun SettingsCategoryDetail(
+    category: SettingsCategory,
+    palette: RelayPalette,
+    scrollState: androidx.compose.foundation.ScrollState,
+    backFocusRequester: FocusRequester,
+    firstContentFocusRequester: FocusRequester,
+    onBack: () -> Unit,
+    content: @Composable () -> Unit
+) {
+    Column(Modifier.fillMaxSize().padding(horizontal = 58.dp, vertical = 42.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            ActionButton(
+                "Back to Settings",
+                palette,
+                primary = false,
+                focusRequester = backFocusRequester,
+                downFocusRequester = firstContentFocusRequester,
+                onClick = onBack
+            )
+            Spacer(Modifier.width(24.dp))
+            Column {
+                Text(category.label, color = ivory, fontSize = 34.sp, fontWeight = FontWeight.Light)
+                Text(category.description, color = muted, fontSize = 14.sp)
+            }
+        }
+        Spacer(Modifier.height(24.dp))
+    Column(
+        Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .clip(RoundedCornerShape(18.dp))
+                .background(Color(0xFF101218))
+                .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(18.dp))
+                .verticalScroll(scrollState)
+                .padding(30.dp)
+                .testTag("settings-category-detail-${category.name}")
+                .focusGroup()
+                .onPreviewKeyEvent { event ->
+                    if (event.composeKeyType == KeyEventType.KeyUp && event.composeKey == ComposeKey.Back) {
+                        onBack()
+                        true
+                    } else {
+                        false
+                    }
+                }
+        ) {
+            content()
+        }
+    }
+}
+
+@Composable
+private fun AppearanceSettings(
+    appearance: RelayAppearance,
+    dateFormat: RelayDateFormat,
+    palette: RelayPalette,
+    firstFocusRequester: FocusRequester,
+    backFocusRequester: FocusRequester,
+    onAppearanceChanged: (RelayAppearance) -> Unit,
+    onDateFormatChanged: (RelayDateFormat) -> Unit
+) {
+    SettingsSectionTitle("Theme", "Choose how Relay looks throughout the launcher.")
+    Spacer(Modifier.height(20.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        RelayAppearance.entries.forEachIndexed { index, option ->
+            ActionButton(
+                option.label,
+                palette.copy(accent = if (option == RelayAppearance.AUTOMATIC) palette.accent else when (option) {
+                    RelayAppearance.ORBITAL -> orbitalPalette.accent
+                    RelayAppearance.VIOLET -> violetPalette.accent
+                    RelayAppearance.AUTOMATIC -> palette.accent
+                    RelayAppearance.FROM_BACKDROP -> palette.accent
+                }),
+                primary = appearance == option,
+                focusRequester = if (index == 0) firstFocusRequester else null,
+                upFocusRequester = if (index == 0) backFocusRequester else null,
+                onClick = { onAppearanceChanged(option) }
+            )
+        }
+    }
+    Spacer(Modifier.height(30.dp))
+    Text("Date format", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+    Spacer(Modifier.height(7.dp))
+    Text("Used for Coming Up, media details, and Calendar.", color = muted, fontSize = 15.sp)
+    Spacer(Modifier.height(16.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+        RelayDateFormat.entries.forEach { format ->
+            ActionButton(format.label, palette, primary = dateFormat == format, onClick = { onDateFormatChanged(format) })
+        }
+    }
+}
+
+@Composable
+private fun HomeLayoutSettings(
+    palette: RelayPalette,
+    homeRowOrder: List<HomeRow>,
+    hiddenHomeRows: Set<HomeRow>,
+    minimalHomeEnabled: Boolean,
+    firstFocusRequester: FocusRequester,
+    backFocusRequester: FocusRequester,
+    onHomeRowOrderChanged: (List<HomeRow>) -> Unit,
+    onHomeRowVisibilityChanged: (HomeRow, Boolean) -> Unit,
+    onMinimalHomeEnabledChanged: (Boolean) -> Unit,
+    moveHomeRow: (Int, Int) -> Unit
+) {
+    SettingsSectionTitle("Home rows", "Choose the order of rows on Home. Rows with no content are skipped automatically.")
+    Spacer(Modifier.height(20.dp))
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(Color(0xFF171A20))
+            .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(13.dp))
+            .padding(start = 16.dp, end = 10.dp, top = 12.dp, bottom = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("Minimal / Wallpaper Home", color = ivory, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(3.dp))
+            Text("Show the ambient wallpaper and Favorite Apps only. Hero and media rows stay hidden until this is turned off.", color = muted, fontSize = 13.sp, lineHeight = 18.sp)
+        }
+        androidx.compose.material3.Switch(
+            checked = minimalHomeEnabled,
+            onCheckedChange = onMinimalHomeEnabledChanged,
+            modifier = Modifier.focusRequester(firstFocusRequester).focusProperties { up = backFocusRequester }
+        )
+    }
+    Spacer(Modifier.height(15.dp))
+    homeRowOrder.forEachIndexed { index, row ->
+        key(row.name) {
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(Color(0xFF171A20))
+                    .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(13.dp))
+                    .padding(start = 16.dp, end = 10.dp, top = 9.dp, bottom = 9.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                SettingsPage.entries.forEach { destination ->
-                    SettingsNavigationItem(
-                        label = destination.label,
-                        selected = page == destination,
-                        palette = palette,
-                        focusRequester = pageNavigationFocusRequesters[destination],
-                        upFocusRequester = if (destination == SettingsPage.entries.first()) backHomeFocusRequester else null,
-                        rightFocusRequester = if (destination == page) pageContentRouteRequester else null
-                    ) { page = destination }
+                Text("${index + 1}. ${row.label}", color = ivory, fontSize = 16.sp, modifier = Modifier.weight(1f))
+                androidx.compose.material3.Switch(
+                    checked = row !in hiddenHomeRows,
+                    onCheckedChange = { visible -> onHomeRowVisibilityChanged(row, visible) }
+                )
+                Spacer(Modifier.width(8.dp))
+                ActionButton("↑", palette, primary = false, onClick = { moveHomeRow(index, index - 1) })
+                Spacer(Modifier.width(8.dp))
+                ActionButton("↓", palette, primary = false, onClick = { moveHomeRow(index, index + 1) })
+            }
+        }
+        Spacer(Modifier.height(8.dp))
+    }
+    ActionButton(
+        "Reset row order",
+        palette,
+        primary = false,
+        focusRequester = if (homeRowOrder.isEmpty()) firstFocusRequester else null,
+        upFocusRequester = if (homeRowOrder.isEmpty()) backFocusRequester else null,
+        onClick = { onHomeRowOrderChanged(HomeRow.entries) }
+    )
+}
+
+@Composable
+private fun AppsSettings(
+    palette: RelayPalette,
+    installedApps: List<InstalledApp>,
+    hiddenApps: Set<String>,
+    appSortOrder: AppSortOrder,
+    appIconShape: AppIconShape,
+    firstFocusRequester: FocusRequester,
+    backFocusRequester: FocusRequester,
+    onHiddenAppChanged: (String, Boolean) -> Unit,
+    onAppSortOrderChanged: (AppSortOrder) -> Unit,
+    onAppIconShapeChanged: (AppIconShape) -> Unit,
+    onClearHiddenApps: () -> Unit
+) {
+    SettingsSectionTitle("All Apps", "Control which apps appear, how they are ordered, and how their icons are shaped.")
+    Spacer(Modifier.height(20.dp))
+    Text("Sort order", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+    Spacer(Modifier.height(7.dp))
+    Text("Recently used and recently installed use local device metadata. Apps without history use a stable A–Z fallback.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+    Spacer(Modifier.height(14.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        AppSortOrder.entries.forEachIndexed { index, order ->
+            ActionButton(
+                order.label,
+                palette,
+                primary = appSortOrder == order,
+                focusRequester = if (index == 0) firstFocusRequester else null,
+                upFocusRequester = if (index == 0) backFocusRequester else null,
+                onClick = { onAppSortOrderChanged(order) }
+            )
+        }
+    }
+    Spacer(Modifier.height(26.dp))
+    Text("Icon shape", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+    Spacer(Modifier.height(7.dp))
+    Text("Choose a consistent TV treatment or preserve each app's native artwork shape.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+    Spacer(Modifier.height(14.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        AppIconShape.entries.forEach { shape ->
+            ActionButton(
+                shape.label,
+                palette,
+                primary = appIconShape == shape,
+                onClick = { onAppIconShapeChanged(shape) }
+            )
+        }
+    }
+    Spacer(Modifier.height(26.dp))
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text("Hidden apps", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(5.dp))
+            Text(
+                if (hiddenApps.isEmpty()) "No apps are hidden from All Apps."
+                else "${hiddenApps.size} app${if (hiddenApps.size == 1) " is" else "s are"} hidden from All Apps.",
+                color = muted,
+                fontSize = 14.sp
+            )
+        }
+        if (hiddenApps.isNotEmpty()) {
+            ActionButton("Show all", palette, primary = false, onClick = onClearHiddenApps)
+        }
+    }
+    if (hiddenApps.isNotEmpty()) {
+        Spacer(Modifier.height(12.dp))
+        installedApps
+            .filter { it.packageName in hiddenApps }
+            .sortedWith(compareBy<InstalledApp> { it.label.lowercase() }.thenBy { it.packageName })
+            .forEach { app ->
+                Row(
+                    Modifier.fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0xFF171A20))
+                        .padding(horizontal = 14.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(app.label, color = ivory, fontSize = 15.sp, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Spacer(Modifier.width(12.dp))
+                    ActionButton("Show", palette, primary = false, onClick = { onHiddenAppChanged(app.packageName, false) })
+                }
+                Spacer(Modifier.height(7.dp))
+            }
+    }
+}
+
+@Composable
+private fun SettingsPlaceholder(
+    title: String,
+    detail: String,
+    palette: RelayPalette,
+    focusRequester: FocusRequester,
+    upFocusRequester: FocusRequester
+) {
+    SettingsSectionTitle(title, detail)
+    Spacer(Modifier.height(24.dp))
+    ActionButton(
+        "Nothing to configure yet",
+        palette,
+        primary = false,
+        focusRequester = focusRequester,
+        upFocusRequester = upFocusRequester,
+        onClick = {}
+    )
+}
+
+@Composable
+private fun ProvidersAccountsSettings(
+    palette: RelayPalette,
+    providers: Set<Provider>,
+    onProviderToggle: (Provider) -> Unit,
+    onManageProvider: (Provider) -> Unit,
+    continueWatchingLimits: Map<Provider, Int>,
+    onContinueWatchingLimitChanged: (Provider, Int) -> Unit,
+    nuvioConnected: Boolean,
+    nuvioSyncing: Boolean,
+    nuvioItemCount: Int,
+    nuvioSyncError: String?,
+    onRefreshNuvio: () -> Unit,
+    smartTubeSubscriptions: List<SmartTubeSubscriptionVideo>,
+    smartTubeInstalled: Boolean,
+    hiddenSmartTubeChannels: Set<String>,
+    onSmartTubeChannelVisible: (String, Boolean) -> Unit,
+    profileImageUri: String?,
+    webProfileUrl: String,
+    profileUrlError: String?,
+    firstFocusRequester: FocusRequester,
+    backFocusRequester: FocusRequester,
+    onProfileImageChanged: (String?) -> Unit,
+    onPickProfileImage: () -> Unit,
+    onWebProfileUrlChanged: (String) -> Unit,
+    onProfileUrlError: (String?) -> Unit
+) {
+    SettingsSectionTitle("Provider status", "Connect services here, then choose which ones appear in Relay's Home navigation.")
+    Spacer(Modifier.height(20.dp))
+    StatusCard(
+        title = "Nuvio",
+        detail = when {
+            !nuvioConnected -> "Not connected"
+            nuvioSyncing -> "Syncing active profile…"
+            nuvioSyncError != null -> nuvioSyncError
+            else -> "Connected · $nuvioItemCount Continue Watching item${if (nuvioItemCount == 1) "" else "s"} available"
+        },
+        healthy = nuvioConnected && nuvioSyncError == null,
+        palette = palette.copy(accent = Provider.NUVIO.accent),
+        focusRequester = firstFocusRequester,
+        upFocusRequester = backFocusRequester
+    ) {
+        if (nuvioConnected) onRefreshNuvio() else onManageProvider(Provider.NUVIO)
+    }
+    Spacer(Modifier.height(12.dp))
+    StatusCard(
+        title = "SmartTube",
+        detail = when {
+            !smartTubeInstalled -> "App not installed"
+            smartTubeSubscriptions.isNotEmpty() -> "Connected · ${smartTubeSubscriptions.size} subscription video${if (smartTubeSubscriptions.size == 1) "" else "s"} received"
+            else -> "Installed · waiting for RelayTube/SmartTube shared data"
+        },
+        healthy = smartTubeInstalled && smartTubeSubscriptions.isNotEmpty(),
+        palette = palette.copy(accent = Provider.SMARTTUBE.accent)
+    ) { onManageProvider(Provider.SMARTTUBE) }
+    Spacer(Modifier.height(24.dp))
+    Text("Media providers", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+    Spacer(Modifier.height(7.dp))
+    Provider.entries.forEach { provider ->
+        val connected = provider in providers
+        Column(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(15.dp)).background(Color(0xFF171A20))
+                .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(15.dp)).padding(18.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(9.dp).clip(CircleShape).background(provider.accent))
+                Spacer(Modifier.width(10.dp))
+                Text(provider.label, color = ivory, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+                Spacer(Modifier.weight(1f))
+                Text(if (connected) "Shown on Home" else "Hidden from Home", color = muted, fontSize = 14.sp)
+            }
+            Spacer(Modifier.height(15.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                ActionButton(if (connected) "Hide from Home" else "Show on Home", palette.copy(accent = provider.accent), primary = connected) {
+                    onProviderToggle(provider)
+                }
+                ActionButton(if (provider == Provider.NUVIO && nuvioConnected) "Manage connection" else "Connect", palette.copy(accent = provider.accent), primary = false) {
+                    onManageProvider(provider)
                 }
             }
-            Column(
-                Modifier.weight(1f).fillMaxHeight().clip(RoundedCornerShape(18.dp))
-                    .background(Color(0xFF101218)).border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(18.dp))
-                    .verticalScroll(settingsContentState).padding(30.dp)
-            ) {
-                Box(
-                    Modifier
-                        .size(1.dp)
-                        .focusRequester(pageContentRouteRequester)
-                        .focusable()
-                        .onFocusChanged { pageContentRouteFocused = it.hasFocus }
-                )
-                when (page) {
-                        SettingsPage.STATUS -> {
-                            SettingsSectionTitle("Relay status", "A quick health check for the services powering your Home screen.")
-                            Spacer(Modifier.height(24.dp))
-                            StatusCard(
-                                title = "Nuvio",
-                                detail = when {
-                                    !nuvioConnected -> "Not connected"
-                                    nuvioSyncing -> "Syncing active profile…"
-                                    nuvioSyncError != null -> nuvioSyncError
-                                    else -> "Connected · $nuvioItemCount Continue Watching item${if (nuvioItemCount == 1) "" else "s"} available"
-                                },
-                                healthy = nuvioConnected && nuvioSyncError == null,
-                                palette = palette.copy(accent = Provider.NUVIO.accent),
-                                focusRequester = pageContentFocusRequester,
-                                upFocusRequester = backHomeFocusRequester,
-                                leftFocusRequester = pageNavigationFocusRequesters[page]
-                            ) {
-                                if (nuvioConnected) onRefreshNuvio() else onManageProvider(Provider.NUVIO)
-                            }
-                            Spacer(Modifier.height(12.dp))
-                            StatusCard(
-                                title = "SmartTube",
-                                detail = when {
-                                    !smartTubeInstalled -> "App not installed"
-                                    smartTubeSubscriptions.isNotEmpty() -> "Connected · ${smartTubeSubscriptions.size} subscription video${if (smartTubeSubscriptions.size == 1) "" else "s"} received"
-                                    else -> "Installed · waiting for RelayTube/SmartTube shared data"
-                                },
-                                healthy = smartTubeInstalled && smartTubeSubscriptions.isNotEmpty(),
-                                palette = palette.copy(accent = Provider.SMARTTUBE.accent)
-                            ) { onManageProvider(Provider.SMARTTUBE) }
-                            Spacer(Modifier.height(12.dp))
-                            StatusCard(
-                                title = "Home launcher",
-                                detail = when {
-                                    relayIsDefault -> "Relay Home is the active default launcher"
-                                    shizukuReady -> "Relay Home is not default · Shizuku is ready"
-                                    else -> "Relay Home is not default · choose it in Android Home settings"
-                                },
-                                healthy = relayIsDefault,
-                                palette = palette
-                            ) { page = SettingsPage.LAUNCHER }
-                        }
-                        SettingsPage.DISPLAY -> {
-                            SettingsSectionTitle("Display", "Choose how Relay looks, and how dates and media information appear throughout Relay.")
-                            Spacer(Modifier.height(26.dp))
-                            Text("Appearance", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                            Spacer(Modifier.height(7.dp))
-                            Text("Orbital and Violet keep Relay’s built-in palettes. Automatic follows the TV wallpaper when Material You is available.", color = muted, fontSize = 15.sp, lineHeight = 21.sp)
-                            Spacer(Modifier.height(14.dp))
-                            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                RelayAppearance.entries.forEachIndexed { index, option ->
-                                    ActionButton(
-                                        option.label,
-                                        palette.copy(accent = if (option == RelayAppearance.AUTOMATIC) palette.accent else when (option) {
-                                            RelayAppearance.ORBITAL -> orbitalPalette.accent
-                                            RelayAppearance.VIOLET -> violetPalette.accent
-                                            RelayAppearance.AUTOMATIC -> palette.accent
-                                        }),
-                                        primary = appearance == option,
-                                        focusRequester = if (index == 0) pageContentFocusRequester else null,
-                                        upFocusRequester = if (index == 0) backHomeFocusRequester else null,
-                                        leftFocusRequester = if (index == 0) pageNavigationFocusRequesters[page] else null
-                                    ) { onAppearanceChanged(option) }
-                                }
-                            }
-                            Spacer(Modifier.height(26.dp))
-                            Text("Date format", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                            Spacer(Modifier.height(7.dp))
-                            Text("Used for Coming Up, media details, and Calendar.", color = muted, fontSize = 15.sp)
-                            Spacer(Modifier.height(16.dp))
-                            Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                                RelayDateFormat.entries.forEach { format ->
-                                    ActionButton(format.label, palette, primary = dateFormat == format) { onDateFormatChanged(format) }
-                                }
-                            }
-                            Spacer(Modifier.height(30.dp))
-                            Text("Local weather", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                            Spacer(Modifier.height(7.dp))
-                            Text("Set a city to show the current temperature in the Home navigation. Leave it blank to hide weather.", color = muted, fontSize = 15.sp, lineHeight = 21.sp)
-                            Spacer(Modifier.height(13.dp))
-                            Row(
-                                modifier = Modifier.fillMaxWidth(),
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.spacedBy(12.dp)
-                            ) {
-                                OutlinedTextField(
-                                    value = weatherCityDraft,
-                                    onValueChange = { weatherCityDraft = it.take(80) },
-                                    label = { Text("City, state or country") },
-                                    placeholder = { Text("e.g. New York") },
-                                    singleLine = true,
-                                    modifier = Modifier.weight(1f),
-                                    textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
-                                )
-                                ActionButton("Save", palette, primary = true) {
-                                    val normalized = WeatherApi.normalizeCity(weatherCityDraft)
-                                    weatherCityDraft = normalized
-                                    onWeatherCityChanged(normalized)
-                                }
-                                if (weatherCityDraft.isNotBlank()) {
-                                    ActionButton("Clear", palette, primary = false) {
-                                        weatherCityDraft = ""
-                                        onWeatherCityChanged("")
-                                    }
-                                }
-                            }
-                            Spacer(Modifier.height(30.dp))
-                            Text("Home row order", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                            Spacer(Modifier.height(7.dp))
-                            Text("Choose the order of rows on Home. Rows with no content are skipped automatically.", color = muted, fontSize = 15.sp, lineHeight = 21.sp)
-                            Spacer(Modifier.height(15.dp))
-                            Row(
-                                Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp))
-                                    .background(Color(0xFF171A20))
-                                    .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(13.dp))
-                                    .padding(start = 16.dp, end = 10.dp, top = 12.dp, bottom = 12.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                Column(Modifier.weight(1f)) {
-                                    Text("Minimal / Wallpaper Home", color = ivory, fontSize = 16.sp, fontWeight = FontWeight.Medium)
-                                    Spacer(Modifier.height(3.dp))
-                                    Text(
-                                        "Show the ambient wallpaper and Favorite Apps only. Hero and media rows stay hidden until this is turned off.",
-                                        color = muted,
-                                        fontSize = 13.sp,
-                                        lineHeight = 18.sp
-                                    )
-                                }
-                                androidx.compose.material3.Switch(
-                                    checked = minimalHomeEnabled,
-                                    onCheckedChange = onMinimalHomeEnabledChanged
-                                )
-                            }
-                            Spacer(Modifier.height(15.dp))
-                            homeRowOrder.forEachIndexed { index, row ->
-                                key(row.name) {
-                                    Row(
-                                        Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp))
-                                            .background(Color(0xFF171A20))
-                                            .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(13.dp))
-                                            .padding(start = 16.dp, end = 10.dp, top = 9.dp, bottom = 9.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text("${index + 1}. ${row.label}", color = ivory, fontSize = 16.sp, modifier = Modifier.weight(1f))
-                                        androidx.compose.material3.Switch(
-                                            checked = row !in hiddenHomeRows,
-                                            onCheckedChange = { visible -> onHomeRowVisibilityChanged(row, visible) }
-                                        )
-                                        Spacer(Modifier.width(8.dp))
-                                        ActionButton(
-                                            "↑",
-                                            palette,
-                                            primary = false,
-                                            onClick = { moveHomeRow(index, index - 1) }
-                                        )
-                                        Spacer(Modifier.width(8.dp))
-                                        ActionButton(
-                                            "↓",
-                                            palette,
-                                            primary = false,
-                                            onClick = { moveHomeRow(index, index + 1) }
-                                        )
-                                    }
-                                }
-                                Spacer(Modifier.height(8.dp))
-                            }
-                            ActionButton(
-                                "Reset row order",
-                                palette,
-                                primary = false,
-                                onClick = { onHomeRowOrderChanged(HomeRow.entries) }
-                            )
-                        }
-                        SettingsPage.PROVIDERS -> {
-                            SettingsSectionTitle("Media providers", "Connect services here, then choose which ones appear in Relay's Home navigation.")
-                            Spacer(Modifier.height(22.dp))
-                            Provider.values().forEachIndexed { providerIndex, provider ->
-                                val connected = provider in providers
-                                Column(
-                                    Modifier.fillMaxWidth().clip(RoundedCornerShape(15.dp)).background(Color(0xFF171A20))
-                                        .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(15.dp)).padding(18.dp)
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Box(Modifier.size(9.dp).clip(CircleShape).background(provider.accent))
-                                        Spacer(Modifier.width(10.dp))
-                                        Text(provider.label, color = ivory, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
-                                        Spacer(Modifier.weight(1f))
-                                        Text(if (connected) "Shown on Home" else "Hidden from Home", color = muted, fontSize = 14.sp)
-                                    }
-                                    Spacer(Modifier.height(15.dp))
-                                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                        ActionButton(
-                                            if (connected) "Hide from Home" else "Show on Home",
-                                            palette.copy(accent = provider.accent),
-                                            primary = connected,
-                                            focusRequester = if (providerIndex == 0) pageContentFocusRequester else null,
-                                            upFocusRequester = if (providerIndex == 0) backHomeFocusRequester else null,
-                                            leftFocusRequester = if (providerIndex == 0) pageNavigationFocusRequesters[page] else null
-                                        ) { onProviderToggle(provider) }
-                                        ActionButton(if (provider == Provider.NUVIO && nuvioConnected) "Manage connection" else "Connect", palette.copy(accent = provider.accent), primary = false) { onManageProvider(provider) }
-                                    }
-                                    Spacer(Modifier.height(18.dp))
-                                    Text("Continue Watching cards", color = ivory, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-                                    Spacer(Modifier.height(5.dp))
-                                    Text("${continueWatchingLimits[provider] ?: ContinueWatchingLimits.defaultLimit} maximum from ${provider.label}", color = muted, fontSize = 14.sp)
-                                    Spacer(Modifier.height(10.dp))
-                                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                        listOf(1, 2, 4, 6, 8, 12).forEach { limit ->
-                                            ActionButton(limit.toString(), palette.copy(accent = provider.accent), primary = (continueWatchingLimits[provider] ?: ContinueWatchingLimits.defaultLimit) == limit) {
-                                                onContinueWatchingLimitChanged(provider, limit)
-                                            }
-                                        }
-                                    }
-                                }
-                                Spacer(Modifier.height(12.dp))
-                            }
-                            Text("Nuvio library sync", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                            Spacer(Modifier.height(7.dp))
-                            val status = when {
-                                !nuvioConnected -> "Not connected"
-                                nuvioSyncing -> "Syncing your active profile…"
-                                nuvioSyncError != null -> nuvioSyncError
-                                else -> "$nuvioItemCount Continue Watching item${if (nuvioItemCount == 1) "" else "s"} synced"
-                            }
-                            Text(status, color = if (nuvioSyncError != null) Provider.SMARTTUBE.accent else muted, fontSize = 15.sp)
-                            if (nuvioConnected) {
-                                Spacer(Modifier.height(14.dp))
-                                ActionButton(if (nuvioSyncing) "Refreshing Nuvio…" else "Refresh Nuvio", palette.copy(accent = Provider.NUVIO.accent), primary = false, onClick = onRefreshNuvio)
-                            }
-                        }
-                        SettingsPage.PROFILE -> {
-                            SettingsSectionTitle("Profile", "Personalize the profile button shown beside Settings.")
-                            Spacer(Modifier.height(26.dp))
-                            Box(
-                                Modifier.size(116.dp).clip(CircleShape).background(Provider.NUVIO.accent.copy(alpha = .65f))
-                                    .border(2.dp, palette.accent, CircleShape),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                if (profileImageUri != null) {
-                                    AsyncImage(profileImageUri, "Custom profile picture", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                                } else {
-                                    Text("P", color = ivory, fontSize = 42.sp, fontWeight = FontWeight.Bold)
-                                }
-                            }
-                            Spacer(Modifier.height(20.dp))
-                            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                                ActionButton(
-                                    "Choose picture",
-                                    palette,
-                                    primary = true,
-                                    focusRequester = pageContentFocusRequester,
-                                    upFocusRequester = backHomeFocusRequester,
-                                    leftFocusRequester = pageNavigationFocusRequesters[page]
-                                ) { profileImagePicker.launch(arrayOf("image/*")) }
-                                if (profileImageUri != null) {
-                                    ActionButton("Remove picture", palette, primary = false) { onProfileImageChanged(null) }
-                                }
-                            }
-                            Spacer(Modifier.height(12.dp))
-                            Text("Or use a web image", color = ivory, fontSize = 17.sp, fontWeight = FontWeight.Medium)
-                            Spacer(Modifier.height(8.dp))
-                            OutlinedTextField(
-                                value = webProfileUrl,
-                                onValueChange = { webProfileUrl = it; profileUrlError = null },
-                                label = { Text("https://example.com/profile.jpg") },
-                                singleLine = true,
-                                isError = profileUrlError != null,
-                                modifier = Modifier.fillMaxWidth(),
-                                textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
-                            )
-                            profileUrlError?.let { Text(it, color = Provider.SMARTTUBE.accent, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp)) }
-                            Spacer(Modifier.height(10.dp))
-                            ActionButton("Use web image", palette, primary = false) {
-                                val uri = runCatching { Uri.parse(webProfileUrl.trim()) }.getOrNull()
-                                if (uri?.scheme in setOf("http", "https") && !uri?.host.isNullOrBlank()) {
-                                    onProfileImageChanged(uri.toString())
-                                    profileUrlError = null
-                                } else {
-                                    profileUrlError = "Enter a valid http or https image address."
-                                }
-                            }
-                            Spacer(Modifier.height(12.dp))
-                            Text("Relay keeps the selected local image or web address across restarts and app updates.", color = muted, fontSize = 14.sp)
-                        }
-                        SettingsPage.SUBSCRIPTIONS -> {
-                            SettingsSectionTitle("Subscriptions", "Choose which subscribed creators appear in New from subscriptions.")
-                            val smartTubeChannels = remember(smartTubeSubscriptions) {
-                                smartTubeSubscriptions
-                                    .mapNotNull { video -> video.channelId?.let { id -> id to (video.channel ?: "Unknown channel") } }
-                                    .distinctBy { it.first }
-                                    .sortedBy { it.second.lowercase() }
-                            }
-                            if (smartTubeChannels.isNotEmpty()) {
-                                Spacer(Modifier.height(28.dp))
-                                Text("New from subscriptions", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                                Spacer(Modifier.height(8.dp))
-                                Text("Choose which subscribed creators appear in Relay. This never changes your YouTube subscriptions.", color = muted, fontSize = 15.sp, lineHeight = 21.sp)
-                                Spacer(Modifier.height(14.dp))
-                                smartTubeChannels.forEachIndexed { channelIndex, (channelId, channelName) ->
-                                    val visible = channelId !in hiddenSmartTubeChannels
-                                    Row(
-                                        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFF171A20))
-                                            .padding(horizontal = 14.dp, vertical = 10.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(channelName, color = ivory, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                                        Spacer(Modifier.width(12.dp))
-                                        ActionButton(
-                                            if (visible) "Showing" else "Hidden",
-                                            palette.copy(accent = Provider.SMARTTUBE.accent),
-                                            primary = visible,
-                                            focusRequester = if (channelIndex == 0) pageContentFocusRequester else null,
-                                            upFocusRequester = if (channelIndex == 0) backHomeFocusRequester else null,
-                                            leftFocusRequester = if (channelIndex == 0) pageNavigationFocusRequesters[page] else null
-                                        ) {
-                                            onSmartTubeChannelVisible(channelId, !visible)
-                                        }
-                                    }
-                                    Spacer(Modifier.height(8.dp))
-                                }
-                            } else {
-                                Spacer(Modifier.height(24.dp))
-                                Text("No RelayTube subscriptions found yet. Subscriptions from RelayTube will appear here automatically.", color = muted, fontSize = 15.sp, lineHeight = 22.sp)
-                                Spacer(Modifier.height(16.dp))
-                                ActionButton(
-                                    "Open RelayTube settings",
-                                    palette.copy(accent = Provider.SMARTTUBE.accent),
-                                    primary = false,
-                                    focusRequester = pageContentFocusRequester,
-                                    upFocusRequester = backHomeFocusRequester,
-                                    leftFocusRequester = pageNavigationFocusRequesters[page],
-                                    onClick = { onManageProvider(Provider.SMARTTUBE) }
-                                )
-                            }
-                        }
-                        SettingsPage.UPDATES -> {
-                            SettingsSectionTitle("Relay updates", "Check GitHub Releases and install a newer Relay Home build without leaving the launcher.")
-                            Spacer(Modifier.height(24.dp))
-                            Text("Installed version", color = muted, fontSize = 14.sp)
-                            Spacer(Modifier.height(5.dp))
-                            Text(BuildConfig.VERSION_NAME, color = ivory, fontSize = 20.sp, fontWeight = FontWeight.Medium)
-                            Spacer(Modifier.height(24.dp))
-                            Text("Update channel", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                            Spacer(Modifier.height(7.dp))
-                            Text("Beta builds receive newer Relay features first. Stable builds update only on tagged production releases.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
-                            Spacer(Modifier.height(12.dp))
-                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                                ActionButton(
-                                    "Stable",
-                                    palette,
-                                    primary = !includeBetaUpdates,
-                                    focusRequester = pageContentFocusRequester,
-                                    upFocusRequester = backHomeFocusRequester,
-                                    leftFocusRequester = pageNavigationFocusRequesters[page]
-                                ) {
-                                    includeBetaUpdates = false
-                                    RelayUpdateSettings.setIncludesBetas(context, false)
-                                    availableRelease = null
-                                    updateMessage = null
-                                }
-                                ActionButton("Beta & pre-releases", palette, primary = includeBetaUpdates) {
-                                    includeBetaUpdates = true
-                                    RelayUpdateSettings.setIncludesBetas(context, true)
-                                    availableRelease = null
-                                    updateMessage = null
-                                }
-                            }
-                            Spacer(Modifier.height(24.dp))
-                            Text("Check for updates", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                            Spacer(Modifier.height(7.dp))
-                            Text("Relay checks the open GitHub repository releases for a newer APK.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
-                            Spacer(Modifier.height(12.dp))
-                            ActionButton(if (updateWorking) "Checking GitHub…" else "Check now", palette, primary = true) {
-                                if (!updateWorking) {
-                                    updateWorking = true
-                                    updateMessage = null
-                                    updateScope.launch {
-                                        RelayUpdater.check(includeBetaUpdates)
-                                            .onSuccess { release ->
-                                                availableRelease = release
-                                                updateMessage = if (release != null) "A newer build is ready to download (${release.tag})." else "Relay is up to date."
-                                            }
-                                            .onFailure { error -> updateMessage = error.message ?: "Could not check for updates." }
-                                        updateWorking = false
-                                    }
-                                }
-                            }
-                            updateMessage?.let { message ->
-                                Spacer(Modifier.height(10.dp))
-                                Text(message, color = palette.accent, fontSize = 14.sp, lineHeight = 20.sp)
-                            }
-                            availableRelease?.let { release ->
-                                Spacer(Modifier.height(16.dp))
-                                Column(
-                                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFF090B10))
-                                        .border(1.dp, Color.White.copy(alpha = .10f), RoundedCornerShape(12.dp)).padding(16.dp)
-                                ) {
-                                    Text("Ready to install: ${release.title}", color = ivory, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
-                                    if (release.notes.isNotBlank()) {
-                                        Spacer(Modifier.height(6.dp))
-                                        Text(release.notes, color = muted, fontSize = 13.sp, lineHeight = 18.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
-                                    }
-                                    Spacer(Modifier.height(12.dp))
-                                    ActionButton(if (updateWorking) "Downloading update…" else "Download and install", palette, primary = true) {
-                                        if (!updateWorking) {
-                                            updateWorking = true
-                                            updateScope.launch {
-                                                RelayUpdater.download(context, release)
-                                                    .onSuccess { apkFile ->
-                                                        updateMessage = RelayUpdater.install(context, apkFile)
-                                                    }
-                                                    .onFailure { error -> updateMessage = error.message ?: "Download failed." }
-                                                updateWorking = false
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        SettingsPage.LAUNCHER -> {
-                            SettingsSectionTitle("Home launcher", "Choose the method that works best on your Android TV or Google TV device.")
-                            Spacer(Modifier.height(24.dp))
-                            Text("Standard Home app", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                            Spacer(Modifier.height(7.dp))
-                            Text(
-                                if (relayIsDefault) "Relay Home is currently the default Home app."
-                                else "Use Android's Home role first. Some Google TV builds keep their stock launcher in control even after Relay is selected.",
-                                color = muted,
-                                fontSize = 14.sp,
-                                lineHeight = 20.sp
-                            )
-                            Spacer(Modifier.height(12.dp))
-                            ActionButton(
-                                if (relayIsDefault) "Review Android Home settings" else "Make Relay Home the default",
-                                palette,
-                                primary = !relayIsDefault,
-                                focusRequester = pageContentFocusRequester,
-                                upFocusRequester = backHomeFocusRequester,
-                                leftFocusRequester = pageNavigationFocusRequesters[page],
-                                onClick = onRequestHome
-                            )
-                            Spacer(Modifier.height(24.dp))
-                            Text("Override diagnostics", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                            Spacer(Modifier.height(7.dp))
-                            Text(
-                                "Local-only evidence from the last launcher operation. Relay marks a strategy active only when Android's Home resolver verified Relay Home.",
-                                color = muted,
-                                fontSize = 14.sp,
-                                lineHeight = 20.sp
-                            )
-                            Spacer(Modifier.height(12.dp))
-                            Column(
-                                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFF090B10))
-                                    .border(1.dp, Color.White.copy(alpha = .10f), RoundedCornerShape(12.dp)).padding(16.dp)
-                            ) {
-                                Text("Active strategy", color = muted, fontSize = 13.sp)
-                                Spacer(Modifier.height(4.dp))
-                                Text(
-                                    launcherDiagnostics.activeStrategy,
-                                    color = if (relayIsDefault) Color(0xFF65D68A) else Provider.SMARTTUBE.accent,
-                                    fontSize = 16.sp,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                                Spacer(Modifier.height(10.dp))
-                                Text("Why", color = muted, fontSize = 13.sp)
-                                Spacer(Modifier.height(4.dp))
-                                Text(launcherDiagnostics.reason, color = ivory, fontSize = 14.sp, lineHeight = 20.sp)
-                                Spacer(Modifier.height(10.dp))
-                                Text("Device", color = muted, fontSize = 13.sp)
-                                Spacer(Modifier.height(4.dp))
-                                Text(launcherDiagnostics.device, color = ivory, fontSize = 14.sp)
-                                if (launcherDiagnostics.lastOperation != null) {
-                                    Spacer(Modifier.height(10.dp))
-                                    Text("Last operation: ${launcherDiagnostics.lastOperation}", color = muted, fontSize = 13.sp)
-                                }
-                                launcherDiagnostics.events.takeLast(8).asReversed().forEach { event ->
-                                    Spacer(Modifier.height(10.dp))
-                                    Text(
-                                        "${LauncherOverrideStrategy.label(event.strategy)} · ${event.phase} · ${event.outcome}",
-                                        color = if (event.outcome == "failure") Provider.SMARTTUBE.accent else palette.accent,
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Medium
-                                    )
-                                    val eventDetail = listOfNotNull(
-                                        event.cause?.let { "Cause: $it" },
-                                        event.observedHome?.let { "Observed: $it" },
-                                        event.command?.let { "Command: $it" }
-                                    ).joinToString(" · ")
-                                    if (eventDetail.isNotBlank()) {
-                                        Spacer(Modifier.height(2.dp))
-                                        Text(eventDetail, color = muted, fontSize = 12.sp, lineHeight = 17.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
-                                    }
-                                }
-                            }
-                            Spacer(Modifier.height(24.dp))
-                            Text("Simple auto-start", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                            Spacer(Modifier.height(7.dp))
-                            Text("For TVs that switch back to Google TV. Enable “Relay Home auto-start” in Accessibility. This is easy, but Accessibility services can add a small system performance cost.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
-                            Spacer(Modifier.height(12.dp))
-                            ActionButton("Open Accessibility setup", palette, primary = false, onClick = onRequestAutoStart)
-                            Spacer(Modifier.height(24.dp))
-                            Text("Shizuku connection", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                            Spacer(Modifier.height(7.dp))
-                            Text(
-                                if (shizukuReady) "Relay is authorized to use the running Shizuku service."
-                                else "Authorize Relay with Shizuku here before applying a launcher override.",
-                                color = muted,
-                                fontSize = 14.sp,
-                                lineHeight = 20.sp
-                            )
-                            Spacer(Modifier.height(12.dp))
-                            ActionButton(
-                                if (shizukuReady) "Shizuku connected" else "Authorize Relay with Shizuku",
-                                palette,
-                                primary = !shizukuReady
-                            ) {
-                                shizukuMessage = if (shizukuReady) {
-                                    "Shizuku is ready. Open Advanced ADB mode below to apply the override."
-                                } else {
-                                    RelayShizuku.requestAccess(context)
-                                }
-                            }
-                            shizukuMessage?.let { message ->
-                                Spacer(Modifier.height(8.dp))
-                                Text(message, color = if (message.startsWith("Could") || message.startsWith("Start")) Provider.SMARTTUBE.accent else palette.accent, fontSize = 13.sp, lineHeight = 18.sp)
-                            }
-                            Spacer(Modifier.height(12.dp))
-                            ActionButton(
-                                when {
-                                    shizukuWorking -> "Applying Relay Home…"
-                                    !shizukuReady -> "Authorize Shizuku to set Relay Home"
-                                    relayIsDefault -> "Re-apply Relay Home with Shizuku"
-                                    else -> "Make Relay Home default with Shizuku"
-                                },
-                                palette,
-                                primary = shizukuReady && !relayIsDefault
-                            ) { applyRelayHomeWithShizuku() }
-                            Spacer(Modifier.height(24.dp))
-                            Text("Advanced override and ADB fallback", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-                            Spacer(Modifier.height(7.dp))
-                            Text("Shizuku verifies the Home role and can disable the detected stock launcher when a Google TV build keeps reclaiming Home. The precise reversible ADB command is available as a fallback.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
-                            Spacer(Modifier.height(12.dp))
-                            ActionButton(if (showAdvancedHomeSetup) "Hide ADB guide" else "Show ADB guide", palette, primary = false) {
-                                showAdvancedHomeSetup = !showAdvancedHomeSetup
-                            }
-                            if (showAdvancedHomeSetup) {
-                                Spacer(Modifier.height(14.dp))
-                                Column(
-                                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFF090B10))
-                                        .border(1.dp, Color.White.copy(alpha = .10f), RoundedCornerShape(12.dp)).padding(16.dp)
-                                ) {
-                                    val override = stockLauncherOverride
-                                    Text("1. Enable Developer options and USB debugging on the TV.", color = ivory, fontSize = 14.sp)
-                                    Spacer(Modifier.height(7.dp))
-                                    Text(if (override != null) "2. Relay detected ${override.label}. Connect with ADB, then run:" else "2. Connect with ADB, then run the command for your stock launcher:", color = ivory, fontSize = 14.sp)
-                                    Spacer(Modifier.height(8.dp))
-                                    Text(override?.disableCommand ?: "adb shell pm disable-user --user 0 <stock-launcher-package>", color = palette.accent, fontSize = 13.sp, lineHeight = 19.sp)
-                                    Spacer(Modifier.height(8.dp))
-                                    Text("Uses only the Shizuku permission you approve. Relay never runs arbitrary ADB commands.", color = muted, fontSize = 13.sp, lineHeight = 18.sp)
-                                    if (override != null) {
-                                        Spacer(Modifier.height(10.dp))
-                                        ActionButton("Copy disable command", palette, primary = false) {
-                                            context.getSystemService(ClipboardManager::class.java)
-                                                ?.setPrimaryClip(ClipData.newPlainText("Relay launcher override", override.disableCommand))
-                                        }
-                                    }
-                                    Spacer(Modifier.height(8.dp))
-                                    Text("Restore Google TV later with:", color = muted, fontSize = 13.sp)
-                                    Spacer(Modifier.height(6.dp))
-                                    Text(override?.restoreCommand ?: "adb shell pm enable --user 0 <stock-launcher-package>", color = palette.accent, fontSize = 13.sp, lineHeight = 19.sp)
-                                    if (override != null && shizukuReady) {
-                                        Spacer(Modifier.height(10.dp))
-                                        ActionButton("Restore stock launcher with Shizuku", palette, primary = false) {
-                                            restoreStockLauncherWithShizuku()
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        SettingsPage.SYSTEM -> {
-                            SettingsSectionTitle("Android TV settings", "Open the device settings Android TV exposes to Relay. OEM-specific pages fall back to the main Settings screen.")
-                            Spacer(Modifier.height(24.dp))
-                            systemSettingsEntries.chunked(3).forEachIndexed { rowIndex, row ->
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                                    row.forEach { entry ->
-                                        Box(Modifier.weight(1f)) {
-                                            SystemSettingsTile(
-                                                entry,
-                                                palette,
-                                                focusRequester = if (rowIndex == 0 && row.indexOf(entry) == 0) pageContentFocusRequester else null,
-                                                leftFocusRequester = if (rowIndex == 0 && row.indexOf(entry) == 0) pageNavigationFocusRequesters[page] else null
-                                            ) { openSystemSettings(context, entry.action) }
-                                        }
-                                    }
-                                    repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
-                                }
-                                Spacer(Modifier.height(14.dp))
-                            }
-                        }
+            Spacer(Modifier.height(18.dp))
+            Text("Continue Watching cards", color = ivory, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(5.dp))
+            Text("${continueWatchingLimits[provider] ?: ContinueWatchingLimits.defaultLimit} maximum from ${provider.label}", color = muted, fontSize = 14.sp)
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(1, 2, 4, 6, 8, 12).forEach { limit ->
+                    ActionButton(limit.toString(), palette.copy(accent = provider.accent), primary = (continueWatchingLimits[provider] ?: ContinueWatchingLimits.defaultLimit) == limit) {
+                        onContinueWatchingLimitChanged(provider, limit)
+                    }
                 }
             }
         }
+        Spacer(Modifier.height(12.dp))
+    }
+    Text("Nuvio library sync", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+    Spacer(Modifier.height(7.dp))
+    val status = when {
+        !nuvioConnected -> "Not connected"
+        nuvioSyncing -> "Syncing your active profile…"
+        nuvioSyncError != null -> nuvioSyncError
+        else -> "$nuvioItemCount Continue Watching item${if (nuvioItemCount == 1) "" else "s"} synced"
+    }
+    Text(status, color = if (nuvioSyncError != null) Provider.SMARTTUBE.accent else muted, fontSize = 15.sp)
+    if (nuvioConnected) {
+        Spacer(Modifier.height(14.dp))
+        ActionButton(if (nuvioSyncing) "Refreshing Nuvio…" else "Refresh Nuvio", palette.copy(accent = Provider.NUVIO.accent), primary = false, onClick = onRefreshNuvio)
+    }
+    Spacer(Modifier.height(30.dp))
+    ProfileSettings(
+        palette = palette,
+        profileImageUri = profileImageUri,
+        webProfileUrl = webProfileUrl,
+        profileUrlError = profileUrlError,
+        firstFocusRequester = null,
+        backFocusRequester = null,
+        onProfileImageChanged = onProfileImageChanged,
+        onPickProfileImage = onPickProfileImage,
+        onWebProfileUrlChanged = onWebProfileUrlChanged,
+        onProfileUrlError = onProfileUrlError
+    )
+    Spacer(Modifier.height(30.dp))
+    SubscriptionSettings(
+        palette = palette,
+        smartTubeSubscriptions = smartTubeSubscriptions,
+        hiddenSmartTubeChannels = hiddenSmartTubeChannels,
+        onSmartTubeChannelVisible = onSmartTubeChannelVisible,
+        onManageProvider = onManageProvider,
+        firstFocusRequester = null,
+        backFocusRequester = null
+    )
+}
+
+@Composable
+private fun ProfileSettings(
+    palette: RelayPalette,
+    profileImageUri: String?,
+    webProfileUrl: String,
+    profileUrlError: String?,
+    firstFocusRequester: FocusRequester?,
+    backFocusRequester: FocusRequester?,
+    onProfileImageChanged: (String?) -> Unit,
+    onPickProfileImage: () -> Unit,
+    onWebProfileUrlChanged: (String) -> Unit,
+    onProfileUrlError: (String?) -> Unit
+) {
+    SettingsSectionTitle("Profile", "Personalize the profile button shown beside Settings.")
+    Spacer(Modifier.height(20.dp))
+    Box(
+        Modifier.size(116.dp).clip(CircleShape).background(Provider.NUVIO.accent.copy(alpha = .65f))
+            .border(2.dp, palette.accent, CircleShape),
+        contentAlignment = Alignment.Center
+    ) {
+        if (profileImageUri != null) {
+            AsyncImage(profileImageUri, "Custom profile picture", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+        } else {
+            Text("P", color = ivory, fontSize = 42.sp, fontWeight = FontWeight.Bold)
+        }
+    }
+    Spacer(Modifier.height(20.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        ActionButton(
+            "Choose picture",
+            palette,
+            primary = true,
+            focusRequester = firstFocusRequester,
+            upFocusRequester = backFocusRequester,
+            onClick = onPickProfileImage
+        )
+        if (profileImageUri != null) ActionButton("Remove picture", palette, primary = false, onClick = { onProfileImageChanged(null) })
+    }
+    Spacer(Modifier.height(12.dp))
+    Text("Or use a web image", color = ivory, fontSize = 17.sp, fontWeight = FontWeight.Medium)
+    Spacer(Modifier.height(8.dp))
+    OutlinedTextField(
+        value = webProfileUrl,
+        onValueChange = onWebProfileUrlChanged,
+        label = { Text("https://example.com/profile.jpg") },
+        singleLine = true,
+        isError = profileUrlError != null,
+        modifier = Modifier.fillMaxWidth(),
+        textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
+    )
+    profileUrlError?.let { Text(it, color = Provider.SMARTTUBE.accent, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp)) }
+    Spacer(Modifier.height(10.dp))
+    ActionButton("Use web image", palette, primary = false) {
+        val uri = runCatching { Uri.parse(webProfileUrl.trim()) }.getOrNull()
+        if (uri?.scheme in setOf("http", "https") && !uri?.host.isNullOrBlank()) {
+            onProfileImageChanged(uri.toString())
+            onProfileUrlError(null)
+        } else {
+            onProfileUrlError("Enter a valid http or https image address.")
+        }
+    }
+    Spacer(Modifier.height(12.dp))
+    Text("Relay keeps the selected local image or web address across restarts and app updates.", color = muted, fontSize = 14.sp)
+}
+
+@Composable
+private fun SubscriptionSettings(
+    palette: RelayPalette,
+    smartTubeSubscriptions: List<SmartTubeSubscriptionVideo>,
+    hiddenSmartTubeChannels: Set<String>,
+    onSmartTubeChannelVisible: (String, Boolean) -> Unit,
+    onManageProvider: (Provider) -> Unit,
+    firstFocusRequester: FocusRequester?,
+    backFocusRequester: FocusRequester?
+) {
+    SettingsSectionTitle("Subscriptions", "Choose which subscribed creators appear in New from subscriptions.")
+    val smartTubeChannels = remember(smartTubeSubscriptions) {
+        smartTubeSubscriptions
+            .mapNotNull { video -> video.channelId?.let { id -> id to (video.channel ?: "Unknown channel") } }
+            .distinctBy { it.first }
+            .sortedBy { it.second.lowercase() }
+    }
+    if (smartTubeChannels.isNotEmpty()) {
+        Spacer(Modifier.height(20.dp))
+        Text("New from subscriptions", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+        Spacer(Modifier.height(8.dp))
+        Text("Choose which subscribed creators appear in Relay. This never changes your YouTube subscriptions.", color = muted, fontSize = 15.sp, lineHeight = 21.sp)
+        Spacer(Modifier.height(14.dp))
+        smartTubeChannels.forEachIndexed { channelIndex, (channelId, channelName) ->
+            val visible = channelId !in hiddenSmartTubeChannels
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFF171A20)).padding(horizontal = 14.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(channelName, color = ivory, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                Spacer(Modifier.width(12.dp))
+                ActionButton(
+                    if (visible) "Showing" else "Hidden",
+                    palette.copy(accent = Provider.SMARTTUBE.accent),
+                    primary = visible,
+                    focusRequester = if (channelIndex == 0) firstFocusRequester else null,
+                    upFocusRequester = if (channelIndex == 0) backFocusRequester else null,
+                    onClick = { onSmartTubeChannelVisible(channelId, !visible) }
+                )
+            }
+            Spacer(Modifier.height(8.dp))
+        }
+    } else {
+        Spacer(Modifier.height(20.dp))
+        Text("No RelayTube subscriptions found yet. Subscriptions from RelayTube will appear here automatically.", color = muted, fontSize = 15.sp, lineHeight = 22.sp)
+        Spacer(Modifier.height(16.dp))
+        ActionButton(
+            "Open RelayTube settings",
+            palette.copy(accent = Provider.SMARTTUBE.accent),
+            primary = false,
+            focusRequester = firstFocusRequester,
+            upFocusRequester = backFocusRequester,
+            onClick = { onManageProvider(Provider.SMARTTUBE) }
+        )
+    }
+}
+
+@Composable
+private fun WeatherWidgetsSettings(
+    palette: RelayPalette,
+    weatherCityDraft: String,
+    showHomeClock: Boolean,
+    firstFocusRequester: FocusRequester,
+    backFocusRequester: FocusRequester,
+    onDraftChanged: (String) -> Unit,
+    onWeatherCityChanged: () -> Unit,
+    onClear: () -> Unit,
+    onShowHomeClockChanged: (Boolean) -> Unit
+) {
+    SettingsSectionTitle("Local weather", "Set a city to show the current temperature in the Home navigation. Leave it blank to hide weather.")
+    Spacer(Modifier.height(20.dp))
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(Color(0xFF171A20))
+            .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(13.dp))
+            .padding(start = 16.dp, end = 10.dp, top = 12.dp, bottom = 12.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("Home clock", color = ivory, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(3.dp))
+            Text("Show the current local time beside weather in the Home top bar.", color = muted, fontSize = 13.sp)
+        }
+        androidx.compose.material3.Switch(
+            checked = showHomeClock,
+            onCheckedChange = onShowHomeClockChanged,
+            modifier = Modifier.testTag("home-clock-setting")
+        )
+    }
+    Spacer(Modifier.height(18.dp))
+    Row(
+        Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        OutlinedTextField(
+            value = weatherCityDraft,
+            onValueChange = onDraftChanged,
+            label = { Text("City, state or country") },
+            placeholder = { Text("e.g. New York") },
+            singleLine = true,
+            modifier = Modifier.weight(1f),
+            textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
+        )
+        ActionButton("Save", palette, primary = true, focusRequester = firstFocusRequester, upFocusRequester = backFocusRequester, onClick = onWeatherCityChanged)
+        if (weatherCityDraft.isNotBlank()) ActionButton("Clear", palette, primary = false, onClick = onClear)
+    }
+}
+
+@Composable
+internal fun DataSourcesSettings(
+    palette: RelayPalette,
+    context: Context,
+    settingsRevision: Long,
+    firstFocusRequester: FocusRequester,
+    backFocusRequester: FocusRequester,
+    validationHook: MetadataKeyValidationHook = RelayMetadataApiKeyValidationHook,
+    remoteValidationHook: MetadataKeyRemoteValidationHook = RelayMetadataApiKeyRemoteValidation
+) {
+    var tmdbDraft by remember { mutableStateOf("") }
+    var omdbDraft by remember { mutableStateOf("") }
+    var tmdbError by remember { mutableStateOf<String?>(null) }
+    var omdbError by remember { mutableStateOf<String?>(null) }
+    var tmdbStatus by remember { mutableStateOf<String?>(null) }
+    var omdbStatus by remember { mutableStateOf<String?>(null) }
+    var tmdbValidating by remember { mutableStateOf(false) }
+    var omdbValidating by remember { mutableStateOf(false) }
+    var tmdbValidationJob by remember { mutableStateOf<Job?>(null) }
+    var omdbValidationJob by remember { mutableStateOf<Job?>(null) }
+    val validationScope = rememberCoroutineScope()
+    val hasTmdbUserKey = remember(settingsRevision) {
+        RelaySettingsRepository.loadTmdbApiKey(context) != null
+    }
+    val hasOmdbUserKey = remember(settingsRevision) {
+        RelaySettingsRepository.loadOmdbApiKey(context) != null
+    }
+
+    SettingsSectionTitle(
+        "Metadata services",
+        "Optional keys add metadata to your media. Keys are never shown after saving; leave a service unset to disable it."
+    )
+    Spacer(Modifier.height(20.dp))
+    MetadataKeyCard(
+        serviceName = "TMDB",
+        description = "Used for title matching, artwork metadata, calendars, and recommendations.",
+        signupLabel = "Get a TMDB key",
+        draft = tmdbDraft,
+        onDraftChanged = {
+            tmdbDraft = it
+            tmdbError = null
+            tmdbStatus = null
+        },
+        error = tmdbError,
+        status = tmdbStatus,
+        isSaved = hasTmdbUserKey,
+        isValidating = tmdbValidating,
+        usesBuildKey = BuildConfig.TMDB_API_KEY.isNotBlank(),
+        fieldLabel = "TMDB API key",
+        focusRequester = firstFocusRequester,
+        upFocusRequester = backFocusRequester,
+        palette = palette,
+        onOpenSignup = { openExternalUrl(context, "https://www.themoviedb.org/settings/api") },
+        onSave = {
+            val validation = validationHook.validate(MetadataKeyService.TMDB, tmdbDraft)
+            if (!validation.isValid) {
+                tmdbError = validation.errorMessage
+                tmdbStatus = null
+            } else {
+                val candidate = tmdbDraft
+                tmdbValidationJob?.cancel()
+                tmdbValidationJob = validationScope.launch {
+                    tmdbValidating = true
+                    tmdbError = null
+                    tmdbStatus = "Checking the TMDB key…"
+                    val result = withContext(Dispatchers.IO) {
+                        RelayMetadataApiKeyRemoteValidation.validateAndPersist(
+                            service = MetadataKeyService.TMDB,
+                            rawValue = candidate,
+                            localHook = validationHook,
+                            remoteHook = remoteValidationHook
+                        ) { value -> RelaySettingsRepository.saveTmdbApiKey(context, value) }
+                    }
+                    tmdbValidating = false
+                    if (result.isValid) {
+                        tmdbDraft = ""
+                        tmdbError = null
+                        tmdbStatus = "TMDB key verified and saved. It is hidden after saving."
+                    } else {
+                        tmdbError = result.errorMessage
+                        tmdbStatus = null
+                    }
+                }
+            }
+        },
+        onClear = {
+            tmdbValidationJob?.cancel()
+            tmdbValidating = false
+            RelaySettingsRepository.clearTmdbApiKey(context)
+            tmdbDraft = ""
+            tmdbError = null
+            tmdbStatus = "TMDB user key cleared."
+        }
+    )
+    Spacer(Modifier.height(16.dp))
+    MetadataKeyCard(
+        serviceName = "OMDb",
+        description = "Used by Relay's optional critic-score metadata integration when configured.",
+        signupLabel = "Get an OMDb key",
+        draft = omdbDraft,
+        onDraftChanged = {
+            omdbDraft = it
+            omdbError = null
+            omdbStatus = null
+        },
+        error = omdbError,
+        status = omdbStatus,
+        isSaved = hasOmdbUserKey,
+        isValidating = omdbValidating,
+        usesBuildKey = false,
+        fieldLabel = "OMDb API key",
+        focusRequester = null,
+        upFocusRequester = null,
+        palette = palette,
+        onOpenSignup = { openExternalUrl(context, "https://www.omdbapi.com/apikey.aspx") },
+        onSave = {
+            val validation = validationHook.validate(MetadataKeyService.OMDB, omdbDraft)
+            if (!validation.isValid) {
+                omdbError = validation.errorMessage
+                omdbStatus = null
+            } else {
+                val candidate = omdbDraft
+                omdbValidationJob?.cancel()
+                omdbValidationJob = validationScope.launch {
+                    omdbValidating = true
+                    omdbError = null
+                    omdbStatus = "Checking the OMDb key…"
+                    val result = withContext(Dispatchers.IO) {
+                        RelayMetadataApiKeyRemoteValidation.validateAndPersist(
+                            service = MetadataKeyService.OMDB,
+                            rawValue = candidate,
+                            localHook = validationHook,
+                            remoteHook = remoteValidationHook
+                        ) { value -> RelaySettingsRepository.saveOmdbApiKey(context, value) }
+                    }
+                    omdbValidating = false
+                    if (result.isValid) {
+                        omdbDraft = ""
+                        omdbError = null
+                        omdbStatus = "OMDb key verified and saved. It is hidden after saving."
+                    } else {
+                        omdbError = result.errorMessage
+                        omdbStatus = null
+                    }
+                }
+            }
+        },
+        onClear = {
+            omdbValidationJob?.cancel()
+            omdbValidating = false
+            RelaySettingsRepository.clearOmdbApiKey(context)
+            omdbDraft = ""
+            omdbError = null
+            omdbStatus = "OMDb user key cleared."
+        }
+    )
+    Spacer(Modifier.height(18.dp))
+    Text(
+        "Relay verifies each new key with its provider before saving. Checks are bounded, do not retry, and never print or display key values.",
+        color = muted,
+        fontSize = 14.sp,
+        lineHeight = 20.sp
+    )
+}
+
+@Composable
+private fun MetadataKeyCard(
+    serviceName: String,
+    description: String,
+    signupLabel: String,
+    draft: String,
+    onDraftChanged: (String) -> Unit,
+    error: String?,
+    status: String?,
+    isSaved: Boolean,
+    isValidating: Boolean,
+    usesBuildKey: Boolean,
+    fieldLabel: String,
+    focusRequester: FocusRequester?,
+    upFocusRequester: FocusRequester?,
+    palette: RelayPalette,
+    onOpenSignup: () -> Unit,
+    onSave: () -> Unit,
+    onClear: () -> Unit
+) {
+    val currentOnSave by rememberUpdatedState(onSave)
+    val currentOnClear by rememberUpdatedState(onClear)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(15.dp))
+            .background(Color(0xFF171A20))
+            .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(15.dp))
+            .padding(20.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(serviceName, color = ivory, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.weight(1f))
+            Text(
+                when {
+                    isSaved -> "User key saved · hidden"
+                    usesBuildKey -> "Using Relay default"
+                    else -> "Not configured"
+                },
+                color = if (isSaved || usesBuildKey) palette.accent else muted,
+                fontSize = 13.sp
+            )
+        }
+        Spacer(Modifier.height(7.dp))
+        Text(description, color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+        Spacer(Modifier.height(12.dp))
+        ActionButton(signupLabel, palette, primary = false, onClick = onOpenSignup)
+        Spacer(Modifier.height(14.dp))
+        OutlinedTextField(
+            value = draft,
+            onValueChange = onDraftChanged,
+            label = { Text(if (isSaved) "Replace saved $serviceName key" else fieldLabel) },
+            placeholder = { Text(if (isSaved) "Enter a new key to replace it" else "Paste key") },
+            singleLine = true,
+            isError = error != null,
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("data-source-key-$serviceName")
+                .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+                .then(if (upFocusRequester != null) Modifier.focusProperties { up = upFocusRequester } else Modifier),
+            textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
+        )
+        if (error != null) {
+            Text(
+                error,
+                color = Provider.SMARTTUBE.accent,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 6.dp).testTag("data-source-error-$serviceName")
+            )
+        }
+        if (status != null) {
+            Text(
+                status,
+                color = palette.accent,
+                fontSize = 13.sp,
+                modifier = Modifier.padding(top = 6.dp).testTag("data-source-status-$serviceName")
+            )
+        }
+        Spacer(Modifier.height(12.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            ActionButton(
+                if (isValidating) "Checking with $serviceName…" else "Save key",
+                palette,
+                primary = !isValidating,
+                modifier = Modifier.testTag("data-source-save-$serviceName"),
+                onClick = { if (!isValidating) currentOnSave() }
+            )
+            if (isSaved) ActionButton(
+                "Clear saved key",
+                palette,
+                primary = false,
+                modifier = Modifier.testTag("data-source-clear-$serviceName"),
+                onClick = { currentOnClear() }
+            )
+        }
+    }
+}
+
+@Composable
+private fun LauncherUpdatesSettings(
+    context: Context,
+    palette: RelayPalette,
+    relayIsDefault: Boolean,
+    stockLauncherOverride: StockLauncherOverride?,
+    launcherDiagnostics: LauncherDiagnostics,
+    selectedLauncherMode: LauncherSetupMode,
+    activeLauncherMode: LauncherSetupMode?,
+    shizukuReady: Boolean,
+    shizukuWorking: Boolean,
+    shizukuMessage: String?,
+    includeBetaUpdates: Boolean,
+    availableRelease: RelayRelease?,
+    updateMessage: String?,
+    updateWorking: Boolean,
+    showAdvancedHomeSetup: Boolean,
+    firstFocusRequester: FocusRequester,
+    backFocusRequester: FocusRequester,
+    onRequestHome: () -> Unit,
+    onRequestAutoStart: () -> Unit,
+    onLauncherModeSelected: (LauncherSetupMode) -> Unit,
+    onShizukuMessage: (String?) -> Unit,
+    onIncludeBetaUpdates: (Boolean) -> Unit,
+    onAvailableRelease: (RelayRelease?) -> Unit,
+    onUpdateMessage: (String?) -> Unit,
+    onUpdateWorking: (Boolean) -> Unit,
+    onToggleAdvancedHomeSetup: () -> Unit,
+    onApplyRelayHomeWithShizuku: () -> Unit,
+    onRestoreStockLauncherWithShizuku: () -> Unit,
+    updateScope: kotlinx.coroutines.CoroutineScope
+) {
+    SettingsSectionTitle("Home launcher", "Choose the default Home app and the update channel for this Relay installation.")
+    val statusReason = when (activeLauncherMode) {
+        LauncherSetupMode.COMPATIBILITY -> launcherDiagnostics.events
+            .asReversed()
+            .firstOrNull { it.strategy == LauncherOverrideStrategy.ACCESSIBILITY }
+            ?.cause
+            ?.let { "Accessibility auto-start was observed. $it" }
+            ?: launcherDiagnostics.reason
+        else -> launcherDiagnostics.reason
+    }
+    Spacer(Modifier.height(20.dp))
+    Text("Choose a launcher mode", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+    Spacer(Modifier.height(7.dp))
+    Text("Select how Relay stays in front when Android TV tries to return to its stock launcher. You can change this choice at any time.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+    Spacer(Modifier.height(12.dp))
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(Color(0xFF090B10))
+            .border(1.dp, Color.White.copy(alpha = .10f), RoundedCornerShape(12.dp))
+            .padding(16.dp)
+            .testTag("launcher-active-status")
+    ) {
+        Text("Active mode", color = muted, fontSize = 13.sp)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            activeLauncherMode?.label ?: "No launcher mode verified",
+            color = if (activeLauncherMode != null) Color(0xFF65D68A) else Provider.SMARTTUBE.accent,
+            fontSize = 16.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.testTag("launcher-active-mode")
+        )
+        Spacer(Modifier.height(8.dp))
+        Text("Why", color = muted, fontSize = 13.sp)
+        Spacer(Modifier.height(4.dp))
+        Text(statusReason, color = ivory, fontSize = 14.sp, lineHeight = 20.sp)
+    }
+    Spacer(Modifier.height(14.dp))
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+        Column(Modifier.weight(1f)) {
+            ActionButton(
+                "Advanced Mode",
+                palette,
+                primary = selectedLauncherMode == LauncherSetupMode.ADVANCED,
+                modifier = Modifier.fillMaxWidth().testTag("launcher-mode-advanced"),
+                focusRequester = firstFocusRequester,
+                upFocusRequester = backFocusRequester,
+                onClick = { onLauncherModeSelected(LauncherSetupMode.ADVANCED) }
+            )
+            Spacer(Modifier.height(8.dp))
+            Text("Shizuku-based. No Accessibility service, with better performance and a stronger launcher override when supported.", color = muted, fontSize = 13.sp, lineHeight = 18.sp)
+            Spacer(Modifier.height(5.dp))
+            Text(
+                if (activeLauncherMode == LauncherSetupMode.ADVANCED) "Active on this device" else if (selectedLauncherMode == LauncherSetupMode.ADVANCED) "Selected for setup" else "Available",
+                color = if (activeLauncherMode == LauncherSetupMode.ADVANCED) Color(0xFF65D68A) else palette.accent,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+        Column(Modifier.weight(1f)) {
+            ActionButton(
+                "Compatibility Mode",
+                palette,
+                primary = selectedLauncherMode == LauncherSetupMode.COMPATIBILITY,
+                modifier = Modifier.fillMaxWidth().testTag("launcher-mode-compatibility"),
+                onClick = { onLauncherModeSelected(LauncherSetupMode.COMPATIBILITY) }
+            )
+            Spacer(Modifier.height(8.dp))
+            Text("Accessibility-service-based auto-start. Easier on TVs that reject overrides, but it has a documented system performance cost.", color = muted, fontSize = 13.sp, lineHeight = 18.sp)
+            Spacer(Modifier.height(5.dp))
+            Text(
+                if (activeLauncherMode == LauncherSetupMode.COMPATIBILITY) "Active or recently observed" else if (selectedLauncherMode == LauncherSetupMode.COMPATIBILITY) "Selected for setup" else "Available",
+                color = if (activeLauncherMode == LauncherSetupMode.COMPATIBILITY) Color(0xFF65D68A) else palette.accent,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+    }
+    Spacer(Modifier.height(24.dp))
+    when (selectedLauncherMode) {
+        LauncherSetupMode.ADVANCED -> {
+            Text("Advanced Mode setup", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(7.dp))
+            Text("Authorize Shizuku, then apply the verified launcher override. Relay does not use the Accessibility service in this mode.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+            Spacer(Modifier.height(12.dp))
+            Text("Shizuku connection", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(7.dp))
+            Text(if (shizukuReady) "Relay is authorized to use the running Shizuku service." else "Authorize Relay with Shizuku here before applying a launcher override.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+            Spacer(Modifier.height(12.dp))
+            ActionButton(if (shizukuReady) "Shizuku connected" else "Authorize Relay with Shizuku", palette, primary = !shizukuReady) {
+                onShizukuMessage(if (shizukuReady) "Shizuku is ready. Apply Advanced Mode below." else RelayShizuku.requestAccess(context))
+            }
+            shizukuMessage?.let { message ->
+                Spacer(Modifier.height(8.dp))
+                Text(message, color = if (message.startsWith("Could") || message.startsWith("Start")) Provider.SMARTTUBE.accent else palette.accent, fontSize = 13.sp, lineHeight = 18.sp)
+            }
+            Spacer(Modifier.height(12.dp))
+            ActionButton(
+                when {
+                    shizukuWorking -> "Applying Relay Home…"
+                    !shizukuReady -> "Authorize Shizuku to set Relay Home"
+                    relayIsDefault -> "Re-apply Relay Home with Shizuku"
+                    else -> "Make Relay Home default with Shizuku"
+                },
+                palette,
+                primary = shizukuReady && !relayIsDefault,
+                onClick = onApplyRelayHomeWithShizuku
+            )
+        }
+        LauncherSetupMode.COMPATIBILITY -> {
+            Text("Compatibility Mode setup", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(7.dp))
+            Text("For TVs that switch back to Google TV. Enable “Relay Home auto-start” in Accessibility. This is easy, but Accessibility services can add a small system performance cost.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+            Spacer(Modifier.height(12.dp))
+            ActionButton("Open Accessibility setup", palette, primary = false, onClick = {
+                onLauncherModeSelected(LauncherSetupMode.COMPATIBILITY)
+                onRequestAutoStart()
+            })
+        }
+    }
+    Spacer(Modifier.height(24.dp))
+    Text("Standard Home app", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+    Spacer(Modifier.height(7.dp))
+    Text(
+        if (relayIsDefault) "Relay Home is currently the default Home app."
+        else "Use Android's Home role first. Some Google TV builds keep their stock launcher in control even after Relay is selected.",
+        color = muted, fontSize = 14.sp, lineHeight = 20.sp
+    )
+    Spacer(Modifier.height(12.dp))
+    ActionButton(
+        if (relayIsDefault) "Review Android Home settings" else "Make Relay Home the default",
+        palette,
+        primary = !relayIsDefault,
+        onClick = onRequestHome
+    )
+    Spacer(Modifier.height(24.dp))
+    Text("Advanced diagnostics", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+    Spacer(Modifier.height(7.dp))
+    Text("Expand for local-only override evidence and the reversible ADB fallback. Relay marks a strategy active only when Android's Home resolver verified Relay Home.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+    Spacer(Modifier.height(12.dp))
+    ActionButton(if (showAdvancedHomeSetup) "Hide advanced diagnostics" else "Show advanced diagnostics", palette, primary = false, onClick = onToggleAdvancedHomeSetup)
+    if (showAdvancedHomeSetup) {
+        Spacer(Modifier.height(14.dp))
+        Text("Override diagnostics", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+        Spacer(Modifier.height(7.dp))
+        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFF090B10)).border(1.dp, Color.White.copy(alpha = .10f), RoundedCornerShape(12.dp)).padding(16.dp)) {
+            Text("Active strategy", color = muted, fontSize = 13.sp)
+            Spacer(Modifier.height(4.dp))
+            Text(launcherDiagnostics.activeStrategy, color = if (relayIsDefault) Color(0xFF65D68A) else Provider.SMARTTUBE.accent, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.height(10.dp))
+            Text("Why", color = muted, fontSize = 13.sp)
+            Spacer(Modifier.height(4.dp))
+            Text(launcherDiagnostics.reason, color = ivory, fontSize = 14.sp, lineHeight = 20.sp)
+            Spacer(Modifier.height(10.dp))
+            Text("Device", color = muted, fontSize = 13.sp)
+            Spacer(Modifier.height(4.dp))
+            Text(launcherDiagnostics.device, color = ivory, fontSize = 14.sp)
+            if (launcherDiagnostics.lastOperation != null) {
+                Spacer(Modifier.height(10.dp))
+                Text("Last operation: ${launcherDiagnostics.lastOperation}", color = muted, fontSize = 13.sp)
+            }
+            launcherDiagnostics.events.takeLast(8).asReversed().forEach { event ->
+                Spacer(Modifier.height(10.dp))
+                Text("${LauncherOverrideStrategy.label(event.strategy)} · ${event.phase} · ${event.outcome}", color = if (event.outcome == "failure") Provider.SMARTTUBE.accent else palette.accent, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                val eventDetail = listOfNotNull(event.cause?.let { "Cause: $it" }, event.observedHome?.let { "Observed: $it" }, event.command?.let { "Command: $it" }).joinToString(" · ")
+                if (eventDetail.isNotBlank()) {
+                    Spacer(Modifier.height(2.dp))
+                    Text(eventDetail, color = muted, fontSize = 12.sp, lineHeight = 17.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                }
+            }
+        }
+        Spacer(Modifier.height(14.dp))
+        Text("Reversible ADB fallback", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+        Spacer(Modifier.height(7.dp))
+        Text("Use this only when the TV ignores the verified Shizuku override. The command is precise and reversible.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+        Spacer(Modifier.height(12.dp))
+        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFF090B10)).border(1.dp, Color.White.copy(alpha = .10f), RoundedCornerShape(12.dp)).padding(16.dp)) {
+            val override = stockLauncherOverride
+            Text("1. Enable Developer options and USB debugging on the TV.", color = ivory, fontSize = 14.sp)
+            Spacer(Modifier.height(7.dp))
+            Text(if (override != null) "2. Relay detected ${override.label}. Connect with ADB, then run:" else "2. Connect with ADB, then run the command for your stock launcher:", color = ivory, fontSize = 14.sp)
+            Spacer(Modifier.height(8.dp))
+            Text(override?.disableCommand ?: "adb shell pm disable-user --user 0 <stock-launcher-package>", color = palette.accent, fontSize = 13.sp, lineHeight = 19.sp)
+            Spacer(Modifier.height(8.dp))
+            Text("Uses only the Shizuku permission you approve. Relay never runs arbitrary ADB commands.", color = muted, fontSize = 13.sp, lineHeight = 18.sp)
+            if (override != null) {
+                Spacer(Modifier.height(10.dp))
+                ActionButton("Copy disable command", palette, primary = false) {
+                    context.getSystemService(ClipboardManager::class.java)?.setPrimaryClip(ClipData.newPlainText("Relay launcher override", override.disableCommand))
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Text("Restore Google TV later with:", color = muted, fontSize = 13.sp)
+            Spacer(Modifier.height(6.dp))
+            Text(override?.restoreCommand ?: "adb shell pm enable --user 0 <stock-launcher-package>", color = palette.accent, fontSize = 13.sp, lineHeight = 19.sp)
+            if (override != null && shizukuReady) {
+                Spacer(Modifier.height(10.dp))
+                ActionButton("Restore stock launcher with Shizuku", palette, primary = false, onClick = onRestoreStockLauncherWithShizuku)
+            }
+        }
+    }
+    Spacer(Modifier.height(28.dp))
+    Text("Relay updates", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+    Spacer(Modifier.height(7.dp))
+    Text("Check GitHub Releases and install a newer Relay Home build without leaving the launcher.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+    Spacer(Modifier.height(12.dp))
+    Text("Installed version", color = muted, fontSize = 14.sp)
+    Spacer(Modifier.height(5.dp))
+    Text(BuildConfig.VERSION_NAME, color = ivory, fontSize = 20.sp, fontWeight = FontWeight.Medium)
+    Spacer(Modifier.height(20.dp))
+    Text("Update channel", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+    Spacer(Modifier.height(7.dp))
+    Text("Beta builds receive newer Relay features first. Stable builds update only on tagged production releases.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+    Spacer(Modifier.height(12.dp))
+    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        ActionButton("Stable", palette, primary = !includeBetaUpdates, onClick = { onIncludeBetaUpdates(false) })
+        ActionButton("Beta & pre-releases", palette, primary = includeBetaUpdates, onClick = { onIncludeBetaUpdates(true) })
+    }
+    Spacer(Modifier.height(24.dp))
+    Text("Check for updates", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+    Spacer(Modifier.height(7.dp))
+    Text("Relay checks the open GitHub repository releases for a newer APK.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+    Spacer(Modifier.height(12.dp))
+    ActionButton(if (updateWorking) "Checking GitHub…" else "Check now", palette, primary = true, onClick = {
+        if (!updateWorking) {
+            onUpdateWorking(true)
+            onUpdateMessage(null)
+            updateScope.launch {
+                RelayUpdater.check(includeBetaUpdates)
+                    .onSuccess { release ->
+                        onAvailableRelease(release)
+                        onUpdateMessage(if (release != null) "A newer build is ready to download (${release.tag})." else "Relay is up to date.")
+                    }
+                    .onFailure { error -> onUpdateMessage(error.message ?: "Could not check for updates.") }
+                onUpdateWorking(false)
+            }
+        }
+    })
+    updateMessage?.let { message ->
+        Spacer(Modifier.height(10.dp))
+        Text(message, color = palette.accent, fontSize = 14.sp, lineHeight = 20.sp)
+    }
+    availableRelease?.let { release ->
+        Spacer(Modifier.height(16.dp))
+        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFF090B10)).border(1.dp, Color.White.copy(alpha = .10f), RoundedCornerShape(12.dp)).padding(16.dp)) {
+            Text("Ready to install: ${release.title}", color = ivory, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            if (release.notes.isNotBlank()) {
+                Spacer(Modifier.height(6.dp))
+                Text(release.notes, color = muted, fontSize = 13.sp, lineHeight = 18.sp, maxLines = 4, overflow = TextOverflow.Ellipsis)
+            }
+            Spacer(Modifier.height(12.dp))
+            ActionButton(if (updateWorking) "Downloading update…" else "Download and install", palette, primary = true, onClick = {
+                if (!updateWorking) {
+                    onUpdateWorking(true)
+                    updateScope.launch {
+                        RelayUpdater.download(context, release)
+                            .onSuccess { apkFile -> onUpdateMessage(RelayUpdater.install(context, apkFile)) }
+                            .onFailure { error -> onUpdateMessage(error.message ?: "Download failed.") }
+                        onUpdateWorking(false)
+                    }
+                }
+            })
+        }
+    }
+    Spacer(Modifier.height(28.dp))
+    SettingsSectionTitle("Android TV settings", "Open the device settings Android TV exposes to Relay. OEM-specific pages fall back to the main Settings screen.")
+    Spacer(Modifier.height(20.dp))
+    systemSettingsEntries.chunked(3).forEach { row ->
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+            row.forEach { entry ->
+                Box(Modifier.weight(1f)) { SystemSettingsTile(entry, palette) { openSystemSettings(context, entry.action) } }
+            }
+            repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+        }
+        Spacer(Modifier.height(14.dp))
     }
 }
 
@@ -995,37 +1778,6 @@ internal fun SystemSettingsTile(
             Text(entry.symbol, color = ivory, fontSize = if (entry.symbol.length > 2) 14.sp else 18.sp, fontWeight = FontWeight.Bold)
         }
         Text(entry.label, color = ivory, fontSize = 15.sp, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-    }
-}
-
-@Composable
-internal fun SettingsNavigationItem(
-    label: String,
-    selected: Boolean,
-    palette: RelayPalette,
-    focusRequester: FocusRequester? = null,
-    upFocusRequester: FocusRequester? = null,
-    rightFocusRequester: FocusRequester? = null,
-    onClick: () -> Unit
-) {
-    val source = remember { MutableInteractionSource() }
-    val focused by source.collectIsFocusedAsState()
-    Row(
-        (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-            .then(if (upFocusRequester != null || rightFocusRequester != null) Modifier.focusProperties {
-                if (upFocusRequester != null) up = upFocusRequester
-                if (rightFocusRequester != null) right = rightFocusRequester
-            } else Modifier)
-            .fillMaxWidth().clip(RoundedCornerShape(12.dp))
-            .background(if (selected || focused) palette.accent.copy(alpha = .20f) else Color.Transparent)
-            .border(if (focused) 2.dp else 0.dp, if (focused) palette.accent else Color.Transparent, RoundedCornerShape(12.dp))
-            .clickable(interactionSource = source, indication = null, onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Box(Modifier.size(7.dp).clip(CircleShape).background(if (selected) palette.accent else Color.Transparent))
-        Spacer(Modifier.width(12.dp))
-        Text(label, color = if (selected || focused) ivory else muted, fontSize = 17.sp, fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal)
     }
 }
 

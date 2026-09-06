@@ -113,6 +113,7 @@ import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.vectorResource
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -141,6 +142,7 @@ import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.YearMonth
 
+private const val ALL_APPS_ROWS_PER_PAGE = 3
 
 internal fun android.graphics.drawable.Drawable.toAspectBitmap(width: Int, height: Int): Bitmap {
     val sourceWidth = intrinsicWidth.takeIf { it > 0 } ?: width
@@ -186,10 +188,22 @@ internal fun AppsScreen(
     palette: RelayPalette,
     favoriteApps: Set<String>,
     onFavoriteChanged: (String, Boolean) -> Unit,
-    onBackHome: () -> Unit
+    onBackHome: () -> Unit,
+    hiddenApps: Set<String> = emptySet(),
+    onHiddenChanged: (String, Boolean) -> Unit = { _, _ -> },
+    appSortOrder: AppSortOrder = AppSortOrder.ALPHABETICAL,
+    iconShape: AppIconShape = AppIconShape.MATCH_EACH_APP
 ) {
     val context = LocalContext.current
-    val apps = rememberInstalledApps(context)
+    val discoveredApps = rememberInstalledApps(context)
+    val appMetadata = rememberInstalledAppMetadata(context)
+    val apps = remember(discoveredApps, hiddenApps, appSortOrder, appMetadata) {
+        sortInstalledApps(
+            discoveredApps.filterNot { it.packageName in hiddenApps },
+            appSortOrder,
+            appMetadata
+        )
+    }
     // Base the grid on Android's logical TV width so 720p, 1080p, and 4K density
     // configurations stay inside the viewport while retaining three predictable rows.
     val screenWidthDp = LocalConfiguration.current.screenWidthDp
@@ -201,7 +215,7 @@ internal fun AppsScreen(
         screenWidthDp >= 1050 -> 6
         else -> 5
     }
-    val rowsPerPage = 3
+    val rowsPerPage = ALL_APPS_ROWS_PER_PAGE
     val appsPerPage = appColumns * rowsPerPage
     val pageCount = if (apps.isEmpty()) 0 else (apps.size + appsPerPage - 1) / appsPerPage
     var appPage by remember { mutableStateOf(0) }
@@ -235,9 +249,6 @@ internal fun AppsScreen(
     val pageApps = apps.drop(appPage * appsPerPage).take(appsPerPage)
     val pageRows = pageApps.chunked(appColumns)
     val currentPageFirstFocusRequester = pageApps.firstOrNull()?.let { appFocusRequesters[it.packageName] }
-    fun requesterFor(localIndex: Int?): FocusRequester? = localIndex
-        ?.takeIf { it in pageApps.indices }
-        ?.let { appFocusRequesters[pageApps[it].packageName] }
     fun movePage(direction: Int, currentIndex: Int): Boolean {
         val nextPage = appPage + direction
         if (nextPage !in 0 until pageCount) return false
@@ -279,7 +290,10 @@ internal fun AppsScreen(
             Text("All apps", color = ivory, fontSize = 23.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.width(12.dp))
             Text(
-                if (pageCount > 1) "A–Z · Page ${appPage + 1} of $pageCount · Left/right for more" else "A–Z",
+                buildString {
+                    append(appSortOrder.label)
+                    if (pageCount > 1) append(" · Page ${appPage + 1} of $pageCount · Left/right for more")
+                },
                 color = muted,
                 fontSize = 14.sp
             )
@@ -288,66 +302,24 @@ internal fun AppsScreen(
         if (apps.isEmpty()) {
             Text("No launchable apps were found yet.", color = muted, fontSize = 17.sp)
         } else {
-            Box(Modifier.weight(1f).fillMaxWidth().focusGroup()) {
-                Column(
-                    Modifier.fillMaxWidth().padding(bottom = if (compactHeight) 0.dp else 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(if (compactHeight) 8.dp else 14.dp)
-                ) {
-                    pageRows.forEachIndexed { rowIndex, rowApps ->
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(if (compactHeight) 10.dp else 18.dp)
-                        ) {
-                            rowApps.forEachIndexed { column, app ->
-                                val localIndex = rowIndex * appColumns + column
-                                val rowStart = rowIndex * appColumns
-                                val rowEnd = rowStart + rowApps.size
-                                val upIndex = if (rowIndex > 0) {
-                                    minOf((rowIndex - 1) * appColumns + column, rowStart - 1)
-                                } else {
-                                    null
-                                }
-                                val downIndex = if (rowIndex + 1 < pageRows.size) {
-                                    minOf((rowIndex + 1) * appColumns + column, pageApps.size - 1)
-                                } else {
-                                    null
-                                }
-                                key(app.packageName) {
-                                    Box(Modifier.weight(1f)) {
-                                        InstalledAppTile(
-                                            app = app,
-                                            palette = palette,
-                                            focusRequester = appFocusRequesters[app.packageName],
-                                            upFocusRequester = requesterFor(upIndex) ?: backFocusRequester,
-                                            downFocusRequester = requesterFor(downIndex)
-                                                ?: if (rowIndex + 1 == pageRows.size) FocusRequester.Cancel else null,
-                                            leftFocusRequester = if (column > 0) requesterFor(localIndex - 1)
-                                                else if (appPage == 0) FocusRequester.Cancel else null,
-                                            rightFocusRequester = if (localIndex + 1 < rowEnd) requesterFor(localIndex + 1)
-                                                else if (appPage + 1 >= pageCount) FocusRequester.Cancel else null,
-                                            onPageMoveLeft = if (column == 0 && appPage > 0) {
-                                                { movePage(-1, localIndex) }
-                                            } else {
-                                                null
-                                            },
-                                            onPageMoveRight = if (localIndex + 1 == rowEnd && appPage + 1 < pageCount) {
-                                                { movePage(1, localIndex) }
-                                            } else {
-                                                null
-                                            },
-                                            menuOpen = activeMenuApp != null,
-                                            onLongClick = { activeMenuApp = app },
-                                            onClick = { InstalledApps.launch(context, app) }
-                                        )
-                                    }
-                                }
-                            }
-                            repeat(appColumns - rowApps.size) {
-                                Spacer(Modifier.weight(1f))
-                            }
-                        }
-                    }
-                }
+            Box(Modifier.weight(1f).fillMaxWidth()) {
+                AllAppsGrid(
+                    pageRows = pageRows,
+                    pageApps = pageApps,
+                    appColumns = appColumns,
+                    appPage = appPage,
+                    pageCount = pageCount,
+                    compactHeight = compactHeight,
+                    palette = palette,
+                    iconShape = iconShape,
+                    appFocusRequesters = appFocusRequesters,
+                    backFocusRequester = backFocusRequester,
+                    menuOpen = activeMenuApp != null,
+                    onPageMoveLeft = { localIndex -> movePage(-1, localIndex) },
+                    onPageMoveRight = { localIndex -> movePage(1, localIndex) },
+                    onLongClick = { activeMenuApp = it },
+                    onClick = { InstalledApps.launch(context, it) }
+                )
             }
         }
     }
@@ -356,6 +328,7 @@ internal fun AppsScreen(
         AppActionsDialog(
             app = app,
             isFavorite = isFavorite,
+            isHidden = app.packageName in hiddenApps,
             palette = palette,
             onOpen = {
                 activeMenuApp = null
@@ -364,6 +337,10 @@ internal fun AppsScreen(
             onToggleFavorite = {
                 activeMenuApp = null
                 onFavoriteChanged(app.packageName, !isFavorite)
+            },
+            onToggleHidden = {
+                activeMenuApp = null
+                onHiddenChanged(app.packageName, app.packageName !in hiddenApps)
             },
             onAppInfo = {
                 activeMenuApp = null
@@ -376,12 +353,130 @@ internal fun AppsScreen(
     }
 }
 
+/**
+ * The All Apps page is intentionally a fixed, non-scrolling three-row viewport. The old grid
+ * let each tile choose its natural height, so a long label or a large TV viewport could push the
+ * last row below the screen. Reserve the complete height up front and make every row consume the
+ * same budget, including the final page when it contains fewer than three rows.
+ */
+internal fun allAppsRowHeight(
+    availableHeight: Dp,
+    rowSpacing: Dp,
+    bottomPadding: Dp,
+    rowCount: Int = ALL_APPS_ROWS_PER_PAGE
+): Dp {
+    require(rowCount > 0) { "rowCount must be positive" }
+    return (
+        availableHeight - bottomPadding - rowSpacing * (rowCount - 1)
+    ).coerceAtLeast(0.dp) / rowCount
+}
+
+@Composable
+@OptIn(ExperimentalComposeUiApi::class)
+internal fun AllAppsGrid(
+    pageRows: List<List<InstalledApp>>,
+    pageApps: List<InstalledApp>,
+    appColumns: Int,
+    appPage: Int,
+    pageCount: Int,
+    compactHeight: Boolean,
+    palette: RelayPalette,
+    iconShape: AppIconShape = AppIconShape.MATCH_EACH_APP,
+    appFocusRequesters: Map<String, FocusRequester>,
+    backFocusRequester: FocusRequester,
+    menuOpen: Boolean,
+    onPageMoveLeft: (Int) -> Boolean,
+    onPageMoveRight: (Int) -> Boolean,
+    onLongClick: (InstalledApp) -> Unit,
+    onClick: (InstalledApp) -> Unit
+) {
+    val rowSpacing = if (compactHeight) 8.dp else 14.dp
+    val bottomPadding = if (compactHeight) 0.dp else 12.dp
+    val columnSpacing = if (compactHeight) 10.dp else 18.dp
+    BoxWithConstraints(
+        Modifier.fillMaxSize().focusGroup().testTag("all-apps-grid")
+    ) {
+        val rowHeight = allAppsRowHeight(
+            availableHeight = maxHeight,
+            rowSpacing = rowSpacing,
+            bottomPadding = bottomPadding
+        )
+        fun requesterFor(localIndex: Int?): FocusRequester? = localIndex
+            ?.takeIf { it in pageApps.indices }
+            ?.let { appFocusRequesters[pageApps[it].packageName] }
+
+        Column(
+            Modifier.fillMaxWidth().padding(bottom = bottomPadding),
+            verticalArrangement = Arrangement.spacedBy(rowSpacing)
+        ) {
+            pageRows.forEachIndexed { rowIndex, rowApps ->
+                Row(
+                    Modifier.fillMaxWidth().height(rowHeight).testTag("all-apps-row-$rowIndex"),
+                    horizontalArrangement = Arrangement.spacedBy(columnSpacing)
+                ) {
+                    rowApps.forEachIndexed { column, app ->
+                        val localIndex = rowIndex * appColumns + column
+                        val rowStart = rowIndex * appColumns
+                        val rowEnd = rowStart + rowApps.size
+                        val upIndex = if (rowIndex > 0) {
+                            minOf((rowIndex - 1) * appColumns + column, rowStart - 1)
+                        } else {
+                            null
+                        }
+                        val downIndex = if (rowIndex + 1 < pageRows.size) {
+                            minOf((rowIndex + 1) * appColumns + column, pageApps.size - 1)
+                        } else {
+                            null
+                        }
+                        key(app.packageName) {
+                            Box(Modifier.weight(1f).fillMaxHeight()) {
+                                InstalledAppTile(
+                                    app = app,
+                                    palette = palette,
+                                    iconShape = iconShape,
+                                    modifier = Modifier.fillMaxHeight(),
+                                    focusRequester = appFocusRequesters[app.packageName],
+                                    upFocusRequester = requesterFor(upIndex) ?: backFocusRequester,
+                                    downFocusRequester = requesterFor(downIndex)
+                                        ?: if (rowIndex + 1 == pageRows.size) FocusRequester.Cancel else null,
+                                    leftFocusRequester = if (column > 0) requesterFor(localIndex - 1)
+                                        else if (appPage == 0) FocusRequester.Cancel else null,
+                                    rightFocusRequester = if (localIndex + 1 < rowEnd) requesterFor(localIndex + 1)
+                                        else if (appPage + 1 >= pageCount) FocusRequester.Cancel else null,
+                                    onPageMoveLeft = if (column == 0 && appPage > 0) {
+                                        { onPageMoveLeft(localIndex) }
+                                    } else {
+                                        null
+                                    },
+                                    onPageMoveRight = if (localIndex + 1 == rowEnd && appPage + 1 < pageCount) {
+                                        { onPageMoveRight(localIndex) }
+                                    } else {
+                                        null
+                                    },
+                                    menuOpen = menuOpen,
+                                    onLongClick = { onLongClick(app) },
+                                    onClick = { onClick(app) }
+                                )
+                            }
+                        }
+                    }
+                    repeat(appColumns - rowApps.size) {
+                        Spacer(Modifier.weight(1f))
+                    }
+                }
+            }
+        }
+    }
+}
+
 /** Google TV-style app tile using the application's own Leanback banner when available. */
 @Composable
 @OptIn(ExperimentalFoundationApi::class)
 internal fun InstalledAppTile(
     app: InstalledApp,
     palette: RelayPalette,
+    iconShape: AppIconShape = AppIconShape.MATCH_EACH_APP,
+    modifier: Modifier = Modifier,
     focusRequester: FocusRequester? = null,
     upFocusRequester: FocusRequester? = null,
     downFocusRequester: FocusRequester? = null,
@@ -424,7 +519,7 @@ internal fun InstalledAppTile(
         }
     }
     Column(
-        modifier = (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+        modifier = modifier.then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .then(if (upFocusRequester != null || downFocusRequester != null || leftFocusRequester != null || rightFocusRequester != null) Modifier.focusProperties {
                 if (upFocusRequester != null) up = upFocusRequester
                 if (downFocusRequester != null) down = downFocusRequester
@@ -505,7 +600,7 @@ internal fun InstalledAppTile(
                     modifier = Modifier.fillMaxSize().padding(18.dp)
                 )
             } else {
-                LauncherAppIcon(app = app, palette = palette, focused = showFocus, iconSize = 76.dp)
+                LauncherAppIcon(app = app, palette = palette, focused = showFocus, iconSize = 76.dp, shapePreference = iconShape)
             }
             if (showFocus) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = .08f)))
         }
@@ -526,9 +621,11 @@ internal fun InstalledAppTile(
 internal fun AppActionsDialog(
     app: InstalledApp,
     isFavorite: Boolean,
+    isHidden: Boolean = false,
     palette: RelayPalette,
     onOpen: () -> Unit,
     onToggleFavorite: () -> Unit,
+    onToggleHidden: () -> Unit = {},
     onAppInfo: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -577,6 +674,8 @@ internal fun AppActionsDialog(
                 ActionButton("Open", palette, primary = true, focusRequester = openFocusRequester, onClick = onOpen)
                 Spacer(Modifier.height(10.dp))
                 ActionButton(if (isFavorite) "Remove from favorites" else "Add to favorites", palette, primary = false, onClick = onToggleFavorite)
+                Spacer(Modifier.height(10.dp))
+                ActionButton(if (isHidden) "Show in All Apps" else "Hide from All Apps", palette, primary = false, onClick = onToggleHidden)
                 Spacer(Modifier.height(10.dp))
                 ActionButton("App info & uninstall", palette, primary = false, onClick = onAppInfo)
                 Spacer(Modifier.height(14.dp))

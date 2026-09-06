@@ -1,7 +1,9 @@
 package com.relayhome.launcher.ui.details
 
 import com.relayhome.launcher.*
+import com.relayhome.launcher.data.PersonalRating
 import com.relayhome.launcher.ui.home.ActionButton
+import com.relayhome.launcher.ui.home.MediaScoreBadges
 import com.relayhome.launcher.ui.shared.*
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -149,7 +151,10 @@ internal fun DetailsScreen(
     nuvioSession: NuvioSession?,
     nuvioProfileId: Int,
     onLibraryChanged: () -> Unit,
-    onBackHome: () -> Unit
+    onBackHome: () -> Unit,
+    personalRating: PersonalRating? = null,
+    onPersonalRatingChanged: (PersonalRating) -> Unit = {},
+    mediaScores: MediaScores? = null
 ) {
     val context = LocalContext.current
     val libraryScope = rememberCoroutineScope()
@@ -157,6 +162,9 @@ internal fun DetailsScreen(
     val resumeFocusRequester = remember { FocusRequester() }
     val seasonFocusRequester = remember { FocusRequester() }
     val libraryFocusRequester = remember { FocusRequester() }
+    val personalRatingFocusRequesters = remember {
+        PersonalRating.entries.associateWith { FocusRequester() }
+    }
     val episodeMatch = remember(item.episodeInfo) { Regex("(?i)S\\s*(\\d+)\\D{0,8}E\\s*(\\d+)").find(item.episodeInfo.orEmpty()) }
     val seasonEpisode = episodeMatch?.value
     val originalSeason = episodeMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
@@ -262,6 +270,12 @@ internal fun DetailsScreen(
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
+                    MediaScoreBadges(
+                        tmdbRating = mediaScores?.tmdbRating,
+                        omdbRatings = mediaScores?.omdbRatings,
+                        palette = palette,
+                        modifier = Modifier.padding(top = 9.dp)
+                    )
                     Spacer(Modifier.height(8.dp))
                     listOfNotNull(
                         item.episodeInfo.visibleRelayText().takeIf { it.isNotBlank() },
@@ -306,7 +320,8 @@ internal fun DetailsScreen(
                             primary = true,
                             focusRequester = resumeFocusRequester,
                             upFocusRequester = if (seasonEpisode != null) seasonFocusRequester else backFocusRequester,
-                            rightFocusRequester = if (hasLibraryAction) libraryFocusRequester else null
+                            rightFocusRequester = if (hasLibraryAction) libraryFocusRequester else null,
+                            downFocusRequester = personalRatingFocusRequesters.getValue(PersonalRating.LIKE)
                         ) { ProviderHandoff.play(context, selectedPlaybackItem) }
                         if (hasLibraryAction) {
                             ActionButton(
@@ -314,7 +329,8 @@ internal fun DetailsScreen(
                                 palette.copy(accent = Provider.NUVIO.accent),
                                 primary = false,
                                 focusRequester = libraryFocusRequester,
-                                leftFocusRequester = resumeFocusRequester
+                                leftFocusRequester = resumeFocusRequester,
+                                downFocusRequester = personalRatingFocusRequesters.getValue(PersonalRating.LIKE)
                             ) {
                                 if (!librarySaving) {
                                     librarySaving = true
@@ -330,6 +346,25 @@ internal fun DetailsScreen(
                                     }
                                 }
                             }
+                        }
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    Text("Your rating", color = ivory.copy(alpha = .9f), fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Spacer(Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        PersonalRating.entries.forEachIndexed { index, rating ->
+                            ActionButton(
+                                label = rating.label,
+                                palette = palette,
+                                primary = personalRating == rating,
+                                modifier = Modifier.width(112.dp).height(44.dp),
+                                focusRequester = personalRatingFocusRequesters.getValue(rating),
+                                upFocusRequester = resumeFocusRequester,
+                                leftFocusRequester = PersonalRating.entries.getOrNull(index - 1)
+                                    ?.let(personalRatingFocusRequesters::getValue),
+                                rightFocusRequester = PersonalRating.entries.getOrNull(index + 1)
+                                    ?.let(personalRatingFocusRequesters::getValue)
+                            ) { onPersonalRatingChanged(rating) }
                         }
                     }
                     libraryStatus?.let {

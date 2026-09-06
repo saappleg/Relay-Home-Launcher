@@ -15,6 +15,8 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import com.relayhome.launcher.data.RelaySettingsRepository
+import com.relayhome.launcher.ui.shared.AppSortOrder
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -29,6 +31,16 @@ internal data class InstalledApp(
     val useCircularMask: Boolean,
     val hasLeanbackBanner: Boolean,
     val hasLeanbackLogo: Boolean = false
+)
+
+internal data class InstalledAppMetadata(
+    val lastUsedByPackage: Map<String, Long> = emptyMap(),
+    val installedAtByPackage: Map<String, Long> = emptyMap()
+)
+
+internal data class InstalledAppSortRecord(
+    val packageName: String,
+    val label: String
 )
 
 /** Generation-aware cache used by installed-app discovery. Kept generic so its race behavior is
@@ -193,7 +205,54 @@ internal object InstalledApps {
             .setComponent(ComponentName(app.packageName, app.activityName))
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         runCatching { context.startActivity(intent) }
+            .onSuccess { RelaySettingsRepository.recordAppLaunched(context, app.packageName) }
     }
+}
+
+/** Stable ordering for the three user-facing All Apps modes. Missing metadata falls back to A–Z. */
+internal fun sortInstalledApps(
+    apps: List<InstalledApp>,
+    order: AppSortOrder,
+    metadata: InstalledAppMetadata = InstalledAppMetadata()
+): List<InstalledApp> {
+    val appByPackage = apps.associateBy { it.packageName }
+    return sortInstalledAppRecords(
+        apps.map { InstalledAppSortRecord(it.packageName, it.label) },
+        order,
+        metadata
+    ).mapNotNull { appByPackage[it.packageName] }
+}
+
+internal fun visibleInstalledApps(
+    apps: List<InstalledAppSortRecord>,
+    hiddenPackages: Set<String>
+): List<InstalledAppSortRecord> = apps.filterNot { it.packageName in hiddenPackages }
+
+internal fun sortInstalledAppRecords(
+    apps: List<InstalledAppSortRecord>,
+    order: AppSortOrder,
+    metadata: InstalledAppMetadata = InstalledAppMetadata()
+): List<InstalledAppSortRecord> = when (order) {
+    AppSortOrder.ALPHABETICAL -> apps.sortedWith(installedAppRecordLabelComparator)
+    AppSortOrder.RECENTLY_USED -> apps.sortedWith(
+        compareByDescending<InstalledAppSortRecord> { metadata.lastUsedByPackage[it.packageName] ?: 0L }
+            .thenByDescending { metadata.installedAtByPackage[it.packageName] ?: 0L }
+            .thenBy { it.label.lowercase(Locale.ROOT) }
+            .thenBy { it.packageName }
+    )
+    AppSortOrder.RECENTLY_INSTALLED -> apps.sortedWith(
+        compareByDescending<InstalledAppSortRecord> { metadata.installedAtByPackage[it.packageName] ?: 0L }
+            .thenBy { it.label.lowercase(Locale.ROOT) }
+            .thenBy { it.packageName }
+    )
+}
+
+private val installedAppLabelComparator = Comparator<InstalledApp> { left, right ->
+    compareValuesBy(left, right, { it.label.lowercase(Locale.ROOT) }, { it.packageName })
+}
+
+private val installedAppRecordLabelComparator = Comparator<InstalledAppSortRecord> { left, right ->
+    compareValuesBy(left, right, { it.label.lowercase(Locale.ROOT) }, { it.packageName })
 }
 
 @Composable
@@ -208,7 +267,33 @@ internal fun rememberInstalledApps(context: Context): List<InstalledApp> {
             InstalledApps.discover(appContext)
         }
         apps = discovered
-        FavoriteAppsStore.ensureDefaults(appContext, discovered)
+        withContext(Dispatchers.IO) {
+            RelaySettingsRepository.recordDiscoveredAppPackages(
+                appContext,
+                discovered.map { it.packageName }.toSet()
+            )
+            FavoriteAppsStore.ensureDefaults(
+                appContext,
+                discovered,
+                hiddenPackages = RelaySettingsRepository.loadHiddenAppPackages(appContext)
+            )
+        }
     }
     return apps
+}
+
+@Composable
+internal fun rememberInstalledAppMetadata(context: Context): InstalledAppMetadata {
+    val appContext = remember(context) { context.applicationContext }
+    val refreshRevision = (context as? MainActivity)?.launcherStateRevision ?: 0
+    var metadata by remember(appContext) { mutableStateOf(InstalledAppMetadata()) }
+    LaunchedEffect(appContext, refreshRevision) {
+        metadata = withContext(Dispatchers.IO) {
+            InstalledAppMetadata(
+                lastUsedByPackage = RelaySettingsRepository.loadAppLastUsed(appContext),
+                installedAtByPackage = RelaySettingsRepository.loadAppInstalledAt(appContext)
+            )
+        }
+    }
+    return metadata
 }
