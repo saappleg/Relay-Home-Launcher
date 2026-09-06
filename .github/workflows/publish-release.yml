@@ -37,6 +37,16 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Verify checked out source and test revision
+        run: |
+          set -euo pipefail
+          checkout_sha="$(git rev-parse HEAD)"
+          test "$checkout_sha" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          test -f app/src/androidTest/java/com/relayhome/launcher/ComposeTestSynchronization.kt
+          printf 'Release gate checkout: %s\n' "$checkout_sha"
+          git log -1 --oneline
+
       - name: Validate Gradle Wrapper
         uses: gradle/actions/wrapper-validation@v6
 
@@ -153,12 +163,13 @@ jobs:
           RELAY_VERSION_CODE: ${{ inputs.version_code }}
           RELAY_VERSION_NAME: ${{ inputs.version_name }}
         with:
-          # API 34's hosted x86_64 image is substantially more established than the API 35
-          # image and avoids the boot/console instability seen in run 34015242412.
+          # Match the local passing TV test surface. The API 34 phone/google_apis image retained
+          # a 48dp status-bar inset even after immersive.full=* (run 34040411183), so dimensions
+          # and density alone were not enough to reproduce the TV window policy.
           api-level: 34
-          target: google_apis
+          target: google-tv
           arch: x86_64
-          profile: pixel_2
+          profile: tv_1080p
           cores: 4
           ram-size: 4096M
           heap-size: 1024M
