@@ -34,6 +34,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.focusGroup
 import androidx.compose.foundation.focusable
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
@@ -236,6 +237,33 @@ internal suspend fun requestHomeFocusWithRetry(
         ) return true
     }
     return false
+}
+
+/**
+ * Hero actions are part of the fixed top section even though Home's rails share one scroll
+ * container. Compose's automatic focus relocation can otherwise nudge that container when the
+ * stacked Details action receives focus near the viewport edge. Defer the correction one frame
+ * so it wins over relocation, and cancel it as soon as focus enters a rail.
+ */
+@Composable
+internal fun rememberHeroFocusScrollGuard(scrollState: ScrollState): (Boolean) -> Unit {
+    val scope = rememberCoroutineScope()
+    val heroHasFocus = remember { mutableStateOf(false) }
+    val pendingReset = remember { arrayOfNulls<kotlinx.coroutines.Job>(1) }
+    return remember(scrollState) {
+        { focused: Boolean ->
+            heroHasFocus.value = focused
+            pendingReset[0]?.cancel()
+            pendingReset[0] = if (focused) {
+                scope.launch {
+                    withFrameNanos { }
+                    if (heroHasFocus.value) scrollState.scrollTo(0)
+                }
+            } else {
+                null
+            }
+        }
+    }
 }
 
 /**
@@ -446,6 +474,7 @@ internal fun HomeScreen(
     }
     val heroFocusRequester = remember { FocusRequester() }
     val homeScrollState = rememberScrollState()
+    val heroFocusScrollGuard = rememberHeroFocusScrollGuard(homeScrollState)
     var profilePickerVisible by remember { mutableStateOf(false) }
     var ambientFocus by remember { mutableStateOf(ambientFocusFor(hero)) }
     val showHeroAmbient = {
@@ -637,7 +666,8 @@ internal fun HomeScreen(
                             scrollHomeToTop()
                         },
                         onItemSelected = onItemSelected,
-                        onNavigateHero = onHeroNavigate
+                        onNavigateHero = onHeroNavigate,
+                        onHeroFocusChanged = heroFocusScrollGuard
                     ) { accent ->
                         if (accent != null) onHeroChanged(hero.copy(palette = hero.palette.copy(accent = accent, glow = accent.copy(alpha = .32f))))
                     }
@@ -1306,6 +1336,7 @@ internal fun HeroPanel(
     heroCandidates: List<MediaItem>,
     downFocusRequester: FocusRequester? = null,
     onHeroFocused: () -> Unit,
+    onHeroFocusChanged: (Boolean) -> Unit = {},
     onItemSelected: (MediaItem) -> Unit,
     onNavigateHero: (HeroNavigationDirection) -> Unit = {},
     onArtworkColor: (Color?) -> Unit
@@ -1424,9 +1455,9 @@ internal fun HeroPanel(
                 )
             }
             Spacer(Modifier.height(12.dp))
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
-                verticalAlignment = Alignment.CenterVertically
+            Column(
+                horizontalAlignment = Alignment.Start,
+                verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 val heroContentKey = hero.item?.contentKey() ?: "${hero.title}|${hero.subtitle}"
                 ActionButton(
@@ -1439,12 +1470,18 @@ internal fun HeroPanel(
                         // extra 16dp needed at TV density and during the focused 1.06x scale;
                         // keep the secondary Details action compact.
                         .width(128.dp)
-                        .height(44.dp),
+                        .height(44.dp)
+                        .testTag("hero-resume"),
                     focusRequester = resumeFocusRequester,
                     upFocusRequester = homeFocusRequester,
-                    downFocusRequester = downFocusRequester,
-                    rightFocusRequester = detailsFocusRequester,
-                    onFocused = { if (it) onHeroFocused() }
+                    // Carousel Left/Right is handled by the hero container. Keep the action
+                    // path vertical so Details remains reachable without competing with hero
+                    // item navigation: Resume -> Details -> first Home rail.
+                    downFocusRequester = detailsFocusRequester,
+                    onFocused = {
+                        onHeroFocusChanged(it)
+                        if (it) onHeroFocused()
+                    }
                 ) { hero.item?.let { ProviderHandoff.play(context, it) } }
                 ActionButton(
                     "ⓘ  Details",
@@ -1453,12 +1490,15 @@ internal fun HeroPanel(
                     contentKey = heroContentKey,
                     modifier = Modifier
                         .width(122.dp)
-                        .height(44.dp),
+                        .height(44.dp)
+                        .testTag("hero-details"),
                     focusRequester = detailsFocusRequester,
-                    upFocusRequester = homeFocusRequester,
                     downFocusRequester = downFocusRequester,
-                    leftFocusRequester = resumeFocusRequester,
-                    onFocused = { if (it) onHeroFocused() }
+                    upFocusRequester = resumeFocusRequester,
+                    onFocused = {
+                        onHeroFocusChanged(it)
+                        if (it) onHeroFocused()
+                    }
                 ) { hero.item?.let(onItemSelected) }
             }
         }
@@ -1605,6 +1645,7 @@ internal fun MediaRail(
             Box(
                 Modifier
                     .size(1.dp)
+                    .testTag("home-row-entry")
                     .focusRequester(firstFocusRequester)
                     .focusable()
                     .onFocusChanged { entryFocused = it.hasFocus }

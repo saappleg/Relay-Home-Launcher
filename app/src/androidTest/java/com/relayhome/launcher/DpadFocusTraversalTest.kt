@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -37,6 +39,9 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performKeyInput
 import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.unit.dp
+import java.util.concurrent.atomic.AtomicInteger
+import com.relayhome.launcher.ui.home.MediaRail
+import com.relayhome.launcher.ui.home.rememberHeroFocusScrollGuard
 import com.relayhome.launcher.ui.home.HomeFocusAnchorHost
 import com.relayhome.launcher.ui.home.ActionButton
 import com.relayhome.launcher.ui.home.HeroPanel
@@ -161,8 +166,9 @@ class DpadFocusTraversalTest {
     }
 
     @Test
-    fun heroActions_keepReadableLabels_andDirectlyEnterFirstRow() {
+    fun heroActions_keepReadableLabels_andEnterFirstRowAfterDetails() {
         val heroRequester = FocusRequester()
+        val detailsRequester = FocusRequester()
         val firstRowRequester = FocusRequester()
 
         composeRule.setContent {
@@ -176,6 +182,19 @@ class DpadFocusTraversalTest {
                         .height(48.dp)
                         .testTag("hero-play"),
                     focusRequester = heroRequester,
+                    downFocusRequester = detailsRequester,
+                    onClick = {}
+                )
+                ActionButton(
+                    label = "ⓘ  Details",
+                    palette = orbitalPalette,
+                    primary = false,
+                    modifier = Modifier
+                        .width(160.dp)
+                        .height(48.dp)
+                        .testTag("hero-details"),
+                    focusRequester = detailsRequester,
+                    upFocusRequester = heroRequester,
                     downFocusRequester = firstRowRequester,
                     onClick = {}
                 )
@@ -195,6 +214,10 @@ class DpadFocusTraversalTest {
         composeRule.onNodeWithTag("hero-play").assertIsDisplayed()
         composeRule.onNodeWithText("▶  Play").assertTextEquals("▶  Play")
         composeRule.onNodeWithTag("hero-play").performKeyInput { pressKey(Key.DirectionDown) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).assertIsFocused()
+        composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionDown) }
+        composeRule.waitForIdle()
         composeRule.onNodeWithTag("first-row-entry").assertIsFocused()
     }
 
@@ -377,24 +400,36 @@ class DpadFocusTraversalTest {
             description = "2025  •  Drama  •  1h 48m  •  A deliberately long provider description that must not displace the hero actions"
         )
         val resumeRequester = FocusRequester()
+        val firstRowRequester = FocusRequester()
 
         composeRule.setContent {
-            HeroPanel(
-                hero = Hero(
-                    title = title,
-                    subtitle = "2025  •  Drama  •  1h 48m  •  Extended metadata from Nuvio that used to push the action row out of the fixed hero panel",
+            Column {
+                HeroPanel(
+                    hero = Hero(
+                        title = title,
+                        subtitle = "2025  •  Drama  •  1h 48m  •  Extended metadata from Nuvio that used to push the action row out of the fixed hero panel",
+                        palette = orbitalPalette,
+                        artworkUrl = "",
+                        item = item
+                    ),
                     palette = orbitalPalette,
-                    artworkUrl = "",
-                    item = item
-                ),
-                palette = orbitalPalette,
-                homeFocusRequester = FocusRequester(),
-                resumeFocusRequester = resumeRequester,
-                heroCandidates = listOf(item),
-                onHeroFocused = {},
-                onItemSelected = {},
-                onArtworkColor = {}
-            )
+                    homeFocusRequester = FocusRequester(),
+                    resumeFocusRequester = resumeRequester,
+                    heroCandidates = listOf(item),
+                    downFocusRequester = firstRowRequester,
+                    onHeroFocused = {},
+                    onItemSelected = {},
+                    onArtworkColor = {}
+                )
+                Box(
+                    Modifier
+                        .width(240.dp)
+                        .height(80.dp)
+                        .testTag("first-row-entry")
+                        .focusRequester(firstRowRequester)
+                        .focusable()
+                )
+            }
             LaunchedEffect(title) { resumeRequester.requestFocus() }
         }
         composeRule.waitForIdle()
@@ -404,10 +439,80 @@ class DpadFocusTraversalTest {
             .assertIsFocused()
         composeRule.onNodeWithText("ⓘ  Details").assertIsDisplayed()
 
-        // The explicit horizontal bridge proves the second compact action is a real focus
-        // target, rather than text that only happens to be painted beside the first button.
-        composeRule.onNodeWithText(expectedAction).performKeyInput { pressKey(Key.DirectionRight) }
-        composeRule.onNodeWithText("ⓘ  Details").assertIsFocused()
+        // The vertical bridge keeps Details reachable while Left/Right remains reserved for
+        // changing the hero candidate.
+        composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionDown) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).assertIsFocused()
+        composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionDown) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("first-row-entry").assertIsFocused()
+    }
+
+    @Test
+    fun heroActions_keepPageAnchored_untilContinueWatchingReceivesFocus() {
+        val resumeRequester = FocusRequester()
+        val firstRowRequester = FocusRequester()
+        val observedScrollOffset = AtomicInteger(-1)
+        val item = MediaItem(
+            title = "Continue Movie",
+            provider = Provider.NUVIO,
+            progress = 0.35f,
+            colors = emptyList(),
+            artworkUrl = ""
+        )
+
+        composeRule.setContent {
+            val scrollState = rememberScrollState()
+            LaunchedEffect(scrollState.value) { observedScrollOffset.set(scrollState.value) }
+            Box(Modifier.height(520.dp)) {
+                Column(Modifier.verticalScroll(scrollState)) {
+                    HeroPanel(
+                        hero = heroForTest(item),
+                        palette = orbitalPalette,
+                        homeFocusRequester = FocusRequester(),
+                        resumeFocusRequester = resumeRequester,
+                        heroCandidates = listOf(item),
+                        downFocusRequester = firstRowRequester,
+                        onHeroFocused = {},
+                        onHeroFocusChanged = rememberHeroFocusScrollGuard(scrollState),
+                        onItemSelected = {},
+                        onArtworkColor = {}
+                    )
+                    Spacer(Modifier.height(18.dp))
+                    MediaRail(
+                        title = "Continue Watching",
+                        items = listOf(item),
+                        palette = orbitalPalette,
+                        dateFormat = RelayDateFormat.LOCAL,
+                        onHeroChanged = {},
+                        onItemSelected = {},
+                        firstFocusRequester = firstRowRequester,
+                        upFocusRequester = resumeRequester
+                    )
+                }
+            }
+            LaunchedEffect(Unit) { resumeRequester.requestFocus() }
+        }
+        composeRule.waitForIdle()
+
+        assertEquals(0, observedScrollOffset.get())
+        composeRule.onNodeWithText("▶  Resume").assertIsFocused()
+        composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionDown) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).assertIsFocused()
+        assertEquals(
+            "Details must not cause the home scroll to move while the hero is still focused",
+            0,
+            observedScrollOffset.get()
+        )
+
+        composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionDown) }
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true).assertIsFocused()
+        check(observedScrollOffset.get() > 0) {
+            "Entering Continue Watching should be the first transition that scrolls Home"
+        }
     }
 
     private fun assertTwoByTwoTraversal(screen: String) {
