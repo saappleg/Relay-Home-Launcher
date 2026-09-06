@@ -44,6 +44,8 @@ import androidx.compose.ui.test.pressKey
 import androidx.compose.ui.unit.dp
 import java.util.concurrent.atomic.AtomicInteger
 import com.relayhome.launcher.ui.home.MediaRail
+import com.relayhome.launcher.ui.home.ProfileSwitcher
+import com.relayhome.launcher.ui.home.TopBar
 import com.relayhome.launcher.ui.home.rememberHeroFocusScrollGuard
 import com.relayhome.launcher.ui.home.HomeFocusAnchorHost
 import com.relayhome.launcher.ui.home.homeFocusAnchorRows
@@ -78,6 +80,139 @@ class DpadFocusTraversalTest {
     @Test
     fun homeDpadTraversal_usesExplicitTwoByTwoFocusMap() {
         assertTwoByTwoTraversal("home")
+    }
+
+    @Test
+    fun homeTopBar_horizontalDpad_staysOnTheMountedNavigationPath() {
+        val homeRequester = FocusRequester()
+        val providerRequesters = Provider.entries.associateWith { FocusRequester() }
+
+        composeRule.setContent {
+            Box(Modifier.width(1920.dp).height(120.dp)) {
+                TopBar(
+                    providers = setOf(Provider.NUVIO, Provider.SMARTTUBE),
+                    palette = orbitalPalette,
+                    peekProvider = null,
+                    homeFocusRequester = homeRequester,
+                    heroFocusRequester = FocusRequester(),
+                    peekFocusRequester = FocusRequester(),
+                    providerFocusRequesters = providerRequesters,
+                    firstContentFocusRequester = FocusRequester(),
+                    onDestination = {},
+                    onProvider = {},
+                    onSettings = {},
+                    onPeekProvider = {},
+                    allowProviderPeek = false,
+                    onTopFocused = {},
+                    nuvioProfiles = emptyList(),
+                    activeNuvioProfile = 0,
+                    profileImageUri = null,
+                    weatherCity = "",
+                    onProfileClick = {}
+                )
+                LaunchedEffect(Unit) { homeRequester.requestFocus() }
+            }
+        }
+        composeRule.waitForIdle()
+
+        val home = composeRule.onNodeWithTag("home-top-destination-home", useUnmergedTree = true)
+        val nuvio = composeRule.onNodeWithTag("home-top-destination-nuvio", useUnmergedTree = true)
+        val relayTube = composeRule.onNodeWithTag("home-top-destination-relaytube", useUnmergedTree = true)
+        val calendar = composeRule.onNodeWithTag("home-top-destination-calendar", useUnmergedTree = true)
+        val apps = composeRule.onNodeWithTag("home-top-destination-apps", useUnmergedTree = true)
+
+        composeRule.awaitFocused(home)
+        home.performKeyInput { pressKey(Key.DirectionRight) }
+        composeRule.awaitFocused(nuvio)
+        nuvio.performKeyInput { pressKey(Key.DirectionRight) }
+        composeRule.awaitFocused(relayTube)
+        relayTube.performKeyInput { pressKey(Key.DirectionRight) }
+        composeRule.awaitFocused(calendar)
+        calendar.performKeyInput { pressKey(Key.DirectionRight) }
+        composeRule.awaitFocused(apps)
+        apps.performKeyInput { pressKey(Key.DirectionLeft) }
+        composeRule.awaitFocused(calendar)
+        calendar.performKeyInput { pressKey(Key.DirectionLeft) }
+        composeRule.awaitFocused(relayTube)
+    }
+
+    @Test
+    fun homeProfileSwitcher_usesOneStableVerticalFocusPath() {
+        composeRule.setContent {
+            ProfileSwitcher(
+                palette = orbitalPalette,
+                profiles = listOf(
+                    NuvioProfile(1, "Alex", "purple"),
+                    NuvioProfile(2, "Sam", "blue"),
+                    NuvioProfile(3, "Taylor", "green")
+                ),
+                relayTubeProfiles = emptyList(),
+                activeProfile = 2,
+                profileImageUri = null,
+                onSelect = {},
+                onDismiss = {}
+            )
+        }
+        composeRule.waitForIdle()
+
+        val sam = composeRule.onNodeWithTag("home-profile-2", useUnmergedTree = true)
+        val taylor = composeRule.onNodeWithTag("home-profile-3", useUnmergedTree = true)
+        val cancel = composeRule.onNodeWithTag("home-profile-cancel", useUnmergedTree = true)
+        composeRule.awaitFocused(sam)
+        sam.performKeyInput { pressKey(Key.DirectionDown) }
+        composeRule.awaitFocused(taylor)
+        taylor.performKeyInput { pressKey(Key.DirectionDown) }
+        composeRule.awaitFocused(cancel)
+        cancel.performKeyInput { pressKey(Key.DirectionUp) }
+        composeRule.awaitFocused(taylor)
+    }
+
+    @Test
+    fun homeMediaRails_moveBetweenRows_withoutLeavingAHiddenEntryFocused() {
+        val firstEntryRequester = FocusRequester()
+        val secondEntryRequester = FocusRequester()
+        val firstItem = MediaItem("First row item", Provider.NUVIO, 0f, emptyList(), "")
+        val secondItem = MediaItem("Second row item", Provider.NUVIO, 0f, emptyList(), "")
+
+        composeRule.setContent {
+            Column {
+                MediaRail(
+                    title = "First row",
+                    items = listOf(firstItem),
+                    palette = orbitalPalette,
+                    dateFormat = RelayDateFormat.LOCAL,
+                    onHeroChanged = {},
+                    onItemSelected = {},
+                    upFocusRequester = FocusRequester(),
+                    firstFocusRequester = firstEntryRequester,
+                    downFocusRequester = secondEntryRequester,
+                    onRailEntered = {},
+                    onRailExited = {}
+                )
+                MediaRail(
+                    title = "Second row",
+                    items = listOf(secondItem),
+                    palette = orbitalPalette,
+                    dateFormat = RelayDateFormat.LOCAL,
+                    onHeroChanged = {},
+                    onItemSelected = {},
+                    upFocusRequester = firstEntryRequester,
+                    firstFocusRequester = secondEntryRequester,
+                    onRailEntered = {},
+                    onRailExited = {}
+                )
+            }
+            LaunchedEffect(Unit) { firstEntryRequester.requestFocus() }
+        }
+        composeRule.waitForIdle()
+
+        val firstCard = composeRule.onNodeWithTag("media-card-${firstItem.contentKey()}", useUnmergedTree = true)
+        val secondCard = composeRule.onNodeWithTag("media-card-${secondItem.contentKey()}", useUnmergedTree = true)
+        composeRule.awaitFocused(firstCard)
+        firstCard.performKeyInput { pressKey(Key.DirectionDown) }
+        composeRule.awaitFocused(secondCard)
+        secondCard.performKeyInput { pressKey(Key.DirectionUp) }
+        composeRule.awaitFocused(firstCard)
     }
 
     @Test
@@ -547,14 +682,14 @@ class DpadFocusTraversalTest {
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionDown) }
         composeRule.waitForIdle()
-        composeRule.awaitFocused(composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true))
+        composeRule.awaitFocused(composeRule.onNodeWithTag("media-card-${longItem.contentKey()}", useUnmergedTree = true))
         check(observedScrollOffset.get() > 0) {
             "Continue Watching entry must own the first downward scroll for the long-title hero"
         }
         composeRule.runOnIdle { heroState.value = heroForTest(rotatedLongItem) }
         composeRule.waitForIdle()
-        composeRule.awaitFocused(composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true))
-        composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionUp) }
+        composeRule.awaitFocused(composeRule.onNodeWithTag("media-card-${longItem.contentKey()}", useUnmergedTree = true))
+        composeRule.onNodeWithTag("media-card-${longItem.contentKey()}", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionUp) }
         composeRule.waitForIdle()
         composeRule.awaitFocused(composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true))
         assertEquals(initialPanelBounds.top.value, composeRule.onNodeWithTag("hero-panel", useUnmergedTree = true).getUnclippedBoundsInRoot().top.value, 0.5f)
@@ -870,7 +1005,7 @@ class DpadFocusTraversalTest {
 
         composeRule.onNodeWithTag("hero-details", useUnmergedTree = true).performKeyInput { pressKey(Key.DirectionDown) }
         composeRule.waitForIdle()
-        composeRule.awaitFocused(composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true))
+        composeRule.awaitFocused(composeRule.onNodeWithTag("media-card-${item.contentKey()}", useUnmergedTree = true))
         check(observedScrollOffset.get() > 0) {
             "Entering Continue Watching should be the first transition that scrolls Home"
         }
@@ -879,12 +1014,12 @@ class DpadFocusTraversalTest {
         // wins after Up returns focus to the still-mounted hero action group.
         composeRule.runOnIdle { heroState.value = heroForTest(rotatedItem) }
         composeRule.waitForIdle()
-        composeRule.awaitFocused(composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true))
+        composeRule.awaitFocused(composeRule.onNodeWithTag("media-card-${item.contentKey()}", useUnmergedTree = true))
 
         // Returning upward is the TV reproduction that exposed the race: the row has already
         // scrolled the parent, and focus relocation can otherwise leave the hero permanently
         // cropped under the top bar.
-        composeRule.onNodeWithTag("home-row-entry", useUnmergedTree = true)
+        composeRule.onNodeWithTag("media-card-${item.contentKey()}", useUnmergedTree = true)
             .performKeyInput { pressKey(Key.DirectionUp) }
         composeRule.waitForIdle()
         composeRule.awaitFocused(composeRule.onNodeWithTag("hero-resume", useUnmergedTree = true))

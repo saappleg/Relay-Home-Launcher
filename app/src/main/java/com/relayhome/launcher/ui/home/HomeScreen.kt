@@ -783,13 +783,14 @@ internal fun HomeScreen(
     LaunchedEffect(focusResetGeneration) {
         if (!visible) return@LaunchedEffect
         heroFocusScrollGuard.requestTopAndAwait()
-        homeFocusRequester.requestFocus()
+        requestHomeFocusWithRetry(homeFocusRequester)
         withFrameNanos { }
         onHomeFocusRestored()
     }
     LaunchedEffect(visible) {
         if (visible) {
-            requestHomeFocusWithRetry(lastHomeFocusRequester ?: homeFocusRequester)
+            val restored = requestHomeFocusWithRetry(lastHomeFocusRequester ?: homeFocusRequester)
+            if (!restored) requestHomeFocusWithRetry(topContentFocusRequester)
         }
     }
     Box(
@@ -862,7 +863,7 @@ internal fun HomeScreen(
                             downFocusRequester = null,
                             onRailEntered = heroFocusScrollGuard.onRailEntered,
                             onRailExited = heroFocusScrollGuard.onRailExited,
-                            onFocusTarget = { lastHomeFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS) },
+                            onFocusTarget = { requester -> lastHomeFocusRequester = requester ?: rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS) },
                             onFocusedApp = showAppAmbient
                         ) { app -> InstalledApps.launch(context, app) }
                     }
@@ -879,7 +880,7 @@ internal fun HomeScreen(
                             downFocusRequester = null,
                             onRailEntered = heroFocusScrollGuard.onRailEntered,
                             onRailExited = heroFocusScrollGuard.onRailExited,
-                            onFocusTarget = { lastHomeFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS) },
+                            onFocusTarget = { requester -> lastHomeFocusRequester = requester ?: rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS) },
                             onFocusedApp = showAppAmbient
                         ) { app -> InstalledApps.launch(context, app) }
                         Spacer(Modifier.height(18.dp))
@@ -916,7 +917,7 @@ internal fun HomeScreen(
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
                                 onRailEntered = heroFocusScrollGuard.onRailEntered,
                                 onRailExited = heroFocusScrollGuard.onRailExited,
-                                onFocusTarget = { lastHomeFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.CONTINUE_WATCHING) }
+                                onFocusTarget = { requester -> lastHomeFocusRequester = requester ?: rowEntryFocusRequesters.getValue(HomeRow.CONTINUE_WATCHING) }
                             )
                             HomeRow.FAVORITE_APPS -> FavoriteAppsRail(
                                 apps = favoriteInstalledApps,
@@ -927,7 +928,7 @@ internal fun HomeScreen(
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
                                 onRailEntered = heroFocusScrollGuard.onRailEntered,
                                 onRailExited = heroFocusScrollGuard.onRailExited,
-                                onFocusTarget = { lastHomeFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS) },
+                                onFocusTarget = { requester -> lastHomeFocusRequester = requester ?: rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS) },
                                 onFocusedApp = showAppAmbient
                             ) { app -> InstalledApps.launch(context, app) }
                             HomeRow.RECOMMENDATIONS -> MediaRail(
@@ -944,7 +945,7 @@ internal fun HomeScreen(
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
                                 onRailEntered = heroFocusScrollGuard.onRailEntered,
                                 onRailExited = heroFocusScrollGuard.onRailExited,
-                                onFocusTarget = { lastHomeFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.RECOMMENDATIONS) }
+                                onFocusTarget = { requester -> lastHomeFocusRequester = requester ?: rowEntryFocusRequesters.getValue(HomeRow.RECOMMENDATIONS) }
                             )
                             HomeRow.SUBSCRIPTIONS -> MediaRail(
                                 title = "New from subscriptions",
@@ -960,7 +961,7 @@ internal fun HomeScreen(
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
                                 onRailEntered = heroFocusScrollGuard.onRailEntered,
                                 onRailExited = heroFocusScrollGuard.onRailExited,
-                                onFocusTarget = { lastHomeFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.SUBSCRIPTIONS) }
+                                onFocusTarget = { requester -> lastHomeFocusRequester = requester ?: rowEntryFocusRequesters.getValue(HomeRow.SUBSCRIPTIONS) }
                             )
                             HomeRow.UPCOMING -> MediaRail(
                                 title = "Coming Up",
@@ -977,7 +978,7 @@ internal fun HomeScreen(
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
                                 onRailEntered = heroFocusScrollGuard.onRailEntered,
                                 onRailExited = heroFocusScrollGuard.onRailExited,
-                                onFocusTarget = { lastHomeFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.UPCOMING) }
+                                onFocusTarget = { requester -> lastHomeFocusRequester = requester ?: rowEntryFocusRequesters.getValue(HomeRow.UPCOMING) }
                             )
                         }
                         Spacer(Modifier.height(18.dp))
@@ -1221,8 +1222,37 @@ internal fun TopBar(
         val compact = maxWidth < 1150.dp
         val outerPadding = if (compact) 24.dp else 48.dp
         val logo = if (compact) "RELAY" else "RELAY HOME"
+        val sortedProviders = providers.sortedBy { it.label }
+        val topNavigationKeys = buildList {
+            add("home")
+            sortedProviders.forEach { add("provider:${it.name}") }
+            add("calendar")
+            add("apps")
+            if (nuvioProfiles.isNotEmpty()) add("profile")
+            add("search")
+            add("settings")
+        }
+        val topNavigationRequesters = remember(topNavigationKeys) {
+            topNavigationKeys
+                .filterNot { key -> key == "home" || key.startsWith("provider:") }
+                .associateWith { FocusRequester() }
+        }
+        fun topRequester(key: String): FocusRequester = when {
+            key == "home" -> homeFocusRequester
+            key.startsWith("provider:") -> providerFocusRequesters.getValue(
+                Provider.valueOf(key.removePrefix("provider:"))
+            )
+            else -> topNavigationRequesters.getValue(key)
+        }
+        fun topNeighbor(key: String, offset: Int): FocusRequester? {
+            val index = topNavigationKeys.indexOf(key)
+            return topNavigationKeys.getOrNull(index + offset)?.let(::topRequester)
+        }
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = outerPadding),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = outerPadding)
+                .focusGroup(),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(logo, color = ivory, fontSize = if (compact) 16.sp else 18.sp, fontWeight = FontWeight.Light, letterSpacing = if (compact) 2.sp else 3.sp)
@@ -1241,7 +1271,7 @@ internal fun TopBar(
                 }
                 Spacer(Modifier.width(18.dp))
             }
-            TopDestination("Home", icon = relayHomeIcon, selected = peekProvider == null, palette = palette, compact = compact, focusRequester = homeFocusRequester, downFocusRequester = firstContentFocusRequester, onFocused = {
+            TopDestination("Home", icon = relayHomeIcon, selected = peekProvider == null, palette = palette, compact = compact, focusRequester = homeFocusRequester, downFocusRequester = firstContentFocusRequester, leftFocusRequester = topNeighbor("home", -1), rightFocusRequester = topNeighbor("home", 1), onFocused = {
                 if (it) {
                     onPeekProvider(null)
                     onTopFocused()
@@ -1250,7 +1280,7 @@ internal fun TopBar(
                 onPeekProvider(null)
                 onDestination(Destination.HOME)
             }
-            providers.sortedBy { it.label }.forEach { provider ->
+            sortedProviders.forEach { provider ->
                 TopDestination(
                     provider.label,
                     icon = providerNavigationIcon(provider),
@@ -1258,6 +1288,8 @@ internal fun TopBar(
                     palette = palette,
                     compact = compact,
                     focusRequester = providerFocusRequesters[provider],
+                    leftFocusRequester = topNeighbor("provider:${provider.name}", -1),
+                    rightFocusRequester = topNeighbor("provider:${provider.name}", 1),
                     // A suppressed peek is used while returning from a provider. In that
                     // window the peek target is not composed, so Down must fall back to Hero.
                     downFocusRequester = if (allowProviderPeek) peekFocusRequester else heroFocusRequester,
@@ -1274,7 +1306,7 @@ internal fun TopBar(
                     }
                 }) { onProvider(provider) }
             }
-            TopDestination("Calendar", icon = relayCalendarIcon, selected = false, palette = palette, compact = compact, downFocusRequester = firstContentFocusRequester, onFocused = {
+            TopDestination("Calendar", icon = relayCalendarIcon, selected = false, palette = palette, compact = compact, focusRequester = topRequester("calendar"), downFocusRequester = firstContentFocusRequester, leftFocusRequester = topNeighbor("calendar", -1), rightFocusRequester = topNeighbor("calendar", 1), onFocused = {
                 if (it) {
                     onPeekProvider(null)
                     onTopFocused()
@@ -1283,7 +1315,7 @@ internal fun TopBar(
                 onPeekProvider(null)
                 onDestination(Destination.CALENDAR)
             }
-            TopDestination("Apps", icon = relayAppsIcon, selected = false, palette = palette, compact = compact, downFocusRequester = firstContentFocusRequester, onFocused = {
+            TopDestination("Apps", icon = relayAppsIcon, selected = false, palette = palette, compact = compact, focusRequester = topRequester("apps"), downFocusRequester = firstContentFocusRequester, leftFocusRequester = topNeighbor("apps", -1), rightFocusRequester = topNeighbor("apps", 1), onFocused = {
                 if (it) {
                     onPeekProvider(null)
                     onTopFocused()
@@ -1318,6 +1350,8 @@ internal fun TopBar(
                         palette = palette,
                         compact = compact,
                         downFocusRequester = firstContentFocusRequester,
+                        leftFocusRequester = topNeighbor("profile", -1),
+                        rightFocusRequester = topNeighbor("profile", 1),
                         onFocused = { if (it) { onPeekProvider(null); onTopFocused() } },
                         onClick = onProfileClick
                     )
@@ -1341,7 +1375,10 @@ internal fun TopBar(
                 selected = false,
                 palette = palette,
                 compact = compact,
+                focusRequester = topRequester("search"),
                 downFocusRequester = firstContentFocusRequester,
+                leftFocusRequester = topNeighbor("search", -1),
+                rightFocusRequester = topNeighbor("search", 1),
                 onFocused = { if (it) { onPeekProvider(null); onTopFocused() } }
             ) {
                 onPeekProvider(null)
@@ -1354,7 +1391,10 @@ internal fun TopBar(
                 selected = false,
                 palette = palette,
                 compact = compact,
+                focusRequester = topRequester("settings"),
                 downFocusRequester = firstContentFocusRequester,
+                leftFocusRequester = topNeighbor("settings", -1),
+                rightFocusRequester = topNeighbor("settings", 1),
                 onFocused = { if (it) { onPeekProvider(null); onTopFocused() } },
             ) {
                 onPeekProvider(null)
@@ -1371,6 +1411,8 @@ internal fun ProfileAvatarButton(
     palette: RelayPalette,
     compact: Boolean = false,
     downFocusRequester: FocusRequester? = null,
+    leftFocusRequester: FocusRequester? = null,
+    rightFocusRequester: FocusRequester? = null,
     onFocused: (Boolean) -> Unit = {},
     onClick: () -> Unit
 ) {
@@ -1379,10 +1421,16 @@ internal fun ProfileAvatarButton(
     val focused by source.collectIsFocusedAsState()
     LaunchedEffect(focused) { onFocused(focused) }
     Box(
-        modifier = (if (downFocusRequester != null) Modifier.focusProperties { down = downFocusRequester } else Modifier)
+        modifier = Modifier
+            .then(if (downFocusRequester != null || leftFocusRequester != null || rightFocusRequester != null) Modifier.focusProperties {
+                if (downFocusRequester != null) down = downFocusRequester
+                if (leftFocusRequester != null) left = leftFocusRequester
+                if (rightFocusRequester != null) right = rightFocusRequester
+            } else Modifier)
             .size(if (compact) 38.dp else 45.dp).clip(CircleShape)
             .background(Provider.NUVIO.accent.copy(alpha = .78f))
             .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .3f), CircleShape)
+            .testTag("home-profile-avatar")
             .clickable(interactionSource = source, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
@@ -1410,7 +1458,14 @@ internal fun ProfileSwitcher(
     onSelect: (Int) -> Unit,
     onDismiss: () -> Unit
 ) {
-    val initialFocusRequester = remember(activeProfile, profiles) { FocusRequester() }
+    val profileKeys = remember(profiles) { profiles.map { it.index } }
+    val profileFocusRequesters = remember(profileKeys) {
+        profileKeys.associateWith { FocusRequester() }
+    }
+    val cancelFocusRequester = remember { FocusRequester() }
+    val initialFocusRequester = profileFocusRequesters[activeProfile]
+        ?: profileFocusRequesters.values.firstOrNull()
+        ?: cancelFocusRequester
     DropdownMenu(
         expanded = true,
         onDismissRequest = onDismiss,
@@ -1418,28 +1473,30 @@ internal fun ProfileSwitcher(
         modifier = Modifier.width(430.dp).background(Color(0xFF15121C))
     ) {
         BackHandler(onBack = onDismiss)
-        LaunchedEffect(activeProfile, profiles) {
-            repeat(4) {
-                delay(75)
-                initialFocusRequester.requestFocus()
-            }
+        LaunchedEffect(activeProfile, profileKeys) {
+            requestHomeFocusWithRetry(initialFocusRequester, attempts = 6)
         }
-            Column(Modifier.padding(22.dp)) {
+            Column(Modifier.padding(22.dp).focusGroup()) {
                 Text("Who’s watching?", color = ivory, fontSize = 26.sp, fontWeight = FontWeight.Light)
                 Spacer(Modifier.height(8.dp))
                 Text("Each Relay profile keeps its own Nuvio and RelayTube viewing feeds.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
                 Spacer(Modifier.height(24.dp))
                 profiles.forEachIndexed { index, profile ->
+                    key(profile.index) {
                     val relayTubeProfile = RelayProfileMappingStore.get(LocalContext.current, profile.index)
                         ?.let { id -> relayTubeProfiles.firstOrNull { it.id == id } }
                         ?: relayTubeProfiles.firstOrNull { it.name.equals(profile.name, ignoreCase = true) }
                     val source = remember(profile.index) { MutableInteractionSource() }
                     val focused by source.collectIsFocusedAsState()
-                    val receivesInitialFocus = profile.index == activeProfile ||
-                        (profiles.none { it.index == activeProfile } && index == 0)
                     Row(
-                        (if (receivesInitialFocus) Modifier.focusRequester(initialFocusRequester) else Modifier)
+                        Modifier
+                            .focusRequester(profileFocusRequesters.getValue(profile.index))
+                            .then(if (index > 0 || index < profiles.lastIndex) Modifier.focusProperties {
+                                if (index > 0) up = profileFocusRequesters.getValue(profiles[index - 1].index)
+                                if (index < profiles.lastIndex) down = profileFocusRequesters.getValue(profiles[index + 1].index)
+                            } else Modifier)
                             .fillMaxWidth().clip(RoundedCornerShape(20.dp))
+                            .testTag("home-profile-${profile.index}")
                             .background(if (focused || profile.index == activeProfile) Provider.NUVIO.accent.copy(alpha = .22f) else Color(0xFF1A1C23))
                             .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .10f), RoundedCornerShape(20.dp))
                             // clickable already contributes the TV focus target. Adding a second
@@ -1470,9 +1527,18 @@ internal fun ProfileSwitcher(
                         if (profile.index == activeProfile) Text("Watching", color = Provider.NUVIO.accent, fontSize = 13.sp)
                     }
                     Spacer(Modifier.height(10.dp))
+                    }
                 }
                 Spacer(Modifier.height(8.dp))
-                ActionButton("Cancel", palette, primary = false, onClick = onDismiss)
+                ActionButton(
+                    "Cancel",
+                    palette,
+                    primary = false,
+                    modifier = Modifier.testTag("home-profile-cancel"),
+                    focusRequester = cancelFocusRequester,
+                    upFocusRequester = profiles.lastOrNull()?.let { profileFocusRequesters.getValue(it.index) },
+                    onClick = onDismiss
+                )
         }
     }
 }
@@ -1486,6 +1552,8 @@ internal fun TopDestination(
     compact: Boolean = false,
     focusRequester: FocusRequester? = null,
     downFocusRequester: FocusRequester? = null,
+    leftFocusRequester: FocusRequester? = null,
+    rightFocusRequester: FocusRequester? = null,
     onFocused: (Boolean) -> Unit = {},
     onClick: () -> Unit
 ) {
@@ -1495,7 +1563,11 @@ internal fun TopDestination(
     Row(
         modifier = (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .padding(horizontal = if (compact) 2.dp else 7.dp)
-            .then(if (downFocusRequester != null) Modifier.focusProperties { down = downFocusRequester } else Modifier)
+            .then(if (downFocusRequester != null || leftFocusRequester != null || rightFocusRequester != null) Modifier.focusProperties {
+                if (downFocusRequester != null) down = downFocusRequester
+                if (leftFocusRequester != null) left = leftFocusRequester
+                if (rightFocusRequester != null) right = rightFocusRequester
+            } else Modifier)
             .clip(RoundedCornerShape(22.dp))
             .background(if (active) palette.accent.copy(alpha = if (selected) .24f else .16f) else Color.Transparent)
             .border(if (active) 1.dp else 0.dp, if (active) palette.accent.copy(alpha = .75f) else Color.Transparent, RoundedCornerShape(22.dp))
@@ -1503,6 +1575,7 @@ internal fun TopDestination(
             // observer behind it (or adding a second focusable node) makes rapid provider
             // moves highlight the label without activating the corresponding App Peek.
             .onFocusChanged { onFocused(it.hasFocus) }
+            .testTag("home-top-destination-${label.lowercase(Locale.US)}")
             .clickable(interactionSource = source, indication = null, onClick = onClick)
             .padding(horizontal = if (compact) 10.dp else 17.dp, vertical = if (compact) 7.dp else 9.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -1557,6 +1630,7 @@ internal fun HeroPanel(
             .height(420.dp)
             .background(midnight)
             .testTag("hero-panel")
+            .focusGroup()
             // Observe the whole hero focus subtree rather than either action independently. The
             // Resume -> Details handoff, and a candidate rotation while an action is focused,
             // must not briefly release the parent scroll lock between two stable targets.
@@ -1697,6 +1771,7 @@ internal fun HeroPanel(
                     horizontalAlignment = Alignment.Start,
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                     modifier = Modifier.testTag("hero-action-column")
+                        .focusGroup()
                 ) {
                 ActionButton(
                     if ((hero.item?.progress ?: 0f) > 0f) "▶  Resume" else "▶  Play",
@@ -1831,7 +1906,7 @@ internal fun MediaRail(
     downFocusRequester: FocusRequester? = null,
     onRailEntered: ((suspend () -> Unit) -> Unit),
     onRailExited: () -> Unit,
-    onFocusTarget: () -> Unit = {}
+    onFocusTarget: (FocusRequester?) -> Unit = {}
 ) {
     if (items.isEmpty()) return
     val context = LocalContext.current
@@ -1845,6 +1920,10 @@ internal fun MediaRail(
     }
     val listState = rememberLazyListState()
     val firstCardFocusRequester = remember { FocusRequester() }
+    val stableItems = remember(items) { items.distinctBy { it.contentKey() } }
+    val itemFocusRequesters = remember(stableItems.map { it.contentKey() }) {
+        stableItems.associate { it.contentKey() to FocusRequester() }
+    }
     var entryFocused by remember { mutableStateOf(false) }
     LaunchedEffect(entryFocused) {
         if (entryFocused && firstFocusRequester != null) {
@@ -1857,10 +1936,10 @@ internal fun MediaRail(
     }
     Column(
         Modifier.fillMaxWidth()
+            .focusGroup()
             .bringIntoViewRequester(railBringIntoViewRequester)
             .onFocusChanged { focusState ->
                 if (focusState.hasFocus && !railHasFocus[0]) {
-                    onFocusTarget()
                     onRailEntered { railBringIntoViewRequester.bringIntoView() }
                 } else if (!focusState.hasFocus && railHasFocus[0]) {
                     onRailExited()
@@ -1900,12 +1979,18 @@ internal fun MediaRail(
             }
             val displayedCardWidth = cardWidth ?: if (posters) 140.dp else 310.dp
             LazyRow(
+                modifier = Modifier.focusGroup(),
                 state = listState,
                 contentPadding = PaddingValues(horizontal = RelayTvMargins.screenHorizontal),
                 horizontalArrangement = Arrangement.spacedBy(13.dp)
             ) {
-                val stableItems = items.distinctBy { it.contentKey() }
                 items(stableItems, key = { it.contentKey() }) { item ->
+                    val itemKey = item.contentKey()
+                    val cardFocusRequester = if (itemKey == stableItems.firstOrNull()?.contentKey() && firstFocusRequester != null) {
+                        firstCardFocusRequester
+                    } else {
+                        itemFocusRequesters.getValue(itemKey)
+                    }
                     MediaCard(
                         item = item,
                         palette = palette,
@@ -1914,7 +1999,7 @@ internal fun MediaRail(
                         dateFormat = dateFormat,
                         showEpisodeInfo = title == "Continue Watching" || title == "Coming Up",
                         showPremiereDate = showPremiereDate,
-                        focusRequester = if (item.contentKey() == stableItems.firstOrNull()?.contentKey() && firstFocusRequester != null) firstCardFocusRequester else null,
+                        focusRequester = cardFocusRequester,
                         upFocusRequester = upFocusRequester,
                         downFocusRequester = downFocusRequester,
                         onClick = {
@@ -1925,8 +2010,8 @@ internal fun MediaRail(
                         }
                         }
                     ) { isFocused ->
-                        val itemKey = item.contentKey()
                         if (isFocused) {
+                            onFocusTarget(cardFocusRequester)
                             onFocusedItem(item)
                             focusedItemKey = itemKey
                             pendingHeroUpdate[0]?.cancel()
@@ -2139,7 +2224,7 @@ internal fun FavoriteAppsRail(
     downFocusRequester: FocusRequester? = null,
     onRailEntered: ((suspend () -> Unit) -> Unit),
     onRailExited: () -> Unit,
-    onFocusTarget: () -> Unit = {},
+    onFocusTarget: (FocusRequester?) -> Unit = {},
     onFocusedApp: (InstalledApp?) -> Unit = {},
     onLaunch: (InstalledApp) -> Unit
 ) {
@@ -2155,10 +2240,10 @@ internal fun FavoriteAppsRail(
     val railHasFocus = remember { booleanArrayOf(false) }
     Column(
         Modifier.fillMaxWidth()
+            .focusGroup()
             .bringIntoViewRequester(railBringIntoViewRequester)
             .onFocusChanged { focusState ->
                 if (focusState.hasFocus && !railHasFocus[0]) {
-                    onFocusTarget()
                     onRailEntered { railBringIntoViewRequester.bringIntoView() }
                 } else if (!focusState.hasFocus && railHasFocus[0]) {
                     onRailExited()
@@ -2179,18 +2264,27 @@ internal fun FavoriteAppsRail(
         Text("Favorite Apps", color = ivory, fontSize = 19.sp, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(10.dp))
         LazyRow(
+            modifier = Modifier.focusGroup(),
             contentPadding = PaddingValues(end = 64.dp, top = 5.dp, bottom = 7.dp),
             horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             items(apps, key = { it.packageName }) { app ->
+                val appFocusRequester = if (app.packageName == apps.firstOrNull()?.packageName && focusRequester != null) {
+                    firstCardFocusRequester
+                } else {
+                    remember(app.packageName) { FocusRequester() }
+                }
                 FavoriteAppCard(
                     app = app,
                     palette = palette,
                     shapePreference = iconShape,
-                    focusRequester = if (app.packageName == apps.firstOrNull()?.packageName && focusRequester != null) firstCardFocusRequester else null,
+                    focusRequester = appFocusRequester,
                     upFocusRequester = upFocusRequester,
                     downFocusRequester = downFocusRequester,
-                    onFocusChanged = { focused -> onFocusedApp(if (focused) app else null) }
+                    onFocusChanged = { focused ->
+                        if (focused) onFocusTarget(appFocusRequester)
+                        onFocusedApp(if (focused) app else null)
+                    }
                 ) { onLaunch(app) }
             }
         }
