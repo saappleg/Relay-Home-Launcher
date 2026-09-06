@@ -135,6 +135,22 @@ class AppsScreenAndroidTest {
                             useUnmergedTree = true
                         )
                         val labelBounds = label.fetchSemanticsNode().boundsInRoot
+                        val artworkBounds = composeRule.onNodeWithTag(
+                            "installed-app-tile-${app.packageName}",
+                            useUnmergedTree = true
+                        ).fetchSemanticsNode().boundsInRoot
+                        val iconBounds = composeRule.onNodeWithTag(
+                            "installed-app-icon-${app.packageName}",
+                            useUnmergedTree = true
+                        ).fetchSemanticsNode().boundsInRoot
+                        assertTrue(
+                            "artwork must fit its row: compact=$compactHeight columns=$appColumns app=${app.packageName}",
+                            artworkBounds.top >= rowBounds.top - 0.5f && artworkBounds.bottom <= rowBounds.bottom + 0.5f
+                        )
+                        assertTrue(
+                            "icon must fit its artwork: compact=$compactHeight columns=$appColumns app=${app.packageName}",
+                            iconBounds.top >= artworkBounds.top - 0.5f && iconBounds.bottom <= artworkBounds.bottom + 0.5f
+                        )
                         assertTrue(
                             "label must remain visible: compact=$compactHeight columns=$appColumns app=${app.packageName}",
                             labelBounds.height > 0f && labelBounds.top >= rowBounds.top - 0.5f

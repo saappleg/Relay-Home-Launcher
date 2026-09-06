@@ -637,7 +637,9 @@ internal fun InstalledAppTile(
                     modifier = Modifier.fillMaxSize().padding(logoPadding)
                 )
             } else {
-                LauncherAppIcon(app = app, palette = palette, focused = showFocus, iconSize = iconSize, shapePreference = iconShape)
+                Box(Modifier.size(iconSize).testTag("installed-app-icon-${app.packageName}")) {
+                    LauncherAppIcon(app = app, palette = palette, focused = showFocus, iconSize = iconSize, shapePreference = iconShape)
+                }
             }
             if (showFocus) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = .08f)))
         }
