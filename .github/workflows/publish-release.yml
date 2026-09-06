@@ -168,8 +168,21 @@ jobs:
           disable-linux-hw-accel: false
           # Avoid the hosted runner's intermittent SwiftShader ColorBuffer loss during
           # Compose semantics tests; the suite does not require a rendered GPU surface.
-          emulator-options: "-no-window -noaudio -no-boot-anim -gpu off -no-snapshot"
-          script: ./gradlew :app:connectedCheck --stacktrace --console=plain
+          emulator-options: "-no-window -noaudio -no-boot-anim -gpu off -screen landscape -no-snapshot"
+          script: |
+            set -eu
+            adb wait-for-device
+            orientation="$(adb shell dumpsys input | sed -n 's/.*SurfaceOrientation: \([0-3]\).*/\1/p' | tr -d '\r' | tail -1)"
+            printf 'Emulator surface orientation: %s\n' "$orientation"
+            adb shell wm size | tr -d '\r'
+            case "$orientation" in
+              1|3) ;;
+              *)
+                echo "Expected a landscape emulator surface, got orientation $orientation." >&2
+                exit 1
+                ;;
+            esac
+            ./gradlew :app:connectedCheck --stacktrace --console=plain
 
       - name: Capture emulator diagnostics
         if: failure()
