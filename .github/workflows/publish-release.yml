@@ -166,7 +166,9 @@ jobs:
           # animations disabled for deterministic focus and semantics assertions.
           disable-animations: true
           disable-linux-hw-accel: false
-          emulator-options: "-no-window -noaudio -no-boot-anim -gpu swiftshader_indirect -no-snapshot"
+          # Avoid the hosted runner's intermittent SwiftShader ColorBuffer loss during
+          # Compose semantics tests; the suite does not require a rendered GPU surface.
+          emulator-options: "-no-window -noaudio -no-boot-anim -gpu off -no-snapshot"
           script: ./gradlew :app:connectedCheck --stacktrace --console=plain
 
       - name: Capture emulator diagnostics
