@@ -13,8 +13,8 @@ The **Publish Relay Home release** workflow requires these repository secrets:
 - `TMDB_API_KEY`
 
 Use a version code larger than every prior APK. The newest published release is
-`v0.1.0-beta.5` with version code `28`, so the next beta must use at least code
-`29`. Never replace the signing key after the first signed beta.
+`v0.1.0-beta.6` with version code `29`, so the next beta must use at least code
+`30`. Never replace the signing key after the first signed beta.
 
 Non-release local Gradle builds currently use the documented development
 identity `0.1.0-beta.5` / version code `28`; they must not be treated as the
