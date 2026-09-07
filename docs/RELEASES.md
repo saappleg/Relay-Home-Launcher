@@ -153,6 +153,12 @@ valid size, then verifies package identity, non-debuggable status, signing
 certificate continuity, tag-matching semantic version, and an increasing
 Android version code before showing Android's installer.
 
+Debug builds are intentionally installed under `com.relayhome.launcher.debug`
+and cannot consume GitHub production APKs, which use `com.relayhome.launcher`.
+When a debug build checks for updates, Relay reports that the signed production
+build must be installed separately; it never treats the package suffix as an
+in-place update and never weakens signer, release-tag, or version checks.
+
 The original `v0.1.0-beta.1` asset was debug-signed. Testers must uninstall
 that build before installing the first permanently signed beta. Future signed
 updates preserve app data normally.

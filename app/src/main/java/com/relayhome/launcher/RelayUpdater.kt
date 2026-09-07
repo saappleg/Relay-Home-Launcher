@@ -431,7 +431,16 @@ internal object RelayUpdater {
         expectedReleaseTag: String?
     ) {
         check(!candidate.debuggable) { "The downloaded APK is debuggable." }
-        check(candidate.packageName == expectedPackageName) { "The downloaded APK is not a Relay Home update." }
+        if (candidate.packageName != expectedPackageName) {
+            check(!(expectedPackageName.endsWith(".debug") &&
+                candidate.packageName == expectedPackageName.removeSuffix(".debug"))) {
+                "GitHub releases update the signed production Relay Home package " +
+                    "(${candidate.packageName}). This debug build ($expectedPackageName) " +
+                    "cannot install production updates. Install the production Relay Home " +
+                    "build separately."
+            }
+            error("The downloaded APK is not a Relay Home update.")
+        }
         val candidateVersionName = candidate.versionName?.trim().orEmpty()
         val candidateVersion = parsedVersion(candidateVersionName)
             ?: error("The downloaded APK has an unsupported semantic version.")

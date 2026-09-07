@@ -85,6 +85,31 @@ class RelayUpdaterTest {
     }
 
     @Test
+    fun releaseJson_betaChannelSelectsPublishedBeta7FromBeta6() {
+        val beta7 = release(
+            tag = "v0.1.0-beta.7",
+            prerelease = true,
+            assets = arrayOf(
+                asset(
+                    name = "relay-home-0.1.0-beta.7.apk",
+                    url = "https://github.com/saappleg/Relay-Home-Launcher/releases/download/v0.1.0-beta.7/relay-home-0.1.0-beta.7.apk",
+                    size = 9_069_806L
+                )
+            )
+        )
+
+        val selected = RelayUpdater.selectReleaseFromJsonForTest(
+            JSONArray().put(beta7).toString(),
+            currentVersionName = "0.1.0-beta.6",
+            includePrereleases = true
+        )
+
+        assertNotNull(selected)
+        assertEquals("v0.1.0-beta.7", selected?.tag)
+        assertEquals("relay-home-0.1.0-beta.7.apk", selected?.apkUrl?.substringAfterLast('/'))
+    }
+
+    @Test
     fun releaseJson_rejectsAmbiguousAssetSets() {
         val duplicateExpected = release(
             tag = "v2.0.0",
@@ -219,6 +244,59 @@ class RelayUpdaterTest {
     }
 
     @Test
+    fun apkDecision_acceptsPublishedBeta7FromProductionBeta6() {
+        val beta7 = snapshot(
+            packageName = "com.relayhome.launcher",
+            versionName = "0.1.0-beta.7",
+            versionCode = 30,
+            signerDigests = setOf(BETA_PRODUCTION_CERTIFICATE)
+        )
+        val beta6 = snapshot(
+            packageName = "com.relayhome.launcher",
+            versionName = "0.1.0-beta.6",
+            versionCode = 29,
+            signerDigests = setOf(BETA_PRODUCTION_CERTIFICATE)
+        )
+
+        val result = RelayUpdater.verifyApkDecisionForTest(
+            candidate = beta7,
+            installed = beta6,
+            expectedPackageName = "com.relayhome.launcher",
+            expectedReleaseTag = "v0.1.0-beta.7"
+        )
+
+        assertTrue(result.isSuccess)
+    }
+
+    @Test
+    fun apkDecision_explainsThatDebugBuildsCannotInstallProductionReleases() {
+        val result = RelayUpdater.verifyApkDecisionForTest(
+            candidate = snapshot(
+                packageName = "com.relayhome.launcher",
+                versionName = "0.1.0-beta.7",
+                versionCode = 30,
+                signerDigests = setOf(BETA_PRODUCTION_CERTIFICATE)
+            ),
+            installed = snapshot(
+                packageName = "com.relayhome.launcher.debug",
+                versionName = "0.1.0-beta.5",
+                versionCode = 28,
+                signerDigests = setOf("debug-certificate")
+            ),
+            expectedPackageName = "com.relayhome.launcher.debug",
+            expectedReleaseTag = "v0.1.0-beta.7"
+        )
+
+        assertTrue(result.isFailure)
+        assertEquals(
+            "GitHub releases update the signed production Relay Home package " +
+                "(com.relayhome.launcher). This debug build (com.relayhome.launcher.debug) " +
+                "cannot install production updates. Install the production Relay Home build separately.",
+            result.exceptionOrNull()?.message
+        )
+    }
+
+    @Test
     fun apkDecision_rejectsDebugWrongPackageSignerAndEmptySigner() {
         assertFailure(snapshot(debuggable = true), "debuggable")
         assertFailure(snapshot(packageName = "com.attacker.app"), "not a Relay Home")
@@ -278,6 +356,11 @@ class RelayUpdaterTest {
         debuggable: Boolean = false,
         signerDigests: Set<String> = setOf("release-cert")
     ) = RelayUpdater.ApkVerificationSnapshot(packageName, versionName, versionCode, debuggable, signerDigests)
+
+    private companion object {
+        const val BETA_PRODUCTION_CERTIFICATE =
+            "4da8c2767f2e47a8a95c74bda80e9349c4e5b1b0e8fdb2b52d3bd0775d68bc21"
+    }
 
     private fun select(releases: JSONArray, current: String) =
         RelayUpdater.selectReleaseFromJsonForTest(releases.toString(), current, includePrereleases = true)
