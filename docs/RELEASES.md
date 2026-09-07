@@ -44,10 +44,18 @@ hardening work from the current branch:
   accessibility privilege. Use the remote's dedicated Recent/Overview control
   or the device's multitasking gesture instead.
 
-The release workflow publishes this build as `v0.1.0-beta.7` with Android
-version code `30`. The final tag, APK digest, signing certificate, and GitHub
-release URL are recorded here after the workflow completes and are verified
-against the published asset.
+Published beta.7 verification:
+
+- release: [v0.1.0-beta.7](https://github.com/saappleg/Relay-Home-Launcher/releases/tag/v0.1.0-beta.7);
+- tag target: `68c19639ffc68ea2a360f1e1ebcfba8e3928e399`;
+- asset: `relay-home-0.1.0-beta.7.apk`;
+- asset SHA-256: `116bf035affa2870d66786dccb24ce5fc51a78f93f0e7261e1163b8c95eafbcb`;
+- package/version: `com.relayhome.launcher`, `0.1.0-beta.7`, versionCode `30`;
+- production signing certificate SHA-256:
+  `4da8c2767f2e47a8a95c74bda80e9349c4e5b1b0e8fdb2b52d3bd0775d68bc21`.
+
+The GitHub release is non-draft and marked as a prerelease. The APK was
+downloaded from that release and independently checked before TV installation.
 
 ## Version and signing rules
 
