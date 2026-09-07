@@ -168,6 +168,27 @@ class RelayHomeStateHolderTest {
     }
 
     @Test
+    fun productionHeroAssembly_keepsLargeRelayTubeFeedBounded() {
+        val state = RelayHomeUiState(
+            enabledProviders = setOf(Provider.SMARTTUBE),
+            heroItemCap = MAX_HERO_CANDIDATES_PER_SOURCE,
+            heroIncludeNuvio = false,
+            heroIncludeContinueWatching = false,
+            heroIncludeSubscriptions = true,
+            heroIncludeNowPlaying = false,
+            smartTubeSubscriptions = (1..800).map { smartTubeItem("subscription-$it") }
+        )
+
+        val candidates = assembleHeroCandidates(state)
+
+        assertEquals(4, candidates.size)
+        assertEquals(
+            listOf("subscription-1", "subscription-2", "subscription-3", "subscription-4"),
+            candidates.map { it.providerContentId }
+        )
+    }
+
+    @Test
     fun minimalHome_reservesTopNavigationClearance() {
         assertTrue(MINIMAL_HOME_TOP_INSET_DP >= 48)
     }

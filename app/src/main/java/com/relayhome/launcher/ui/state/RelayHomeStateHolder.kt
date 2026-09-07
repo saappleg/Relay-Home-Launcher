@@ -213,15 +213,26 @@ internal fun <T> capHeroSource(items: List<T>, cap: Int): List<T> =
  */
 internal fun assembleHeroCandidates(state: RelayHomeUiState): List<MediaItem> {
     val active = state.smartTubeNowPlaying?.toRelayMediaItem()
-    val continueWatching = state.smartTubeContinueWatching.map(::smartTubeHeroItem)
-    val subscriptions = state.smartTubeSubscriptions.map(::smartTubeHeroItem)
     val cap = state.heroItemCap.coerceIn(1, 8)
+    // Cap before adapting provider payloads. RelayTube can legitimately return hundreds of
+    // continue-watching entries; mapping the entire payload on the state holder's Main scope
+    // made every snapshot refresh do avoidable allocation and MediaItem work.
+    val continueWatching = if (state.heroIncludeContinueWatching) {
+        state.smartTubeContinueWatching.take(cap).map(::smartTubeHeroItem)
+    } else {
+        emptyList()
+    }
+    val subscriptions = if (state.heroIncludeSubscriptions) {
+        state.smartTubeSubscriptions.take(cap).map(::smartTubeHeroItem)
+    } else {
+        emptyList()
+    }
 
     return (
         (if (state.heroIncludeNuvio) capHeroSource(state.nuvioMedia, cap) else emptyList()) +
             (if (state.heroIncludeNowPlaying) listOfNotNull(active) else emptyList()) +
-            (if (state.heroIncludeContinueWatching) capHeroSource(continueWatching, cap) else emptyList()) +
-            (if (state.heroIncludeSubscriptions) capHeroSource(subscriptions, cap) else emptyList())
+            continueWatching +
+            subscriptions
         )
         .filter { item -> item.provider in state.enabledProviders }
         .distinctBy(MediaItem::contentKey)
