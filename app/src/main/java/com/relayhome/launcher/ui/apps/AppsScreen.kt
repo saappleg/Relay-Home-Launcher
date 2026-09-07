@@ -112,6 +112,8 @@ import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.vectorResource
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -609,7 +611,10 @@ internal fun InstalledAppTile(
                     }
                 }
             }
-            .combinedClickable(interactionSource = source, indication = null, onLongClick = onLongClick, onClick = onClick),
+            .combinedClickable(interactionSource = source, indication = null, onLongClick = onLongClick, onClick = onClick)
+            .semantics(mergeDescendants = true) {
+                contentDescription = "Open ${app.label}"
+            },
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Box(
@@ -625,20 +630,27 @@ internal fun InstalledAppTile(
             if (app.hasLeanbackBanner && artwork != null) {
                 Image(
                     painter = BitmapPainter(artwork),
-                    contentDescription = app.label,
+                    contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier.fillMaxSize()
                 )
             } else if (app.hasLeanbackLogo && artwork != null) {
                 Image(
                     painter = BitmapPainter(artwork),
-                    contentDescription = app.label,
+                    contentDescription = null,
                     contentScale = ContentScale.Fit,
                     modifier = Modifier.fillMaxSize().padding(logoPadding)
                 )
             } else {
                 Box(Modifier.size(iconSize).testTag("installed-app-icon-${app.packageName}")) {
-                    LauncherAppIcon(app = app, palette = palette, focused = showFocus, iconSize = iconSize, shapePreference = iconShape)
+                    LauncherAppIcon(
+                        app = app,
+                        palette = palette,
+                        focused = showFocus,
+                        iconSize = iconSize,
+                        shapePreference = iconShape,
+                        accessibilityLabel = null
+                    )
                 }
             }
             if (showFocus) Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = .08f)))

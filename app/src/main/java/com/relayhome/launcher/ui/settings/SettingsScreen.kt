@@ -649,6 +649,9 @@ private fun SettingsCategoryEntry(
             .clip(RoundedCornerShape(14.dp))
             .background(if (focused) palette.accent.copy(alpha = .20f) else Color(0xFF171A20))
             .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .08f), RoundedCornerShape(14.dp))
+            .semantics(mergeDescendants = true) {
+                contentDescription = "${category.label}. ${category.description}"
+            }
             .clickable(interactionSource = source, indication = null, onClick = onClick)
             .padding(horizontal = 22.dp, vertical = 18.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -803,6 +806,7 @@ private fun HomeLayoutSettings(
             Text("Show the ambient wallpaper and Favorite Apps only. Hero and media rows stay hidden until this is turned off.", color = muted, fontSize = 13.sp, lineHeight = 18.sp)
         }
         RelaySettingsSwitch(
+            label = "Minimal wallpaper home",
             checked = minimalHomeEnabled,
             onCheckedChange = onMinimalHomeEnabledChanged,
             palette = palette,
@@ -842,6 +846,7 @@ private fun HomeLayoutSettings(
             palette,
             primary = false,
             modifier = Modifier.testTag("hero-cap-decrement"),
+            accessibilityLabel = "Decrease items per source",
             onClick = { onHeroItemCapChanged(heroItemCap - 1) }
         )
         ActionButton(
@@ -849,6 +854,7 @@ private fun HomeLayoutSettings(
             palette,
             primary = false,
             modifier = Modifier.testTag("hero-cap-increment"),
+            accessibilityLabel = "Increase items per source",
             onClick = { onHeroItemCapChanged(heroItemCap + 1) }
         )
     }
@@ -886,6 +892,7 @@ private fun HomeLayoutSettings(
             palette,
             primary = false,
             modifier = Modifier.testTag("hero-rotate-interval-decrement"),
+            accessibilityLabel = "Decrease rotation interval",
             onClick = {
                 val next = (heroRotateIntervalSeconds - 1).coerceIn(3, 30)
                 heroRotateIntervalSeconds = next
@@ -897,6 +904,7 @@ private fun HomeLayoutSettings(
             palette,
             primary = false,
             modifier = Modifier.testTag("hero-rotate-interval-increment"),
+            accessibilityLabel = "Increase rotation interval",
             onClick = {
                 val next = (heroRotateIntervalSeconds + 1).coerceIn(3, 30)
                 heroRotateIntervalSeconds = next
@@ -915,6 +923,7 @@ private fun HomeLayoutSettings(
             ) {
                 Text("${index + 1}. ${row.label}", color = ivory, fontSize = 16.sp, modifier = Modifier.weight(1f))
                 RelaySettingsSwitch(
+                    label = "${row.label} visibility",
                     checked = row !in hiddenHomeRows,
                     onCheckedChange = { visible -> onHomeRowVisibilityChanged(row, visible) },
                     palette = palette,
@@ -927,9 +936,21 @@ private fun HomeLayoutSettings(
                     testTag = "home-row-switch-${row.name}"
                 )
                 Spacer(Modifier.width(8.dp))
-                ActionButton("↑", palette, primary = false, onClick = { moveHomeRow(index, index - 1) })
+                ActionButton(
+                    "↑",
+                    palette,
+                    primary = false,
+                    accessibilityLabel = "Move ${row.label} up",
+                    onClick = { moveHomeRow(index, index - 1) }
+                )
                 Spacer(Modifier.width(8.dp))
-                ActionButton("↓", palette, primary = false, onClick = { moveHomeRow(index, index + 1) })
+                ActionButton(
+                    "↓",
+                    palette,
+                    primary = false,
+                    accessibilityLabel = "Move ${row.label} down",
+                    onClick = { moveHomeRow(index, index + 1) }
+                )
             }
         }
         Spacer(Modifier.height(8.dp))
@@ -1402,6 +1423,7 @@ private fun SubscriptionSettings(
                 Text(channelName, color = ivory, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                 Spacer(Modifier.width(12.dp))
                 RelaySettingsSwitch(
+                    label = "$channelName visibility",
                     checked = visible,
                     onCheckedChange = { onSmartTubeChannelVisible(channelId, it) },
                     palette = palette.copy(accent = Provider.SMARTTUBE.accent),
@@ -1471,6 +1493,7 @@ private fun WeatherWidgetsSettings(
             Text("Show the current local time beside weather in the Home top bar.", color = muted, fontSize = 13.sp)
         }
         RelaySettingsSwitch(
+            label = "Home clock",
             checked = showHomeClock,
             onCheckedChange = onShowHomeClockChanged,
             palette = palette,
@@ -1529,6 +1552,7 @@ private fun WeatherWidgetsSettings(
 
 @Composable
 private fun RelaySettingsSwitch(
+    label: String,
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
     palette: RelayPalette,
@@ -1562,7 +1586,10 @@ private fun RelaySettingsSwitch(
                 shape
             )
             .toggleable(value = checked, role = Role.Switch, onValueChange = onCheckedChange)
-            .semantics { stateDescription = if (checked) "On" else "Off" }
+            .semantics(mergeDescendants = true) {
+                contentDescription = label
+                stateDescription = if (checked) "On" else "Off"
+            }
             .padding(horizontal = 4.dp, vertical = 2.dp)
             .testTag(testTag)
     ) {

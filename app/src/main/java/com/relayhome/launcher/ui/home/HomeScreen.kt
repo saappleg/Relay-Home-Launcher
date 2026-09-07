@@ -131,6 +131,9 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.vectorResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.invisibleToUser
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -414,6 +417,7 @@ internal fun HomeFocusAnchorHost(
                     .testTag("home-route-anchor-${row.name}")
                     .focusRequester(routeRequester)
                     .focusable()
+                    .semantics { invisibleToUser() }
                     .onPreviewKeyEvent { event ->
                         if (event.type == KeyEventType.KeyDown && event.key == Key.DirectionDown) {
                             val target = if (row in mountedRows) entryRequester else fallbackRequester
@@ -1446,6 +1450,9 @@ internal fun ProfileAvatarButton(
             .background(Provider.NUVIO.accent.copy(alpha = .78f))
             .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .3f), CircleShape)
             .testTag("home-profile-avatar")
+            .semantics(mergeDescendants = true) {
+                contentDescription = "Switch profile"
+            }
             .clickable(interactionSource = source, indication = null, onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
@@ -1453,7 +1460,7 @@ internal fun ProfileAvatarButton(
         if (displayedImage != null) {
             AsyncImage(
                 model = displayedImage,
-                contentDescription = "Profile picture",
+                contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
@@ -1516,6 +1523,13 @@ internal fun ProfileSwitcher(
                             .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .10f), RoundedCornerShape(20.dp))
                             // clickable already contributes the TV focus target. Adding a second
                             // focusable node made each visible profile consume two D-pad moves.
+                            .semantics(mergeDescendants = true) {
+                                contentDescription = if (profile.index == activeProfile) {
+                                    "Profile ${profile.name}, currently selected"
+                                } else {
+                                    "Select profile ${profile.name}"
+                                }
+                            }
                             .clickable(interactionSource = source, indication = null) { onSelect(profile.index) }
                             .padding(12.dp),
                         verticalAlignment = Alignment.CenterVertically
@@ -1525,7 +1539,7 @@ internal fun ProfileSwitcher(
                             if (displayedImage != null) {
                                 AsyncImage(
                                     model = displayedImage,
-                                    contentDescription = profile.name,
+                                    contentDescription = null,
                                     contentScale = ContentScale.Crop,
                                     modifier = Modifier.fillMaxSize()
                                 )
@@ -1591,13 +1605,16 @@ internal fun TopDestination(
             // moves highlight the label without activating the corresponding App Peek.
             .onFocusChanged { onFocused(it.hasFocus) }
             .testTag("home-top-destination-${label.lowercase(Locale.US)}")
+            .semantics(mergeDescendants = true) {
+                contentDescription = label
+            }
             .clickable(interactionSource = source, indication = null, onClick = onClick)
             .padding(horizontal = if (compact) 10.dp else 17.dp, vertical = if (compact) 7.dp else 9.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(
             imageVector = icon,
-            contentDescription = label,
+            contentDescription = null,
             tint = if (active) ivory else muted,
             modifier = Modifier.size(if (compact) 20.dp else 22.dp)
         )
@@ -1805,6 +1822,7 @@ internal fun HeroPanel(
                     // path vertical so Details remains reachable without competing with hero
                     // item navigation: Resume -> Details -> first Home rail.
                     downFocusRequester = detailsFocusRequester,
+                    accessibilityLabel = if ((hero.item?.progress ?: 0f) > 0f) "Resume playback" else "Play",
                 ) { hero.item?.let { ProviderHandoff.play(context, it) } }
                 ActionButton(
                     "ⓘ  Details",
@@ -1817,6 +1835,7 @@ internal fun HeroPanel(
                     focusRequester = detailsFocusRequester,
                     downFocusRequester = downFocusRequester,
                     upFocusRequester = resumeFocusRequester,
+                    accessibilityLabel = "Open details",
                 ) { hero.item?.let(onItemSelected) }
                 }
             }
@@ -1863,6 +1882,7 @@ internal fun ActionButton(
     leftFocusRequester: FocusRequester? = null,
     rightFocusRequester: FocusRequester? = null,
     onFocused: (Boolean) -> Unit = {},
+    accessibilityLabel: String? = null,
     onClick: () -> Unit
 ) {
     val source = remember { MutableInteractionSource() }
@@ -1885,6 +1905,9 @@ internal fun ActionButton(
             .background(if (primary) ivory else Color(0xFF171A20))
             .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color(0xFF363A42), RoundedCornerShape(22.dp))
             .clickable(interactionSource = source, indication = null, onClick = onClick)
+            .semantics(mergeDescendants = true) {
+                accessibilityLabel?.let { contentDescription = it }
+            }
             .padding(horizontal = 14.dp),
         contentAlignment = Alignment.Center
     ) {
@@ -1990,6 +2013,7 @@ internal fun MediaRail(
                         entryFocused = it.hasFocus
                     }
                     .focusable()
+                    .semantics { invisibleToUser() }
             )
         }
         Text(title, color = ivory, fontSize = 19.sp, fontWeight = FontWeight.Medium, modifier = Modifier.padding(start = RelayTvMargins.screenHorizontal, bottom = 10.dp))
@@ -2131,6 +2155,22 @@ private fun ScoreBadge(label: String, color: Color) {
     )
 }
 
+/**
+ * A media card is one accessibility action, not an image plus a second copy of its title.
+ * Keep this label limited to user-facing metadata; provider IDs and artwork URLs never belong in
+ * the accessibility tree.
+ */
+internal fun mediaCardAccessibilityLabel(item: MediaItem): String = buildList {
+    add(item.title)
+    add(item.provider.label)
+    item.showTitle?.takeIf { it.isNotBlank() && it != item.title }?.let { add(it) }
+    item.episodeInfo?.takeIf { it.isNotBlank() }?.let { add("Episode $it") }
+    if (item.progress > 0f) {
+        add("${(item.progress.coerceIn(0f, 1f) * 100f).roundToInt()} percent watched")
+    }
+    item.playbackPlaying?.let { add(if (it) "Playing" else "Paused") }
+}.joinToString(separator = ". ")
+
 @Composable
 internal fun MediaCard(
     item: MediaItem,
@@ -2176,12 +2216,15 @@ internal fun MediaCard(
             // focus loss when the remote moves vertically out of this rail.
             .onFocusChanged { onFocusChanged(it.hasFocus) }
             .clickable(interactionSource = source, indication = null, onClick = onClick)
+            .semantics(mergeDescendants = true) {
+                contentDescription = mediaCardAccessibilityLabel(item)
+            }
     ) {
         AsyncImage(
             // A fresh ImageRequest on every focus recomposition can make Coil re-evaluate an
             // unchanged poster. Stable URL models keep navigation on the memory-cache path.
             model = artworkRequest,
-            contentDescription = item.title,
+            contentDescription = null,
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize(),
         )
@@ -2334,6 +2377,9 @@ internal fun FavoriteAppCard(
             .width(104.dp)
             .testTag("home-favorite-app-${app.packageName}")
             .onFocusChanged { onFocusChanged(it.hasFocus) }
+            .semantics(mergeDescendants = true) {
+                contentDescription = "Open ${app.label}"
+            }
             .clickable(interactionSource = source, indication = null, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -2343,6 +2389,7 @@ internal fun FavoriteAppCard(
             focused = focused,
             iconSize = 76.dp,
             shapePreference = shapePreference,
+            accessibilityLabel = null,
             modifier = Modifier.graphicsLayer {
                 scaleX = scale
                 scaleY = scale
@@ -2396,7 +2443,8 @@ internal fun LauncherAppIcon(
     focused: Boolean,
     iconSize: Dp,
     modifier: Modifier = Modifier,
-    shapePreference: AppIconShape = AppIconShape.MATCH_EACH_APP
+    shapePreference: AppIconShape = AppIconShape.MATCH_EACH_APP,
+    accessibilityLabel: String? = app.label
 ) {
     val iconPainter = rememberNativeIconPainter(app.icon)
     val slotShape: Shape = when (launcherIconSlotShape(app, shapePreference)) {
@@ -2423,7 +2471,7 @@ internal fun LauncherAppIcon(
     ) {
         Image(
             painter = iconPainter,
-            contentDescription = app.label,
+            contentDescription = accessibilityLabel,
             contentScale = if (fillIconBounds) ContentScale.FillBounds else ContentScale.Fit,
             modifier = Modifier
                 .fillMaxSize()

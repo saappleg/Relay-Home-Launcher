@@ -217,7 +217,8 @@ internal fun CalendarScreen(
                 primary = false,
                 focusRequester = firstFocusRequester,
                 upFocusRequester = backFocusRequester,
-                downFocusRequester = eventDayFocusRequesters.firstOrNull { it != null }
+                downFocusRequester = eventDayFocusRequesters.firstOrNull { it != null },
+                accessibilityLabel = "Previous period"
             ) {
                 if (weekView) weekStart = weekStart.minusWeeks(1) else month = month.minusMonths(1)
             }
@@ -228,7 +229,7 @@ internal fun CalendarScreen(
                 color = ivory, fontSize = 25.sp, fontWeight = FontWeight.Light
             )
             Spacer(Modifier.width(14.dp))
-            ActionButton("›", palette, primary = false) {
+            ActionButton("›", palette, primary = false, accessibilityLabel = "Next period") {
                 if (weekView) weekStart = weekStart.plusWeeks(1) else month = month.plusMonths(1)
             }
             Spacer(Modifier.width(24.dp))

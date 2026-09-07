@@ -114,6 +114,8 @@ import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.vectorResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -354,10 +356,19 @@ internal fun AppTile(
         modifier = (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .then(if (upFocusRequester != null) Modifier.focusProperties { up = upFocusRequester } else Modifier)
             .width(132.dp)
+            .semantics(mergeDescendants = true) {
+                contentDescription = "Open ${app.label}"
+            }
             .clickable(interactionSource = source, indication = null, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        LauncherAppIcon(app = app, palette = palette, focused = focused, iconSize = 70.dp)
+        LauncherAppIcon(
+            app = app,
+            palette = palette,
+            focused = focused,
+            iconSize = 70.dp,
+            accessibilityLabel = null
+        )
         Spacer(Modifier.height(7.dp))
         Text(app.label, color = if (focused) ivory else muted, fontSize = 13.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }

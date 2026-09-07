@@ -10,10 +10,12 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertTextContains
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertIsNotSelected
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.assertIsSelected
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -54,6 +56,9 @@ class SettingsScreenTest {
         SettingsCategory.entries.forEach { category ->
             composeRule.onNodeWithText(category.label).assertExists()
         }
+        composeRule.onNodeWithTag("settings-category-root").assertExists()
+        composeRule.onNodeWithText(SettingsCategory.APPEARANCE.label)
+            .assert(hasContentDescription("Appearance. Theme and date presentation"))
         composeRule.onNodeWithText("Theme").assertDoesNotExist()
         composeRule.onNodeWithText("Date format").assertDoesNotExist()
         composeRule.onNodeWithText("Check now").assertDoesNotExist()
@@ -302,6 +307,7 @@ class SettingsScreenTest {
         composeRule.onNodeWithText(SettingsCategory.HOME_LAYOUT.label).performClick()
         val minimalHome = composeRule.onNodeWithTag("minimal-home-switch", useUnmergedTree = true)
         minimalHome.performScrollTo()
+        minimalHome.assert(hasContentDescription("Minimal wallpaper home"))
         minimalHome.assertIsOff()
         minimalHome.performClick()
         composeRule.waitForIdle()
