@@ -42,6 +42,51 @@ resolver guarantee for `startActivity`, so this mode is reported as observed or
 `unverified`, never as a verified Home override. Accessibility services can
 also add a small system performance cost.
 
+### Long-press Home/Back and recent apps
+
+The current Compatibility Mode service is intentionally a window-state
+auto-start service. Its declaration does not request key filtering, and Relay
+does not claim a global `Home` or `Back` key hook. This preserves normal system
+navigation and avoids asking for the broad accessibility capability that can
+inspect/filter typed input.
+
+The Agent 7 hardware spike on 2026-09-06 used the authorized ADB target
+`192.168.1.103:35543` (`onn 4K Pro Streaming Device`, Android 14/API 34,
+build `URO3.260203.035.A1.15640252`). The device state was observed without
+uninstalling Relay, clearing data, changing the launcher role, or enabling an
+accessibility service:
+
+- Five repeated `input keyevent --longpress KEYCODE_HOME` holds from a fresh
+  `com.android.tv.settings/.MainSettings` task left Settings focused every
+  time. No recent-app overlay appeared; a screenshot showed the unchanged
+  Settings UI. As a matched control, five ordinary Home presses returned to
+  Relay every time.
+- Five repeated `input keyevent --longpress KEYCODE_BACK` holds from a fresh
+  Settings task returned to Relay every time. Five ordinary Back presses had
+  the same result. This is the normal Back/task-stack result, not evidence of
+  a Relay-owned global interception path.
+- When Relay was already foreground, three Home and three Back holds kept the
+  Relay process alive (`pid 5710`) and the Relay window focused. This confirms
+  no crash, but cannot establish global interception while Relay already owns
+  the window.
+- `enabled_accessibility_services` was `null`; `Bound services` and `Enabled
+  services` were empty. The installed package observed on the target was
+  `com.relayhome.launcher.debug`, version `0.1.0-beta.5`, version code `28`;
+  it was not the published `com.relayhome.launcher` beta.6 package.
+
+These ADB holds are repeatable input-injection controls, not a substitute for
+every OEM remote model. They nevertheless match the source/configuration
+boundary: Home is system-owned, Back is delivered to the focused app/task, and
+Relay's current accessibility service is not a key-filter service. Android TV
+does not provide a reliable, app-local way to turn either long press into a
+recent-app overlay here.
+
+Recommended fallback: keep Relay as the selected Home app and use the TV
+remote's dedicated Recent/Overview control, if present, or the OEM's own
+multitasking gesture. Do not enable key filtering or add a broad accessibility
+privilege solely to synthesize a recent-app overlay; that would be a new
+security/performance surface without a reliable Home/Back guarantee.
+
 ## Diagnostics
 
 Open Settings > Device Settings > **Show advanced diagnostics**. The screen
