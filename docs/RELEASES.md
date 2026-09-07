@@ -23,6 +23,32 @@ removes orphaned profile and invisible favorite-app targets, keeps recycled-card
 requesters tied to mounted content, and covers Details-to-Home, nested Settings
 Back, hero/rail handoffs, and rapid D-pad traversal.
 
+## Beta.7 release notes
+
+Beta.7 is the next signed prerelease and packages the completed next-phase
+hardening work from the current branch:
+
+- root navigation transitions use generation-aware focus restoration, preventing
+  stale Details/Home callbacks and redundant scroll resets during rapid D-pad
+  navigation;
+- Home focus cleanup removes orphaned profile/favorite bridges and stale
+  recycled-card requesters, with coverage for mounted Home/Hero/rail targets;
+- Home, Apps, and Settings custom controls expose contextual accessibility
+  semantics, including hero actions, media-card state, icon-only actions, and
+  switch state, with Compose accessibility-tree coverage;
+- a baseline-profile module and explicit emulator-only profile collection task
+  are wired into release packaging; the measured cold-start improvement is
+  documented separately and is not presented as a workflow benchmark result;
+- the Android TV long-press Home/Back interception spike found no reliable
+  global interception path, so Relay does not add a recent-app overlay or
+  accessibility privilege. Use the remote's dedicated Recent/Overview control
+  or the device's multitasking gesture instead.
+
+The release workflow publishes this build as `v0.1.0-beta.7` with Android
+version code `30`. The final tag, APK digest, signing certificate, and GitHub
+release URL are recorded here after the workflow completes and are verified
+against the published asset.
+
 ## Version and signing rules
 
 Use a version code larger than every published APK. Beta.6 is code 29, so the
@@ -135,7 +161,10 @@ updates preserve app data normally.
   search/details focus, launcher override verification, and firmware fallbacks.
 - `v0.1.0-beta.1` (code 24) brought together Home rails, provider feeds, the
   paged All Apps grid, direct handoff, and off-main-thread discovery.
-- `v0.1.0-beta.6` (code 29) is the current signed prerelease described above.
+- `v0.1.0-beta.6` (code 29) is the previous signed prerelease described above.
+- `v0.1.0-beta.7` (code 30) contains the next-phase navigation/focus,
+  accessibility, baseline-profile, and Android TV interception-limit work
+  described above.
 
 The baseline-profile module is wired but generation is explicit and is not a
 release-workflow step. It currently covers startup and a short Home D-pad
