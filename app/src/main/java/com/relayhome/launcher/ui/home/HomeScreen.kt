@@ -194,6 +194,13 @@ internal data class HomeAmbientFocus(
     val app: InstalledApp? = null
 )
 
+/** Restore focus by logical ownership, never by retaining a requester from a recyclable child. */
+private sealed interface HomeFocusRestoreTarget {
+    data object Home : HomeFocusRestoreTarget
+    data object Hero : HomeFocusRestoreTarget
+    data class Row(val row: HomeRow) : HomeFocusRestoreTarget
+}
+
 /** Kept within Agent E's requested 3–6% range so the texture never competes with key art. */
 internal const val HOME_AMBIENT_GRAIN_ALPHA = 0.04f
 /** Full clearance for the overlaid top bar: 24dp top + 45dp row + 30dp bottom. */
@@ -600,15 +607,15 @@ internal fun HomeScreen(
     val context = LocalContext.current
     val homeFocusRequester = remember { FocusRequester() }
     val peekFocusRequester = remember { FocusRequester() }
-    val providerFocusRequesters = remember {
-        Provider.entries.associateWith { FocusRequester() }
+    val providerFocusRequesters = remember(providers) {
+        providers.associateWith { FocusRequester() }
     }
     val heroFocusRequester = remember { FocusRequester() }
     val homeScrollState = rememberScrollState()
     val heroFocusScrollGuard = rememberHeroFocusScrollGuard(homeScrollState)
     val defaultBringIntoViewSpec = LocalBringIntoViewSpec.current
     var profilePickerVisible by remember { mutableStateOf(false) }
-    var lastHomeFocusRequester by remember { mutableStateOf<FocusRequester?>(null) }
+    var lastHomeFocusTarget by remember { mutableStateOf<HomeFocusRestoreTarget>(HomeFocusRestoreTarget.Home) }
     var ambientFocus by remember { mutableStateOf(ambientFocusFor(hero)) }
     val wallpaperResolution = rememberWallpaperUriResolution(wallpaperImageUri)
     val showHeroAmbient = {
@@ -755,12 +762,12 @@ internal fun HomeScreen(
         }
     }
     val favoriteAppsVisible = HomeRow.FAVORITE_APPS !in hiddenHomeRows && favoriteInstalledApps.isNotEmpty()
-    val rowEntryFocusRequesters = remember {
-        HomeRow.entries.associateWith { FocusRequester() }
+    val rowEntryFocusRequesters = remember(availableHomeRows) {
+        availableHomeRows.associateWith { FocusRequester() }
     }
-    // Enter each mounted row through its local bridge. Sending a handoff through a separate
-    // invisible route node can strand focus there when a held D-pad event arrives during a Home
-    // recomposition.
+    // Allocate row requesters only for rows that have a mounted interactive target. Media rows
+    // use a stable entry bridge because LazyRow children recycle; the bounded favorites rail
+    // binds its requester directly to the first app card and has no invisible focus node.
     val firstRowEntryFocusRequester = availableHomeRows.firstOrNull()?.let { rowEntryFocusRequesters[it] }
     val topContentFocusRequester = when {
         minimalHomeEnabled && favoriteAppsVisible -> rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS)
@@ -777,6 +784,11 @@ internal fun HomeScreen(
         if (index == 0) topContentFocusRequester else rowEntryFocusRequesters.getValue(availableHomeRows[index - 1])
     fun nextRowEntryFocusRequester(index: Int): FocusRequester? =
         availableHomeRows.getOrNull(index + 1)?.let { rowEntryFocusRequesters.getValue(it) }
+    fun restoreFocusRequester(): FocusRequester = when (val target = lastHomeFocusTarget) {
+        HomeFocusRestoreTarget.Home -> homeFocusRequester
+        HomeFocusRestoreTarget.Hero -> heroFocusRequester
+        is HomeFocusRestoreTarget.Row -> rowEntryFocusRequesters[target.row] ?: topContentFocusRequester
+    }
     fun scrollHomeToTop() {
         heroFocusScrollGuard.requestTop()
     }
@@ -789,7 +801,7 @@ internal fun HomeScreen(
     }
     LaunchedEffect(visible) {
         if (visible) {
-            val restored = requestHomeFocusWithRetry(lastHomeFocusRequester ?: homeFocusRequester)
+            val restored = requestHomeFocusWithRetry(restoreFocusRequester())
             if (!restored) requestHomeFocusWithRetry(topContentFocusRequester)
         }
     }
@@ -838,7 +850,7 @@ internal fun HomeScreen(
                         hero, palette, homeFocusRequester, heroFocusRequester, heroCandidates,
                         downFocusRequester = firstRowEntryFocusRequester,
                         onHeroFocused = {
-                            lastHomeFocusRequester = heroFocusRequester
+                            lastHomeFocusTarget = HomeFocusRestoreTarget.Hero
                             showHeroAmbient()
                         },
                         onItemSelected = onItemSelected,
@@ -863,7 +875,7 @@ internal fun HomeScreen(
                             downFocusRequester = null,
                             onRailEntered = heroFocusScrollGuard.onRailEntered,
                             onRailExited = heroFocusScrollGuard.onRailExited,
-                            onFocusTarget = { requester -> lastHomeFocusRequester = requester ?: rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS) },
+                            onFocusTarget = { lastHomeFocusTarget = HomeFocusRestoreTarget.Row(HomeRow.FAVORITE_APPS) },
                             onFocusedApp = showAppAmbient
                         ) { app -> InstalledApps.launch(context, app) }
                     }
@@ -880,7 +892,7 @@ internal fun HomeScreen(
                             downFocusRequester = null,
                             onRailEntered = heroFocusScrollGuard.onRailEntered,
                             onRailExited = heroFocusScrollGuard.onRailExited,
-                            onFocusTarget = { requester -> lastHomeFocusRequester = requester ?: rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS) },
+                            onFocusTarget = { lastHomeFocusTarget = HomeFocusRestoreTarget.Row(HomeRow.FAVORITE_APPS) },
                             onFocusedApp = showAppAmbient
                         ) { app -> InstalledApps.launch(context, app) }
                         Spacer(Modifier.height(18.dp))
@@ -917,7 +929,7 @@ internal fun HomeScreen(
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
                                 onRailEntered = heroFocusScrollGuard.onRailEntered,
                                 onRailExited = heroFocusScrollGuard.onRailExited,
-                                onFocusTarget = { requester -> lastHomeFocusRequester = requester ?: rowEntryFocusRequesters.getValue(HomeRow.CONTINUE_WATCHING) }
+                                onFocusTarget = { lastHomeFocusTarget = HomeFocusRestoreTarget.Row(HomeRow.CONTINUE_WATCHING) }
                             )
                             HomeRow.FAVORITE_APPS -> FavoriteAppsRail(
                                 apps = favoriteInstalledApps,
@@ -928,7 +940,7 @@ internal fun HomeScreen(
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
                                 onRailEntered = heroFocusScrollGuard.onRailEntered,
                                 onRailExited = heroFocusScrollGuard.onRailExited,
-                                onFocusTarget = { requester -> lastHomeFocusRequester = requester ?: rowEntryFocusRequesters.getValue(HomeRow.FAVORITE_APPS) },
+                                onFocusTarget = { lastHomeFocusTarget = HomeFocusRestoreTarget.Row(HomeRow.FAVORITE_APPS) },
                                 onFocusedApp = showAppAmbient
                             ) { app -> InstalledApps.launch(context, app) }
                             HomeRow.RECOMMENDATIONS -> MediaRail(
@@ -945,7 +957,7 @@ internal fun HomeScreen(
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
                                 onRailEntered = heroFocusScrollGuard.onRailEntered,
                                 onRailExited = heroFocusScrollGuard.onRailExited,
-                                onFocusTarget = { requester -> lastHomeFocusRequester = requester ?: rowEntryFocusRequesters.getValue(HomeRow.RECOMMENDATIONS) }
+                                onFocusTarget = { lastHomeFocusTarget = HomeFocusRestoreTarget.Row(HomeRow.RECOMMENDATIONS) }
                             )
                             HomeRow.SUBSCRIPTIONS -> MediaRail(
                                 title = "New from subscriptions",
@@ -961,7 +973,7 @@ internal fun HomeScreen(
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
                                 onRailEntered = heroFocusScrollGuard.onRailEntered,
                                 onRailExited = heroFocusScrollGuard.onRailExited,
-                                onFocusTarget = { requester -> lastHomeFocusRequester = requester ?: rowEntryFocusRequesters.getValue(HomeRow.SUBSCRIPTIONS) }
+                                onFocusTarget = { lastHomeFocusTarget = HomeFocusRestoreTarget.Row(HomeRow.SUBSCRIPTIONS) }
                             )
                             HomeRow.UPCOMING -> MediaRail(
                                 title = "Coming Up",
@@ -978,7 +990,7 @@ internal fun HomeScreen(
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
                                 onRailEntered = heroFocusScrollGuard.onRailEntered,
                                 onRailExited = heroFocusScrollGuard.onRailExited,
-                                onFocusTarget = { requester -> lastHomeFocusRequester = requester ?: rowEntryFocusRequesters.getValue(HomeRow.UPCOMING) }
+                                onFocusTarget = { lastHomeFocusTarget = HomeFocusRestoreTarget.Row(HomeRow.UPCOMING) }
                             )
                         }
                         Spacer(Modifier.height(18.dp))
@@ -1349,6 +1361,7 @@ internal fun TopBar(
                         imageUri = profileImageUri,
                         palette = palette,
                         compact = compact,
+                        focusRequester = topRequester("profile"),
                         downFocusRequester = firstContentFocusRequester,
                         leftFocusRequester = topNeighbor("profile", -1),
                         rightFocusRequester = topNeighbor("profile", 1),
@@ -1410,6 +1423,7 @@ internal fun ProfileAvatarButton(
     imageUri: String?,
     palette: RelayPalette,
     compact: Boolean = false,
+    focusRequester: FocusRequester? = null,
     downFocusRequester: FocusRequester? = null,
     leftFocusRequester: FocusRequester? = null,
     rightFocusRequester: FocusRequester? = null,
@@ -1422,6 +1436,7 @@ internal fun ProfileAvatarButton(
     LaunchedEffect(focused) { onFocused(focused) }
     Box(
         modifier = Modifier
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .then(if (downFocusRequester != null || leftFocusRequester != null || rightFocusRequester != null) Modifier.focusProperties {
                 if (downFocusRequester != null) down = downFocusRequester
                 if (leftFocusRequester != null) left = leftFocusRequester
@@ -1906,7 +1921,7 @@ internal fun MediaRail(
     downFocusRequester: FocusRequester? = null,
     onRailEntered: ((suspend () -> Unit) -> Unit),
     onRailExited: () -> Unit,
-    onFocusTarget: (FocusRequester?) -> Unit = {}
+    onFocusTarget: () -> Unit = {}
 ) {
     if (items.isEmpty()) return
     val context = LocalContext.current
@@ -1919,10 +1934,14 @@ internal fun MediaRail(
         onDispose { pendingHeroUpdate[0]?.cancel() }
     }
     val listState = rememberLazyListState()
-    val firstCardFocusRequester = remember { FocusRequester() }
     val stableItems = remember(items) { items.distinctBy { it.contentKey() } }
-    val itemFocusRequesters = remember(stableItems.map { it.contentKey() }) {
-        stableItems.associate { it.contentKey() to FocusRequester() }
+    val firstCardFocusRequester = remember(firstFocusRequester != null) {
+        firstFocusRequester?.let { FocusRequester() }
+    }
+    val itemFocusRequesters = remember(stableItems.map { it.contentKey() }, firstFocusRequester != null) {
+        stableItems
+            .drop(if (firstFocusRequester != null) 1 else 0)
+            .associate { it.contentKey() to FocusRequester() }
     }
     var entryFocused by remember { mutableStateOf(false) }
     var firstCardFocused by remember { mutableStateOf(false) }
@@ -1937,7 +1956,7 @@ internal fun MediaRail(
                 withFrameNanos { }
                 val firstItemIsMounted = listState.layoutInfo.visibleItemsInfo.any { it.index == 0 }
                 if (firstItemIsMounted) {
-                    requestHomeFocusWithRetry(firstCardFocusRequester, attempts = 1)
+                    firstCardFocusRequester?.let { requestHomeFocusWithRetry(it, attempts = 1) }
                 }
                 withFrameNanos { }
                 if (firstCardFocused) return@LaunchedEffect
@@ -1999,7 +2018,7 @@ internal fun MediaRail(
                 items(stableItems, key = { it.contentKey() }) { item ->
                     val itemKey = item.contentKey()
                     val cardFocusRequester = if (itemKey == stableItems.firstOrNull()?.contentKey() && firstFocusRequester != null) {
-                        firstCardFocusRequester
+                        checkNotNull(firstCardFocusRequester)
                     } else {
                         itemFocusRequesters.getValue(itemKey)
                     }
@@ -2026,7 +2045,7 @@ internal fun MediaRail(
                             firstCardFocused = isFocused
                         }
                         if (isFocused) {
-                            onFocusTarget(cardFocusRequester)
+                            onFocusTarget()
                             onFocusedItem(item)
                             focusedItemKey = itemKey
                             pendingHeroUpdate[0]?.cancel()
@@ -2239,19 +2258,12 @@ internal fun FavoriteAppsRail(
     downFocusRequester: FocusRequester? = null,
     onRailEntered: ((suspend () -> Unit) -> Unit),
     onRailExited: () -> Unit,
-    onFocusTarget: (FocusRequester?) -> Unit = {},
+    onFocusTarget: () -> Unit = {},
     onFocusedApp: (InstalledApp?) -> Unit = {},
     onLaunch: (InstalledApp) -> Unit
 ) {
     if (apps.isEmpty()) return
     val railBringIntoViewRequester = remember { BringIntoViewRequester() }
-    val firstCardFocusRequester = remember { FocusRequester() }
-    var entryFocused by remember { mutableStateOf(false) }
-    LaunchedEffect(entryFocused) {
-        if (entryFocused && focusRequester != null) {
-            requestHomeFocusWithRetry(firstCardFocusRequester)
-        }
-    }
     val railHasFocus = remember { booleanArrayOf(false) }
     Column(
         Modifier.fillMaxWidth()
@@ -2267,15 +2279,6 @@ internal fun FavoriteAppsRail(
             }
             .padding(start = RelayTvMargins.screenHorizontal)
     ) {
-        if (focusRequester != null) {
-            Box(
-                Modifier
-                    .size(1.dp)
-                    .focusRequester(focusRequester)
-                    .focusable()
-                    .onFocusChanged { entryFocused = it.hasFocus }
-            )
-        }
         Text("Favorite Apps", color = ivory, fontSize = 19.sp, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(10.dp))
         LazyRow(
@@ -2285,7 +2288,7 @@ internal fun FavoriteAppsRail(
         ) {
             items(apps, key = { it.packageName }) { app ->
                 val appFocusRequester = if (app.packageName == apps.firstOrNull()?.packageName && focusRequester != null) {
-                    firstCardFocusRequester
+                    focusRequester
                 } else {
                     remember(app.packageName) { FocusRequester() }
                 }
@@ -2297,7 +2300,9 @@ internal fun FavoriteAppsRail(
                     upFocusRequester = upFocusRequester,
                     downFocusRequester = downFocusRequester,
                     onFocusChanged = { focused ->
-                        if (focused) onFocusTarget(appFocusRequester)
+                        if (focused) {
+                            onFocusTarget()
+                        }
                         onFocusedApp(if (focused) app else null)
                     }
                 ) { onLaunch(app) }
@@ -2327,6 +2332,7 @@ internal fun FavoriteAppCard(
                 if (downFocusRequester != null) down = downFocusRequester
             } else Modifier)
             .width(104.dp)
+            .testTag("home-favorite-app-${app.packageName}")
             .onFocusChanged { onFocusChanged(it.hasFocus) }
             .clickable(interactionSource = source, indication = null, onClick = onClick),
         horizontalAlignment = Alignment.CenterHorizontally
