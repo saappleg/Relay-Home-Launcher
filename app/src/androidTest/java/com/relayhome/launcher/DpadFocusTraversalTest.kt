@@ -20,8 +20,10 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
@@ -58,11 +60,19 @@ import com.relayhome.launcher.ui.shared.Hero
 import com.relayhome.launcher.ui.shared.HeroNavigationDirection
 import com.relayhome.launcher.ui.shared.MediaItem
 import com.relayhome.launcher.ui.shared.Provider
+import com.relayhome.launcher.ui.shared.Destination
 import com.relayhome.launcher.ui.shared.contentKey
 import com.relayhome.launcher.ui.shared.heroSubtitle
 import com.relayhome.launcher.ui.shared.heroNavigationIndex
 import com.relayhome.launcher.ui.shared.orbitalPalette
+import com.relayhome.launcher.ui.state.RelayHomeUiState
+import com.relayhome.launcher.ui.state.acceptsHomeFocusRestoration
+import com.relayhome.launcher.ui.state.afterDestinationTransition
+import com.relayhome.launcher.ui.state.afterDetailsBack
+import com.relayhome.launcher.ui.state.afterReturnHome
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 
@@ -251,6 +261,62 @@ class DpadFocusTraversalTest {
         composeRule.onNodeWithTag("settings-top-left").performKeyInput { pressKey(Key.Back) }
 
         assertEquals(listOf("settings-top-left", "back"), events)
+    }
+
+    @Test
+    fun destinationNavigation_detailsBackRestoresHome_andSettingsBackIsTwoLevel() {
+        val uiState = mutableStateOf(RelayHomeUiState(navigationGeneration = 10L))
+        composeRule.setContent { DestinationNavigationHarness(uiState) }
+        composeRule.waitForIdle()
+
+        val home = composeRule.onNodeWithTag("destination-home")
+        home.performKeyInput { pressKey(Key.Enter) }
+        composeRule.awaitFocused(composeRule.onNodeWithTag("destination-details"))
+        composeRule.onNodeWithTag("destination-details").performKeyInput { pressKey(Key.Back) }
+        composeRule.awaitFocused(home)
+
+        // Moving to Settings is a new root transition. Back inside a category must return to the
+        // category list first; only a second Back leaves Settings for Home.
+        composeRule.runOnIdle {
+            uiState.value = uiState.value.afterDestinationTransition(Destination.SETTINGS)
+        }
+        val settingsRoot = composeRule.onNodeWithTag("destination-settings-root")
+        composeRule.awaitFocused(settingsRoot)
+        settingsRoot.performKeyInput { pressKey(Key.Enter) }
+        composeRule.awaitFocused(composeRule.onNodeWithTag("destination-settings-detail"))
+        composeRule.onNodeWithTag("destination-settings-detail").performKeyInput { pressKey(Key.Back) }
+        composeRule.awaitFocused(settingsRoot)
+        settingsRoot.performKeyInput { pressKey(Key.Back) }
+        composeRule.awaitFocused(home)
+
+        val settled = uiState.value
+        assertEquals(Destination.HOME, settled.destination)
+        assertTrue("the current Home transition must accept its own focus restore", settled.acceptsHomeFocusRestoration(settled.navigationGeneration))
+    }
+
+    @Test
+    fun destinationNavigation_staleRestoreTokenCannotResetNewerRouteOrHomeScroll() {
+        val initial = RelayHomeUiState(
+            destination = Destination.HOME,
+            navigationGeneration = 20L,
+            homeRequestGeneration = 7,
+            suppressProviderPeek = true
+        )
+        val staleHomeToken = initial.navigationGeneration
+        val details = initial.afterDestinationTransition(Destination.DETAIL)
+        val settings = details.afterDestinationTransition(Destination.SETTINGS)
+        val returnedHome = settings.afterReturnHome()
+
+        assertTrue("every root transition must advance its invalidation token", returnedHome.navigationGeneration > staleHomeToken)
+        assertFalse("a delayed restore from the old Home route must be rejected", returnedHome.acceptsHomeFocusRestoration(staleHomeToken))
+        assertTrue("the newer Home transition remains suppressed until its own focus is restored", returnedHome.suppressProviderPeek)
+        assertEquals(
+            "Details/Settings restoration must not schedule an unrelated Home scroll-to-top reset",
+            initial.homeRequestGeneration,
+            returnedHome.homeRequestGeneration
+        )
+        assertEquals("Details Back must restore Home as the configured return destination", Destination.HOME, returnedHome.destination)
+        assertTrue(returnedHome.acceptsHomeFocusRestoration(returnedHome.navigationGeneration))
     }
 
     @Test
@@ -1118,6 +1184,115 @@ private fun DpadFocusHarness(screen: String, onSelect: (String) -> Unit, onBack:
             HarnessCell(cells[3], onSelect)
         }
         Text("$screen D-pad harness")
+    }
+}
+
+/**
+ * Small root-router fixture using the production state transition functions. It keeps the
+ * Settings category level local, just as SettingsScreen does, so the test can prove that a Back
+ * event is consumed by the category detail before the root destination changes.
+ */
+@Composable
+private fun DestinationNavigationHarness(
+    uiState: androidx.compose.runtime.MutableState<RelayHomeUiState>
+) {
+    val homeRequester = remember { FocusRequester() }
+    val detailsRequester = remember { FocusRequester() }
+    val settingsRootRequester = remember { FocusRequester() }
+    val settingsDetailRequester = remember { FocusRequester() }
+    var settingsDetailOpen by remember { mutableStateOf(false) }
+    val current = uiState.value
+
+    LaunchedEffect(current.navigationGeneration, settingsDetailOpen) {
+        val requester = when {
+            current.destination == Destination.HOME -> homeRequester
+            current.destination == Destination.DETAIL -> detailsRequester
+            current.destination == Destination.SETTINGS && settingsDetailOpen -> settingsDetailRequester
+            current.destination == Destination.SETTINGS -> settingsRootRequester
+            else -> homeRequester
+        }
+        requestHomeFocusWithRetry(requester, attempts = 8)
+    }
+
+    fun goBack(): Boolean {
+        return when {
+            current.destination == Destination.DETAIL -> {
+                uiState.value = current.afterDetailsBack()
+                true
+            }
+            current.destination == Destination.SETTINGS && settingsDetailOpen -> {
+                settingsDetailOpen = false
+                true
+            }
+            current.destination == Destination.SETTINGS -> {
+                uiState.value = current.afterReturnHome()
+                true
+            }
+            else -> false
+        }
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .onPreviewKeyEvent { event ->
+                event.type == KeyEventType.KeyUp && event.key == Key.Back && goBack()
+            }
+    ) {
+        when {
+            current.destination == Destination.HOME -> Text(
+                "Home",
+                modifier = Modifier
+                    .width(240.dp)
+                    .height(80.dp)
+                    .testTag("destination-home")
+                    .focusRequester(homeRequester)
+                    .onPreviewKeyEvent { event ->
+                        if (event.type == KeyEventType.KeyUp && event.key == Key.Enter) {
+                            uiState.value = current.afterDestinationTransition(Destination.DETAIL)
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    .focusable()
+            )
+            current.destination == Destination.DETAIL -> Text(
+                "Details",
+                modifier = Modifier
+                    .width(240.dp)
+                    .height(80.dp)
+                    .testTag("destination-details")
+                    .focusRequester(detailsRequester)
+                    .focusable()
+            )
+            current.destination == Destination.SETTINGS && settingsDetailOpen -> Text(
+                "Settings detail",
+                modifier = Modifier
+                    .width(320.dp)
+                    .height(80.dp)
+                    .testTag("destination-settings-detail")
+                    .focusRequester(settingsDetailRequester)
+                    .focusable()
+            )
+            current.destination == Destination.SETTINGS -> Text(
+                "Settings",
+                modifier = Modifier
+                    .width(320.dp)
+                    .height(80.dp)
+                    .testTag("destination-settings-root")
+                    .focusRequester(settingsRootRequester)
+                    .onPreviewKeyEvent { event ->
+                        if (event.type == KeyEventType.KeyUp && event.key == Key.Enter) {
+                            settingsDetailOpen = true
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                    .focusable()
+            )
+        }
     }
 }
 

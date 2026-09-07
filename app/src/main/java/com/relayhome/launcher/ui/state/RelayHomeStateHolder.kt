@@ -104,6 +104,8 @@ internal data class RelayOperationError(
 internal data class RelayHomeUiState(
     val destination: Destination = Destination.HOME,
     val detailReturnDestination: Destination = Destination.HOME,
+    /** Monotonic token for invalidating callbacks from an older root-route transition. */
+    val navigationGeneration: Long = 0L,
     val activeProvider: Provider = Provider.STREMIO,
     val peekProvider: Provider? = null,
     val suppressProviderPeek: Boolean = false,
@@ -161,15 +163,23 @@ internal data class RelayHomeUiState(
 )
 
 /** Pure navigation transitions kept separate so the root state contract can be unit-tested. */
+internal fun RelayHomeUiState.afterDestinationTransition(destination: Destination): RelayHomeUiState = copy(
+    destination = destination,
+    peekProvider = if (destination == Destination.HOME) peekProvider else null,
+    navigationGeneration = navigationGeneration + 1
+)
+
 internal fun RelayHomeUiState.afterHomeRequest(): RelayHomeUiState = copy(
     destination = Destination.HOME,
     peekProvider = null,
+    navigationGeneration = navigationGeneration + 1,
     homeRequestGeneration = homeRequestGeneration + 1
 )
 
 internal fun RelayHomeUiState.afterReturnHome(): RelayHomeUiState = copy(
     destination = Destination.HOME,
     peekProvider = null,
+    navigationGeneration = navigationGeneration + 1,
     suppressProviderPeek = true
 )
 
@@ -177,11 +187,19 @@ internal fun RelayHomeUiState.afterDetailsBack(): RelayHomeUiState =
     if (detailReturnDestination == Destination.HOME) {
         afterReturnHome()
     } else {
-        copy(
-            destination = detailReturnDestination,
-            peekProvider = null
-        )
+        afterDestinationTransition(detailReturnDestination)
     }
+
+/**
+ * A Home focus acknowledgement is valid only for the route transition that requested it. This
+ * prevents a delayed Compose callback from an old Home composition from changing state after the
+ * user has already moved to a newer destination.
+ */
+internal fun RelayHomeUiState.acceptsHomeFocusRestoration(generation: Long): Boolean =
+    destination == Destination.HOME && navigationGeneration == generation
+
+internal fun RelayHomeUiState.afterHomeFocusRestored(generation: Long): RelayHomeUiState =
+    if (acceptsHomeFocusRestoration(generation)) copy(suppressProviderPeek = false) else this
 
 internal fun <T> capHeroSource(items: List<T>, cap: Int): List<T> =
     items.take(cap.coerceIn(1, 8))
@@ -362,7 +380,8 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
 
     fun resetHomeOnNextResume() {
         resetHomeOnNextResume = true
-        resetHomeFocus()
+        // The external provider launch will cause onResume. Deferring the reset until that
+        // callback avoids two identical Home focus/scroll resets for one provider handoff.
     }
 
     fun refreshLauncherState() {
@@ -376,28 +395,36 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
 
     fun navigate(destination: Destination) {
         _state.update {
-            it.copy(
-                destination = destination,
-                peekProvider = if (destination == Destination.HOME) it.peekProvider else null
-            )
+            // Selecting Home while already on Home is an explicit top-level reset. It must
+            // invalidate any pending restoration and advance the Home scroll-reset generation;
+            // other route changes preserve Home's last focused rail for a later restoration.
+            if (destination == Destination.HOME && it.destination == Destination.HOME) {
+                it.afterHomeRequest()
+            } else {
+                it.afterDestinationTransition(destination)
+            }
         }
         if (destination == Destination.HOME) startHeroRotationIfNeeded() else heroRotationJob?.cancel()
     }
 
     fun openProvider(provider: Provider) {
-        _state.update { it.copy(activeProvider = provider, destination = Destination.PROVIDER, peekProvider = null) }
+        _state.update {
+            it.afterDestinationTransition(Destination.PROVIDER).copy(activeProvider = provider)
+        }
     }
 
     fun connectNuvio() {
-        _state.update { it.copy(activeProvider = Provider.NUVIO, destination = Destination.NUVIO_CONNECT) }
+        _state.update {
+            it.afterDestinationTransition(Destination.NUVIO_CONNECT).copy(activeProvider = Provider.NUVIO)
+        }
     }
 
     fun setPeekProvider(provider: Provider?) {
         _state.update { it.copy(peekProvider = provider) }
     }
 
-    fun onHomeFocusRestored() {
-        _state.update { it.copy(suppressProviderPeek = false) }
+    fun onHomeFocusRestored(generation: Long) {
+        _state.update { current -> current.afterHomeFocusRestored(generation) }
     }
 
     fun returnHome() {
@@ -422,14 +449,13 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
 
     fun openMediaDetails(item: MediaItem) {
         detailEnrichmentJob?.cancel()
+        var transitionGeneration = 0L
         _state.update {
-            it.copy(
+            it.afterDestinationTransition(Destination.DETAIL).copy(
                 selectedMedia = item,
-                destination = Destination.DETAIL,
                 detailReturnDestination = it.destination.takeUnless { destination -> destination == Destination.DETAIL }
                     ?: Destination.HOME,
-                peekProvider = null
-            )
+            ).also { next -> transitionGeneration = next.navigationGeneration }
         }
         requestOmdbRatings(listOf(item))
         detailEnrichmentJob = launchTracked("details.metadata-enrichment") {
@@ -440,7 +466,10 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
             AdditionalMetadataApi.lookup(appContext, enriched).getOrNull()?.takeIf { !it.isEmpty }
                 ?.let { enriched = enriched.withAdditionalMetadata(it) }
             val current = _state.value
-            if (current.destination == Destination.DETAIL && current.selectedMedia.contentKey() == item.contentKey()) {
+            if (current.destination == Destination.DETAIL &&
+                current.navigationGeneration == transitionGeneration &&
+                current.selectedMedia.contentKey() == item.contentKey()
+            ) {
                 _state.update { it.copy(selectedMedia = enriched) }
             }
         }
@@ -530,13 +559,12 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
     fun onNuvioConnected(session: NuvioSession) {
         val enabled = _state.value.enabledProviders + Provider.NUVIO
         _state.update {
-            it.copy(
+            it.afterDestinationTransition(Destination.PROVIDER).copy(
                 nuvioSession = session,
                 nuvioAuthRequired = false,
                 nuvioSyncError = null,
                 enabledProviders = enabled,
-                activeProvider = Provider.NUVIO,
-                destination = Destination.PROVIDER
+                activeProvider = Provider.NUVIO
             )
         }
         launchTracked("nuvio.connection-persist", Dispatchers.IO) {
@@ -553,7 +581,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         mediaJob?.cancel()
         tmdbJob?.cancel()
         _state.update {
-            it.copy(
+            it.afterDestinationTransition(Destination.NUVIO_CONNECT).copy(
                 nuvioSession = null,
                 nuvioProfiles = emptyList(),
                 nuvioMedia = emptyList(),
@@ -1021,8 +1049,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 nuvioAuthRequired = true,
                 nuvioSyncing = false,
                 nuvioSyncError = "Your Nuvio session expired. Sign in again to reconnect your account.",
-                activeProvider = Provider.NUVIO,
-                destination = Destination.NUVIO_CONNECT
+                activeProvider = Provider.NUVIO
             )
         }
         launchTracked("nuvio.expired-session.clear", Dispatchers.IO) { NuvioSessionStore.clear(appContext) }

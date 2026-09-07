@@ -77,7 +77,10 @@ internal fun RelayHomeApp(
                     onOpenRelayTube = stateHolder::openRelayTube,
                     onPlayRelayTube = stateHolder::playRelayTube,
                     suppressProviderPeek = state.suppressProviderPeek,
-                    onHomeFocusRestored = stateHolder::onHomeFocusRestored,
+                    // Capture the route token at the start of the Home restoration effect. If a
+                    // newer destination transition wins before the delayed Compose callback
+                    // returns, the state holder rejects this stale acknowledgement.
+                    onHomeFocusRestored = { stateHolder.onHomeFocusRestored(state.navigationGeneration) },
                     peekProvider = state.peekProvider,
                     onPeekProvider = stateHolder::setPeekProvider,
                     onSettings = { stateHolder.navigate(Destination.SETTINGS) },
