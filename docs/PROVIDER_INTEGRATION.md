@@ -1,76 +1,132 @@
-# Provider and metadata boundaries
+# Provider integration
 
-Relay keeps provider ownership explicit. It may enrich display metadata and
-open a provider's public handoff URI, but it does not scrape private provider
-databases or replace provider playback.
+Relay keeps provider ownership explicit. It may normalize display metadata,
+cache bounded public feed snapshots, and open a provider's public handoff URI;
+it does not scrape private provider databases or replace provider playback.
+
+The user-facing provider names are Nuvio, RelayTube, and Stremio. The source
+model calls RelayTube `Provider.SMARTTUBE` for compatibility with the
+SmartTube media-session integration.
+
+## Nuvio
+
+Nuvio is authoritative for its library membership, profiles, progress, episode
+context, and playback handoff. Relay supports password login and the TV QR
+flow described in [docs/NUVIO_AUTH.md](NUVIO_AUTH.md). Authenticated session
+values are persisted through the encrypted Nuvio session store; Relay does not
+store provider credentials in the general settings DataStore.
+
+Nuvio media opens through the public `nuvio://meta` URI for `movie` and `tv`
+items. The URI opens the title in Nuvio so Nuvio can choose a stream. It does
+not provide Relay with a direct arbitrary-episode playback URI.
+
+### Profile switching and pairing
+
+The active Nuvio profile controls the Nuvio library sync and resume context.
+When RelayTube profiles are available, Settings > Providers & Accounts >
+Profile pairing maps each Nuvio profile to one RelayTube profile. Until a manual
+pairing is selected, Relay uses one unique normalized profile-name match; it
+does not guess from stored IDs or list position.
+
+Changing profiles updates the active RelayTube profile ID and the two feed
+snapshots together. Delayed provider responses are accepted only when their
+profile ID still matches the selected profile and the current refresh
+generation, so an old profile cannot repopulate Home after a switch.
 
 ## RelayTube / SmartTube
 
-The maintained RelayTube companion can expose the following package-targeted,
-permission-protected broadcasts:
+Full feed integration requires a maintained RelayTube companion build. Relay
+recognizes these launchable package variants:
 
-- `com.relaytube.action.PLAYBACK` for an exact YouTube video id and public
-  playback metadata.
-- `com.relaytube.action.SUBSCRIPTIONS` and
-  `com.relaytube.action.CONTINUE_WATCHING` for profile-scoped feed snapshots.
-- `com.relaytube.action.PROFILES` for the available profile list.
+- `com.relaytube.stable`
+- `com.relaytube.beta`
+- `com.relaytube.fdroid`
+- `app.smarttube.stable`
+- `org.smarttube.stable`
+- `org.smarttube.beta`
 
-Relay accepts a raw 11-character YouTube id or a validated public YouTube URL.
-Bridge payloads are bounded to 256 KiB and strict profile/feed snapshots are
-bounded to 24 entries. Every entry must have a valid id and title; duplicate
-ids, invalid numeric ranges, unsafe artwork URLs, malformed JSON, missing
-profile ids, and oversized payloads are ignored so they cannot erase the last
-valid snapshot. Feed responses from the content-provider bridge must echo the
-requested profile id. Delayed feed reads are tied to the current
-refresh/profile generation to prevent a previous profile from repopulating
-Home after a profile switch. An explicit empty JSON array is a valid empty
-snapshot; a partially malformed array is not.
+Relay accepts the companion's package-targeted, permission-protected broadcasts:
 
-The optional public content provider is discovered only for the maintained
-RelayTube flavors and supports `profiles`, `select`, and `feeds` calls. Stock
-SmartTube builds remain limited to Android's public media-session and
-notification metadata. Relay never reads private SmartTube history. Nuvio to
-RelayTube profile pairing requires one unique normalized profile-name match;
-stored ids and selected-profile order are never used as a guess.
+| Action | Purpose | Required extras |
+| --- | --- | --- |
+| `com.relaytube.action.PLAYBACK` | Active video/session update | `video_id`, `title`, playback metadata, optional `profile_id` |
+| `com.relaytube.action.SUBSCRIPTIONS` | Profile-scoped subscription feed | `profile_id`, `videos` |
+| `com.relaytube.action.CONTINUE_WATCHING` | Profile-scoped resume feed | `profile_id`, `videos` |
+| `com.relaytube.action.PROFILES` | Available RelayTube profiles | `profiles`, optional selected `profile_id` |
 
-## TMDB metadata
+The manifest uses package-specific `ACCESS_VIDEO_DATA` permissions for the
+stable, beta, and F-Droid RelayTube receivers. Broadcast payloads are bounded
+to 256 KiB, profile lists and feeds to 24 entries, and fields are validated for
+IDs, text lengths, numeric ranges, and safe artwork URLs. Invalid, duplicate,
+or partially malformed data is ignored; it cannot erase the last valid
+profile-scoped snapshot. An explicit empty JSON array is a valid empty feed.
 
-TMDB is a read-only supplement. Nuvio remains the progress and library
-authority. TMDB title matching has an explicit confidence boundary:
+Relay also probes the maintained RelayTube content provider at
+`content://<relaytube-package>.relayprofiles`. The supported calls are:
 
-- `EXACT` is the highest-confidence match: titles are trimmed, accent-folded,
-  lowercased, and compared after punctuation/spacing removal.
-- `FUZZY` is considered only for normalized titles at least eight characters
-  long. It requires at least 0.90 normalized edit similarity, or the same
-  normalized title words in a different order, and a 0.08 score margin over
-  the next candidate. If the threshold or margin is not met, Relay treats the
-  lookup as unmatched and attaches no TMDB metadata.
+- `profiles`: return available profiles and the selected `profile_id`;
+- `select`: request a profile selection by its exact profile ID;
+- `feeds`: return `subscriptions`, `continue_watching`, and the echoed
+  `profile_id` for the requested profile.
 
-The same boundary protects episode enrichment, season choices, upcoming
-episodes, calendar entries, and recommendation seeds. Valid TMDB ids and
-HTTPS artwork paths are still required. TMDB genre ids are converted to
-display labels when available.
+If the content-provider call is unavailable, Relay falls back to the
+package-targeted profile request/selection broadcasts. Feed responses without
+an echoed matching profile ID are rejected. Refreshes are retried on the
+current generation after profile selection, while the last-known-good cache is
+kept if the companion is unavailable.
 
-Nuvio requests use a 12-second connect/read timeout; TMDB uses 8 seconds. Both
-boundaries retry transient network failures and HTTP 408/425/429/500/502/503/
-504 responses at most three total attempts, with 300 ms then 600 ms backoff.
-Non-idempotent Nuvio library writes and one-time QR exchanges are not retried
-after a transport failure. Exhausted transient requests return typed provider
-failures, while the existing list-returning compatibility methods expose an
-empty result and leave already-enriched/provider-owned items unchanged.
+RelayTube profile IDs are the authority for feed isolation. A profile name is
+display-only; do not use it as a cache key or as proof that a delayed response
+belongs to the active profile.
+
+The optional `SmartTubeNowPlayingService` is an Android notification-listener
+service for the active media session. It is opt-in through Android settings and
+reads public session/notification metadata only. Relay never reads private
+SmartTube history. Without RelayTube, stock SmartTube is limited to that
+public metadata and cannot provide the profile-scoped feeds above.
+
+Relay's Subscriptions settings filter only which Relay cards are shown for a
+channel. They never modify the user's YouTube subscriptions.
+
+## TMDB and optional metadata
+
+TMDB is a read-only metadata supplement; it cannot establish that a provider
+stream is playable. Title matching is exact-first: normalized exact matches
+win, while fuzzy matches require a title at least eight characters long, at
+least 0.90 normalized edit similarity (or the same words in another order),
+and a 0.08 score margin over the next candidate. Otherwise Relay leaves the
+item unmatched and attaches no TMDB metadata.
+
+In Settings > Data Sources, the optional services are:
+
+- TMDB: title matching, artwork, calendars, recommendations, and episode
+  metadata;
+- OMDb: optional critic-score metadata;
+- Fanart.tv: optional higher-resolution artwork and logos;
+- TheTVDB: optional TV season and episode metadata when provider data is
+  incomplete.
+
+TMDB and OMDb user keys are remotely verified before being saved. Fanart.tv and
+TheTVDB keys are validated locally and stored hidden. Keys are not displayed
+after saving. A packaged TMDB key may also be supplied to a build through
+`tmdb.apiKey`/`RELAY_TMDB_API_KEY`; it is a build input, not a substitute for
+user-owned provider credentials.
+
+Nuvio requests use 12-second connect/read timeouts; TMDB uses 8 seconds. Both
+retry transient failures and HTTP 408/425/429/500/502/503/504 up to three total
+attempts with 300 ms and 600 ms backoff. Non-idempotent Nuvio library writes
+and one-time QR exchanges are not retried after a transport failure.
 
 ## Stremio
 
-Stremio remains handoff-only. Relay creates validated `stremio:///` board,
-search, and supported detail links, but does not present a synthetic Stremio
-catalog or claim access to Stremio's private Continue Watching data.
+Stremio is handoff-only. Relay creates validated `stremio:///` board, search,
+and supported detail links, but does not present a synthetic Stremio catalog or
+claim access to Stremio's private Continue Watching data.
 
-## Known boundaries
+## Safety and failure behavior
 
-Nuvio remains the authority for library membership, profiles, progress, and
-provider handoff. TMDB supplies metadata only and cannot establish that a
-stream is playable. Stremio has no supported launcher-facing catalog or
-Continue Watching API here, so Relay opens its public URI handoffs. Stock
-SmartTube builds expose only Android public media-session/notification
-metadata; profile-scoped feeds, subscriptions, and exact YouTube ids require
-the maintained RelayTube companion bridge.
+Provider and Android-framework work runs outside the Compose rendering path
+where required. Recoverable failures preserve cached/local content when
+possible and appear as bounded local diagnostics under Settings > Device
+Settings > Show advanced diagnostics. Credentials, provider tokens, and feed
+payloads are not written to those diagnostics.

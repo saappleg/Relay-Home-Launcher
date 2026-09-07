@@ -1,168 +1,150 @@
 # Relay release checklist
 
-Relay Home reads published releases from `saappleg/Relay-Home-Launcher`. Stable
-mode ignores prereleases; Beta mode includes them. Every release must contain a
-signed APK and use a SemVer-style tag such as `v0.1.0-alpha.1`.
+Relay Home reads releases from `saappleg/Relay-Home-Launcher`. The updater's
+Stable channel ignores prereleases; Beta & pre-releases includes them. Publish
+only a SemVer-style tag such as `v0.1.0-beta.7`, with one signed production APK
+whose package is `com.relayhome.launcher`.
 
-The **Publish Relay Home release** workflow requires these repository secrets:
+## Published beta.6
 
-- `SIGNING_KEY`: Base64-encoded permanent PKCS12 keystore
-- `KEY_STORE_PASSWORD`
-- `ALIAS`
-- `KEY_PASSWORD`
-- `TMDB_API_KEY`
+[v0.1.0-beta.6](https://github.com/saappleg/Relay-Home-Launcher/releases/tag/v0.1.0-beta.6)
+is the current published prerelease. It is not a draft and contains exactly
+one APK asset:
 
-Use a version code larger than every prior APK. The newest published release is
-`v0.1.0-beta.6` with version code `29`, so the next beta must use at least code
-`30`. Never replace the signing key after the first signed beta.
+- file: `relay-home-0.1.0-beta.6.apk`;
+- Android version code/name: `29` / `0.1.0-beta.6`;
+- SHA-256: `60ef291b71700af45ef2051307d08a7d383542a7568137f5998f6e82e0d5f49b`;
+- release tag target: `240bf8b6762c9c3b0b48d2cdfb258060ac48d26e`; and
+- production signing certificate SHA-256: `4da8c2767f2e47a8a95c74bda80e9349c4e5b1b0e8fdb2b52d3bd0775d68bc21`.
 
-Non-release local Gradle builds currently use the documented development
-identity `0.1.0-beta.5` / version code `28`; they must not be treated as the
-published beta.6 build. Release packaging fails closed unless both
-`RELAY_VERSION_NAME` and `RELAY_VERSION_CODE` are explicitly set to valid
-values; the GitHub workflow supplies and validates them. Do not publish a build
-made with the local fallback.
+Beta.6 contains the root navigation-generation hardening and Home focus graph
+cleanup. It rejects stale focus/scroll restoration after destination changes,
+removes orphaned profile and invisible favorite-app targets, keeps recycled-card
+requesters tied to mounted content, and covers Details-to-Home, nested Settings
+Back, hero/rail handoffs, and rapid D-pad traversal.
 
-The workflow validates the requested alpha, beta, or stable name, refuses to
-continue when any previously published APK cannot be inspected, runs the full
-connected Android test suite on an isolated API 35 emulator, and checks that
-the built APK's SHA-256 signing certificate matches the configured keystore.
-Historical APK inspection only downloads same-repository GitHub
-release assets over HTTPS, without forwarding the workflow token to the asset
-server. Release signing material is removed from the runner workspace at the
-end of the job. Signing values are passed to Gradle through job environment
-variables; they are not written into `local.properties`.
+## Version and signing rules
 
-The workflow and the checked-in signing example use PKCS12 consistently. A JKS
-keystore is not accepted by the publish workflow.
+Use a version code larger than every published APK. Beta.6 is code 29, so the
+next beta must use at least code 30. Never replace the production signing key
+after the first signed beta; Android updates require certificate continuity.
 
-The in-app updater follows a bounded redirect chain only when every hop remains
-HTTPS on the expected GitHub API or release-asset hosts. It accepts one
-unambiguous uploaded APK, requires a valid reported size, and verifies the
-downloaded APK's package, non-debuggable status, signing certificate, semantic
-version (matching the release tag), and increasing Android version code before
-showing the installer.
+The publish workflow requires these repository secrets:
 
-The initial `v0.1.0-beta.1` asset was debug-signed. Testers must uninstall that
-one build before installing the first permanently signed beta. Future in-app
-updates will then preserve app data normally.
+- `SIGNING_KEY`: Base64-encoded permanent PKCS12 keystore;
+- `KEY_STORE_PASSWORD`;
+- `ALIAS`;
+- `KEY_PASSWORD`; and
+- `TMDB_API_KEY`.
 
-## v0.1.0-alpha.1 release notes
+The checked-in signing example uses the corresponding five
+`relay.signing.*` values: store file, store type, store password, key alias,
+and key password. A JKS keystore is not accepted by the publish workflow.
 
-Version code 7 adds icon-first Google TV navigation, the persisted Automatic
-(Material You) appearance with an orbital fallback, and five-card compact rail
-sizing. It also hardens Nuvio session expiry/profile isolation, Stremio public
-deep-link handoff, and RelayTube/SmartTube public-data fallback behavior.
+Non-release local builds use the development identity `0.1.0-beta.5` / code 28.
+This fallback is useful for debug and test APKs but is not the published beta.6
+build and must never be used as release evidence. Release packaging fails closed
+unless `RELAY_VERSION_NAME`, `RELAY_VERSION_CODE`, and the signing values are
+explicitly provided. The local release keystore may be configured in ignored
+`local.properties` or with `RELAY_SIGNING_*` environment variables.
 
-Stremio remains handoff-only: Relay does not read Stremio's merged catalog or
-Continue Watching state because no supported launcher-facing API is available.
-Full RelayTube feeds still require the maintained RelayTube bridge and a
-compatible signing permission; stock SmartTube is limited to public media
-session/notification data.
+## Local release validation
 
-## v0.1.0-alpha.2 release notes
+Use JDK 17. With a permanent PKCS12 keystore configured, run:
 
-Version code 8 fixes the TV search layout at narrow widths, adds deterministic
-first focus and scroll-to-top behavior across settings and provider pages, uses
-Google TV-style circular treatment for opaque legacy app artwork, and hardens
-GitHub alpha, beta, and stable update discovery and installation.
-It also returns cleanly to Home after RelayTube provider, handoff, and playback
-navigation instead of leaving RelayTube selected in the underlying launcher.
+```bash
+export RELAY_VERSION_NAME=0.1.0-beta.7
+export RELAY_VERSION_CODE=30
+./gradlew :app:verifyRelayReleaseVersion :app:lintRelease \
+  :app:testReleaseUnitTest :app:assembleRelease
+```
 
-## v0.1.0-alpha.3 release notes
+The output APK is `app/build/outputs/apk/release/app-release.apk`. Inspect its
+package, version, and signer before distributing it. Do not commit the
+keystore, passwords, API keys, `local.properties`, or the APK.
 
-Version code 9 fixes a stale App Peek focus callback that could leave a previous
-RelayTube, Nuvio, or Stremio peek visible after moving focus to Home, Calendar,
-Apps, Search, or Settings.
+## GitHub publication
 
-## v0.1.0-alpha.4 release notes
+Publishing is performed by the manually dispatched **Publish Relay Home
+release** workflow in `.github/workflows/publish-release.yml`. Its inputs are
+`channel` (`alpha`, `beta`, or `stable`), `version_name`, `version_code`, and
+`release_notes`. For an authorized GitHub CLI session, an equivalent dispatch
+is:
 
-Version code 10 fixes the in-app GitHub update check, which was requesting a
-misspelled repository URL and returning HTTP 404.
+```bash
+gh workflow run publish-release.yml \
+  --repo saappleg/Relay-Home-Launcher \
+  --ref feature/focus-info-preview \
+  -f channel=beta \
+  -f version_name=0.1.0-beta.7 \
+  -f version_code=30 \
+  -f release_notes='Short, factual release notes.'
+```
 
-## v0.1.0-alpha.5 release notes
+The workflow checks out exactly the requested revision, validates the channel
+and SemVer input, downloads and inspects every previously published APK over
+HTTPS, and refuses a non-increasing version code. It then runs
+`connectedCheck` on an isolated API 34 Android TV x86 `tv_1080p` emulator with
+animations disabled, builds the signed release, checks package/version,
+verifies the APK certificate against the configured PKCS12 key, and publishes
+the prerelease or stable release with the correct flag. The runner removes the
+keystore after the job.
 
-Version code 11 accepts RelayTube alpha, beta, stable, and F-Droid bridge
-broadcasts, discovers the installed RelayTube profile provider dynamically, and
-keeps the package-specific bridge permissions aligned across flavors.
+The Gradle build refuses connected tests while a physical ADB target is
+attached. This is intentional: Android's connected-test lifecycle owns package
+cleanup and can alter launcher state or remove a Relay package on a real TV.
+The release workflow uses its isolated emulator and is the supported release
+instrumentation path; a physical TV is for non-destructive post-release smoke
+testing only.
 
-## v0.1.0-alpha.6 release notes
+After the workflow completes, verify the release rather than relying on the
+workflow's display alone:
 
-Version code 12 preserves Nuvio provider context through re-authentication,
-hardens RelayTube return navigation, and validates GitHub update metadata,
-downloaded APK identity, and signing-certificate continuity.
+```bash
+gh run list --repo saappleg/Relay-Home-Launcher --workflow publish-release.yml --limit 5
+gh release view v0.1.0-beta.7 --repo saappleg/Relay-Home-Launcher \
+  --json tagName,isDraft,isPrerelease,targetCommitish,assets
+```
 
-## v0.1.0-alpha.7 release notes
+Confirm the release is not a draft, has the expected prerelease flag, contains
+exactly `relay-home-0.1.0-beta.7.apk`, and that its tag points to the tested
+revision. Install the published asset on a clean TV, then update from the
+signed beta baseline and verify that app data remains intact.
 
-Version code 13 adds Nuvio TV QR sign-in with a scannable approval flow and
-manual code fallback, improves search, details, Apps, and settings focus on
-Android TV, and gives installed apps consistent circular icon treatment.
-RelayTube bridge payloads, profile isolation, YouTube handoff validation, and
-TMDB metadata normalization are also hardened for safer provider fallbacks.
+## Updater and release asset requirements
 
-## v0.1.0-alpha.8 release notes
+The in-app updater follows a bounded HTTPS redirect chain and accepts only the
+expected GitHub API/release-asset hosts. It requires one unambiguous APK with a
+valid size, then verifies package identity, non-debuggable status, signing
+certificate continuity, tag-matching semantic version, and an increasing
+Android version code before showing Android's installer.
 
-Version code 14 fixes the Shizuku launcher override on Google TV by disabling
-the higher-priority stock Home app before selecting and verifying Relay, and
-restoring it if verification fails.
+The original `v0.1.0-beta.1` asset was debug-signed. Testers must uninstall
+that build before installing the first permanently signed beta. Future signed
+updates preserve app data normally.
 
-## v0.1.0-alpha.9 release notes
+## Release history
 
-Version code 15 hardens the Google TV launcher override by disabling the exact
-resolved stock Home activity, verifying that it disappears from Home
-resolution, and falling back to the package when the OEM keeps the activity
-available.
+- `v0.1.0-alpha.1` (code 7) introduced the icon-first TV navigation, persisted
+  appearance modes, compact rails, and hardened provider handoffs.
+- `v0.1.0-alpha.2` (code 8) fixed narrow-TV Search, settings/provider focus
+  restoration, app artwork treatment, and update discovery/install checks.
+- `v0.1.0-alpha.3`–`alpha.5` (codes 9–11) fixed stale App Peek focus, the GitHub
+  update endpoint, and RelayTube flavor/profile-provider discovery.
+- `v0.1.0-alpha.6`–`alpha.12` (codes 12–18) hardened Nuvio re-auth, QR login,
+  search/details focus, launcher override verification, and firmware fallbacks.
+- `v0.1.0-beta.1` (code 24) brought together Home rails, provider feeds, the
+  paged All Apps grid, direct handoff, and off-main-thread discovery.
+- `v0.1.0-beta.6` (code 29) is the current signed prerelease described above.
 
-## v0.1.0-alpha.10 release notes
+The baseline-profile module is wired but generation is explicit and is not a
+release-workflow step. It currently covers startup and a short Home D-pad
+traversal. Collect it only on an emulator with no physical ADB target attached:
 
-Version code 16 makes Shizuku recreate Relay's privileged launcher service when
-the APK changes, preventing an older cached service implementation from being
-reused after an update.
+```bash
+./gradlew :baselineprofile:generateRelayBaselineProfile
+```
 
-## v0.1.0-alpha.11 release notes
-
-Version code 17 adds a minimal Home intent-priority fallback for Google TV
-firmware that ignores the selected HOME role, and includes the underlying
-verification cause when the OEM still rejects the launcher change.
-
-## v0.1.0-alpha.12 release notes
-
-Version code 18 avoids protected Google TV component-state changes and uses the
-package-level stock launcher override supported by Shizuku on affected TVs.
-
-## v0.1.0-beta.1 release notes
-
-Version code 24 brings the Google TV-inspired Home rails and larger Continue
-Watching, subscription, and Coming Up cards together with configurable Home row
-ordering. All Apps is a paged three-row Leanback grid that adapts its columns to
-the available TV width, keeps labels in view, refreshes after app changes, and
-preserves reliable D-pad page focus. Favorite icons use a consistent circular
-mask, while real Leanback banners and logo-only apps retain their proper shape.
-
-This release also moves app discovery, launcher inspection, RelayTube provider
-IPC, large broadcast parsing, and artwork conversion away from the UI thread to
-reduce cold-start and navigation jank. Popup Back handling and empty-state focus
-recovery are hardened as well.
-
-Before publishing:
-
-1. Build and smoke-test both 1080p and 4K layouts.
-2. Verify Nuvio and RelayTube data, direct playback, D-pad focus, and Home replacement.
-3. Verify Settings > Updates on both Stable and Beta channels.
-4. Run the workflow with the next version code and concise release notes.
-5. Install the published asset on a clean TV, then test an update from that signed baseline.
-
-## v0.1.0-beta.6 release notes
-
-Version code 29 hardens root destination navigation with monotonic focus-
-restoration generations. Stale callbacks from an older Home, Details, or
-Settings transition can no longer reset Home scroll state or move focus into a
-newer destination, and nested Settings Back navigation remains two-level.
-
-The Home focus graph was also audited and cleaned up: orphaned profile and
-invisible favorite-app focus bridges were removed, recycled-card requesters are
-kept tied to mounted content, and logical Home, hero, rail, provider, and
-favorite-app focus restoration is preserved. Regression coverage now exercises
-Details-to-Home restoration, Settings category Back behavior, stale transition
-tokens, every rendered top-bar destination, hero-to-media handoff, and
-favorite-app focus targets.
+There is not yet a standalone Macrobenchmark before/after report. Review any
+generated profile output and measure cold start before treating it as a release
+performance claim.

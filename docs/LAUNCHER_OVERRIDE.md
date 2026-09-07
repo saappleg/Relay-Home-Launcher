@@ -1,76 +1,110 @@
 # Launcher override reliability
 
-Relay Home uses the normal Android Home resolver first. The Shizuku override is an explicitly
-requested, user-authorized compatibility path for TV firmware that keeps reclaiming the Home
-role. It exposes only the two launcher operations in `IRelayHomeShell`; it is not a general ADB
-or shell interface.
+Relay Home uses Android's normal Home resolver first. The Shizuku override is
+an explicitly requested, user-authorized compatibility path for firmware that
+keeps reclaiming the Home role. It exposes only the two launcher operations in
+`IRelayHomeShell`; it is not a general ADB or shell interface.
 
-## Fallback ladder
+The controls live in Settings > Device Settings. The separate Compatibility
+Mode uses the optional **Relay Home auto-start** Accessibility service.
 
-When the user chooses **Make Relay Home default with Shizuku**, Relay attempts the following in
-order. A step is considered successful only after the Home resolver reports
-`com.relayhome.launcher` as the selected package.
+## Setup modes
 
-1. **Component disable** — disable the detected stock Home component with
-   `pm disable-user --user 0 <stock-package>/<stock-activity>`, apply Relay as Home, and verify
-   the resolved Home component.
-2. **Package-level override** — if the component step fails, restore the component state when
-   needed, disable the stock package with `pm disable-user --user 0 <stock-package>`, apply Relay
-   as Home, and verify again.
-3. **Home-intent priority** — if package disable also fails, restore the stock package when
-   needed, apply the Android HOME role and `set-home-activity` for Relay without disabling the
-   stock package, and verify the resolver one more time.
+### Advanced Mode
 
-If every step fails, Relay attempts to re-enable and restore the stock launcher and reports
-whether that recovery itself was verified. A failed operation never reports Relay as the active
-strategy. If no stock launcher is available, the ladder starts at Home-intent priority.
+Advanced Mode uses Shizuku and does not enable the Accessibility service. After
+the user authorizes Shizuku, Relay attempts this verified fallback ladder:
 
-The optional **Relay Home auto-start** accessibility service is a separate compatibility aid. It
-launches Relay when a known stock TV launcher window becomes active, but Android does not provide
-an immediate visibility guarantee for `startActivity`. Its diagnostic result is therefore marked
-`unverified`, never as a successful Home override.
+1. **Component disable** — disable the detected stock Home component for user
+   0, select Relay as Home, and verify the resolved Home component.
+2. **Package-level override** — if component disable fails, restore component
+   state as needed, disable the stock launcher package for user 0, select Relay,
+   and verify again.
+3. **Home-intent priority** — if package disable also fails, restore the stock
+   package as needed, apply Android's Home role and `set-home-activity` for
+   Relay, and verify the resolver again.
+
+Each strategy is active only when the Home resolver observes
+`com.relayhome.launcher`. If all strategies fail, Relay attempts to re-enable
+and restore the stock launcher and reports whether that recovery was verified.
+If no stock launcher is detected, the ladder starts at Home-intent priority.
+
+OEM behavior varies. A package-manager command can return success while the
+firmware still resolves its privileged launcher, which is why command success
+and resolver verification are recorded separately.
+
+### Compatibility Mode
+
+Compatibility Mode asks the user to enable **Relay Home auto-start** in Android
+Accessibility settings. It launches Relay when a known stock TV launcher
+window becomes active. Android does not provide an immediate visibility or Home
+resolver guarantee for `startActivity`, so this mode is reported as observed or
+`unverified`, never as a verified Home override. Accessibility services can
+also add a small system performance cost.
 
 ## Diagnostics
 
-Settings > Launcher > **Override diagnostics** shows the current resolver-backed strategy, the
-reason it is shown, device/API information, and the most recent local event records. Events use
-structured fields for:
+Open Settings > Device Settings > **Show advanced diagnostics**. The screen
+shows the current resolver-backed strategy, why it is shown, device/API
+information, recent local events, recoverable operation errors, and the last
+process crash when one was recorded.
 
-- operation (`set_relay_home`, `restore_stock_launcher`, or accessibility/Shizuku support work);
-- strategy (`component_disable`, `package_level_override`, or `home_intent_priority`);
+Override events use structured fields for:
+
+- operation (`set_relay_home`, `restore_stock_launcher`, or Accessibility/
+  Shizuku support work);
+- strategy (`component_disable`, `package_level_override`,
+  `home_intent_priority`, `accessibility_auto_start`, or `none`);
 - phase (`attempt`, `command`, `verification`, `cleanup`, or `service`);
-- outcome (`started`, `success`, `failure`, or `unverified`);
-- cause, target component, observed Home resolver output, and fixed command name where relevant.
+- outcome (`started`, `success`, `failure`, or `unverified`); and
+- cause, target component, observed Home resolver output, and fixed command
+  name when relevant.
 
-The same JSON-shaped records are written to local Logcat with the tag `RelayLauncherOverride`.
-Relay retains a bounded recent history in its existing launcher-override preferences. Nothing in
-this flow sends telemetry or uploads device information. For a live trace, use:
+Relay retains at most 48 recent override events in local preferences and emits
+the same JSON-shaped records to Logcat with the `RelayLauncherOverride` tag:
 
-```text
-adb logcat -s RelayLauncherOverride:I
+```bash
+adb -s <serial> logcat -s RelayLauncherOverride:I
 ```
 
 Interpretation:
 
-- **Component disable** or **Package-level override** means that disable step and the final Home
-  resolver check both succeeded in the last recorded apply operation.
-- **Home-intent priority** means Relay is currently selected by the resolver, but no verified
-  disable step is recorded (including the normal Android Home selection path).
-- **Not active** means the current resolver does not select Relay, regardless of an earlier
-  successful attempt. The `Why` text and the failure event identify the last known cause.
-- A command with `success` is not itself proof that Home changed. Look for the later strategy
+- **Component disable** or **Package-level override** means the disable step
+  and final Home resolver check both succeeded for the recorded operation.
+- **Home-intent priority** means Relay is currently selected by the resolver,
+  but no verified disable step is recorded. This includes normal Android Home
+  selection.
+- **Not active** means the current resolver does not select Relay, regardless
+  of an earlier successful attempt.
+- A command with `success` is not proof that Home changed. Look for the later
   `verification` event with `success` and an observed Relay component.
-- A cleanup or stock-restore event must also have a `verification` success before recovery is
-  considered verified.
+- Stock-launcher recovery is verified only after its own verification event
+  reports success.
 
-OEM command behavior varies. A package manager command can return exit code zero while the
-firmware still resolves its privileged launcher, which is why Relay records command results and
-resolver verification separately.
+The last process crash is a separate, synchronous, bounded record. It stores
+exception, thread, stack trace, device, and OS/build context locally so an
+intermittent crash can be copied from Settings after restart. It does not
+store provider tokens, URLs, or user media and is not uploaded.
+
+## Reversible fallback
+
+Use the in-app **Reversible ADB fallback** only when the TV ignores the
+verified Shizuku path. Relay displays the exact remembered stock package
+command when available:
+
+```bash
+adb shell pm disable-user --user 0 <stock-launcher-package>
+adb shell pm enable --user 0 <stock-launcher-package>
+```
+
+The first command disables the stock package; the second restores it. Confirm
+the stock package before running either command, and keep the restore command
+available. Relay does not execute arbitrary ADB commands.
 
 ## OEM/firmware issue template
 
-Copy this template into an issue. Remove account tokens, provider data, and any other private
-information before posting.
+Copy this template into an issue. Remove account tokens, provider data, and any
+other private information before posting.
 
 ```text
 ### Device
@@ -86,20 +120,20 @@ information before posting.
 Relay Home remains the selected Home app after applying the Shizuku override.
 
 ### Reproduction
-1. Open Relay Settings > Launcher.
+1. Open Relay Settings > Device Settings.
 2. Authorize Relay in Shizuku.
-3. Choose Make/Re-apply Relay Home with Shizuku.
+3. Choose Advanced Mode and apply the Relay Home override.
 4. Reboot or press Home, as applicable.
 
 ### Observed result
 - Home resolver after the attempt:
-- Strategy shown under Override diagnostics:
+- Active mode shown in Device Settings:
 - Diagnostics Why text:
 - Does the stock launcher reclaim Home after reboot? (yes/no)
 - Does Accessibility auto-start change the result? (yes/no/not tested)
 
 ### Local evidence
-Paste the Override diagnostics event list and, if available, the filtered output from:
+Paste the Override diagnostics event list and, if available, filtered output from:
 
 adb logcat -d -s RelayLauncherOverride:I
 
