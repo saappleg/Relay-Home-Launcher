@@ -13,12 +13,12 @@ The **Publish Relay Home release** workflow requires these repository secrets:
 - `TMDB_API_KEY`
 
 Use a version code larger than every prior APK. The newest published release is
-`v0.1.0-beta.4` with version code `27`, so the next beta must use at least code
-`28`. Never replace the signing key after the first signed beta.
+`v0.1.0-beta.5` with version code `28`, so the next beta must use at least code
+`29`. Never replace the signing key after the first signed beta.
 
-Non-release local Gradle builds use the documented next-development identity
-`0.1.0-beta.5` / version code `28` so they cannot silently identify as the old
-beta.1 build. Release packaging fails closed unless both
+Non-release local Gradle builds currently use the documented development
+identity `0.1.0-beta.5` / version code `28`; they must not be treated as the
+published beta.6 build. Release packaging fails closed unless both
 `RELAY_VERSION_NAME` and `RELAY_VERSION_CODE` are explicitly set to valid
 values; the GitHub workflow supplies and validates them. Do not publish a build
 made with the local fallback.
@@ -151,3 +151,18 @@ Before publishing:
 3. Verify Settings > Updates on both Stable and Beta channels.
 4. Run the workflow with the next version code and concise release notes.
 5. Install the published asset on a clean TV, then test an update from that signed baseline.
+
+## v0.1.0-beta.6 release notes
+
+Version code 29 hardens root destination navigation with monotonic focus-
+restoration generations. Stale callbacks from an older Home, Details, or
+Settings transition can no longer reset Home scroll state or move focus into a
+newer destination, and nested Settings Back navigation remains two-level.
+
+The Home focus graph was also audited and cleaned up: orphaned profile and
+invisible favorite-app focus bridges were removed, recycled-card requesters are
+kept tied to mounted content, and logical Home, hero, rail, provider, and
+favorite-app focus restoration is preserved. Regression coverage now exercises
+Details-to-Home restoration, Settings category Back behavior, stale transition
+tokens, every rendered top-bar destination, hero-to-media handoff, and
+favorite-app focus targets.
