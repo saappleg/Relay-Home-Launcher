@@ -118,6 +118,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -597,6 +598,7 @@ internal fun SettingsCategoryRoot(
                 "Back to Home",
                 palette,
                 primary = false,
+                accessibilityLabel = "Back to Home",
                 focusRequester = backFocusRequester,
                 downFocusRequester = focusRequesters[SettingsCategory.APPEARANCE],
                 onClick = onBackHome
@@ -681,6 +683,7 @@ internal fun SettingsCategoryDetail(
                 "Back to Settings",
                 palette,
                 primary = false,
+                accessibilityLabel = "Back to Settings",
                 focusRequester = backFocusRequester,
                 downFocusRequester = firstContentFocusRequester,
                 onClick = onBack
@@ -2514,12 +2517,22 @@ internal fun SystemSettingsTile(
             .fillMaxWidth().aspectRatio(1.38f).scale(scale).clip(RoundedCornerShape(16.dp))
             .background(if (focused) palette.accent.copy(alpha = .20f) else Color(0xFF171A20))
             .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .09f), RoundedCornerShape(16.dp))
+            // The visible symbol is only decorative. Expose one stable, user-facing
+            // announcement for the whole tile instead of making TalkBack read both the
+            // abbreviation and the setting label as separate controls.
+            .semantics(mergeDescendants = true) {
+                contentDescription = entry.label
+            }
             .clickable(interactionSource = source, indication = null, onClick = onClick)
             .padding(18.dp),
         verticalArrangement = Arrangement.SpaceBetween
     ) {
         Box(
-            Modifier.size(44.dp).clip(RoundedCornerShape(13.dp)).background(palette.accent.copy(alpha = .24f)),
+            Modifier
+                .size(44.dp)
+                .clip(RoundedCornerShape(13.dp))
+                .background(palette.accent.copy(alpha = .24f))
+                .clearAndSetSemantics {},
             contentAlignment = Alignment.Center
         ) {
             Text(entry.symbol, color = ivory, fontSize = if (entry.symbol.length > 2) 14.sp else 18.sp, fontWeight = FontWeight.Bold)

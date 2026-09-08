@@ -23,6 +23,8 @@ import androidx.compose.ui.unit.dp
 import com.relayhome.launcher.ui.apps.InstalledAppTile
 import com.relayhome.launcher.ui.home.HeroPanel
 import com.relayhome.launcher.ui.home.MediaCard
+import com.relayhome.launcher.ui.settings.SystemSettingsEntry
+import com.relayhome.launcher.ui.settings.SystemSettingsTile
 import com.relayhome.launcher.ui.shared.Hero
 import com.relayhome.launcher.ui.shared.MediaItem
 import com.relayhome.launcher.ui.shared.Provider
@@ -31,7 +33,7 @@ import com.relayhome.launcher.ui.shared.orbitalPalette
 import org.junit.Rule
 import org.junit.Test
 
-/** Accessibility-tree coverage for the interactive Home and Apps surfaces. */
+/** Accessibility-tree coverage for the interactive Home, Apps, and Settings surfaces. */
 @OptIn(ExperimentalFoundationApi::class)
 class AccessibilitySemanticsAndroidTest {
     @get:Rule
@@ -123,5 +125,23 @@ class AccessibilitySemanticsAndroidTest {
             .assert(hasClickAction())
         composeRule.onAllNodesWithContentDescription("Living Room Player", useUnmergedTree = true)
             .assertCountEquals(0)
+    }
+
+    @Test
+    fun customSettingsTile_hasOneMeaningfulAccessibleAction() {
+        composeRule.setContent {
+            MaterialTheme(colorScheme = darkColorScheme()) {
+                SystemSettingsTile(
+                    entry = SystemSettingsEntry("Accessibility", "android.settings.ACCESSIBILITY_SETTINGS", "Ac"),
+                    palette = orbitalPalette,
+                    onClick = {}
+                )
+            }
+        }
+        composeRule.waitForIdle()
+
+        composeRule.onNodeWithContentDescription("Accessibility")
+            .assert(hasClickAction())
+        composeRule.onNodeWithText("Ac").assertDoesNotExist()
     }
 }

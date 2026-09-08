@@ -59,6 +59,8 @@ class SettingsScreenTest {
         composeRule.onNodeWithTag("settings-category-root").assertExists()
         composeRule.onNodeWithText(SettingsCategory.APPEARANCE.label)
             .assert(hasContentDescription("Appearance. Theme and date presentation"))
+        composeRule.onNodeWithText("Back to Home")
+            .assert(hasContentDescription("Back to Home"))
         composeRule.onNodeWithText("Theme").assertDoesNotExist()
         composeRule.onNodeWithText("Date format").assertDoesNotExist()
         composeRule.onNodeWithText("Check now").assertDoesNotExist()
