@@ -64,6 +64,28 @@ accessibility semantics, and bounded Continue Watching adaptation. These branch
 changes are not part of the published beta.7 APK; validate and release them
 under a new version after the normal release gate passes.
 
+## Beta.8 release notes
+
+Beta.8 packages the post-beta.7 follow-up fixes and audit results:
+
+- Home route restoration now acknowledges focus after visibility-based provider
+  handoffs, preventing a stale temporary focus suppression state;
+- the Home focus graph remains limited to mounted, visible interactive targets,
+  with orphan-focus and D-pad regression coverage;
+- Settings custom tiles expose user-facing accessibility labels and decorative
+  symbols stay out of the merged accessibility tree;
+- Continue Watching adaptation is bounded before Home composition performs the
+  configured limiting and mapping work;
+- updater diagnostics clearly explain that a debug package cannot in-place
+  update from a signed production GitHub APK;
+- release documentation records the signed production workflow and the tested
+  Android TV long-press interception limitation.
+
+Beta.8 is published only after the full JVM, lint, APK, emulator, release
+workflow, and non-destructive physical-TV update checks pass. Record the final
+tag target, asset SHA-256, package/version, and signing certificate below after
+publication.
+
 ## Version and signing rules
 
 Use a version code larger than every published APK. Beta.7 is code 30, so the
