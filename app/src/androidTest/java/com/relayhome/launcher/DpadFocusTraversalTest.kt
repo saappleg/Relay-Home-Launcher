@@ -55,6 +55,7 @@ import com.relayhome.launcher.ui.home.homeFocusAnchorRows
 import com.relayhome.launcher.ui.home.ActionButton
 import com.relayhome.launcher.ui.home.HeroPanel
 import com.relayhome.launcher.ui.home.HeroLockedBringIntoViewSpec
+import com.relayhome.launcher.ui.home.HomeScreen
 import com.relayhome.launcher.ui.shared.HomeRow
 import com.relayhome.launcher.ui.shared.Hero
 import com.relayhome.launcher.ui.shared.HeroNavigationDirection
@@ -317,6 +318,60 @@ class DpadFocusTraversalTest {
         )
         assertEquals("Details Back must restore Home as the configured return destination", Destination.HOME, returnedHome.destination)
         assertTrue(returnedHome.acceptsHomeFocusRestoration(returnedHome.navigationGeneration))
+    }
+
+    @Test
+    fun destinationNavigation_homeVisibilityRestoreAcknowledgesFocusAndReleasesPeekSuppression() {
+        val visible = mutableStateOf(false)
+        val suppressProviderPeek = mutableStateOf(true)
+
+        composeRule.setContent {
+            HomeScreen(
+                hero = Hero("Relay Home", "Home", orbitalPalette, ""),
+                palette = orbitalPalette,
+                focusResetGeneration = 0,
+                providers = emptySet(),
+                onDestination = {},
+                onProvider = {},
+                peekProvider = null,
+                onPeekProvider = {},
+                onSettings = {},
+                onHeroChanged = {},
+                onItemSelected = {},
+                heroCandidates = emptyList(),
+                nuvioItems = emptyList(),
+                nuvioSyncing = false,
+                nuvioSyncError = null,
+                upcomingEpisodes = emptyList(),
+                recommendations = emptyList(),
+                dateFormat = RelayDateFormat.LOCAL,
+                homeRowOrder = HomeRow.entries,
+                hiddenHomeRows = emptySet(),
+                minimalHomeEnabled = false,
+                weatherCity = "",
+                smartTubeNowPlaying = null,
+                smartTubeFeedLoading = false,
+                smartTubeSubscriptions = emptyList(),
+                smartTubeContinueWatching = emptyList(),
+                hiddenSmartTubeChannels = emptySet(),
+                continueWatchingLimits = emptyMap(),
+                favoriteApps = emptySet(),
+                onOpenRelayTube = {},
+                onPlayRelayTube = {},
+                suppressProviderPeek = suppressProviderPeek.value,
+                onHomeFocusRestored = { suppressProviderPeek.value = false },
+                nuvioProfiles = emptyList(),
+                activeNuvioProfile = 1,
+                profileImageUri = null,
+                onRefreshNuvio = {},
+                onNuvioProfileSelected = {},
+                visible = visible.value
+            )
+            LaunchedEffect(Unit) { visible.value = true }
+        }
+
+        composeRule.waitForIdle()
+        assertFalse("Home visibility restoration must release transient provider-peek suppression", suppressProviderPeek.value)
     }
 
     @Test

@@ -807,6 +807,11 @@ internal fun HomeScreen(
         if (visible) {
             val restored = requestHomeFocusWithRetry(restoreFocusRequester())
             if (!restored) requestHomeFocusWithRetry(topContentFocusRequester)
+            // Route returns keep Home mounted, so this visibility edge is the restoration
+            // acknowledgement for Details/Settings/Apps/Search/Calendar/Provider returns.
+            // Without it, afterReturnHome() would leave provider peek suppressed indefinitely.
+            withFrameNanos { }
+            onHomeFocusRestored()
         }
     }
     Box(
