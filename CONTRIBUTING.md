@@ -101,8 +101,8 @@ variables or the five `relay.signing.*` entries in
 with:
 
 ```bash
-export RELAY_VERSION_NAME=0.1.0-beta.7
-export RELAY_VERSION_CODE=30
+export RELAY_VERSION_NAME=0.1.0-beta.8
+export RELAY_VERSION_CODE=31
 ./gradlew :app:verifyRelayReleaseVersion :app:lintRelease \
   :app:testReleaseUnitTest :app:assembleRelease
 ```

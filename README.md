@@ -9,14 +9,14 @@ and playback.
 
 ## Current beta
 
-The latest published build is [v0.1.0-beta.6](https://github.com/saappleg/Relay-Home-Launcher/releases/tag/v0.1.0-beta.6), a GitHub prerelease with version code 29 and the signed APK `relay-home-0.1.0-beta.6.apk`. Its published SHA-256 digest is
-`60ef291b71700af45ef2051307d08a7d383542a7568137f5998f6e82e0d5f49b`.
+The latest published build is [v0.1.0-beta.7](https://github.com/saappleg/Relay-Home-Launcher/releases/tag/v0.1.0-beta.7), a GitHub prerelease with version code 30 and the signed APK `relay-home-0.1.0-beta.7.apk`. Its published SHA-256 digest is
+`116bf035affa2870d66786dccb24ce5fc51a78f93f0e7261e1163b8c95eafbcb`.
 
-Beta.6 hardens root-destination focus restoration with monotonic navigation
-generations and removes orphaned Home focus targets, including stale recycled
-card requesters and invisible bridges. Its regression coverage includes
-Details-to-Home restoration, nested Settings Back navigation, hero/rail
-handoffs, and rapid D-pad traversal.
+Beta.7 packages the signed navigation, focus, accessibility, baseline-profile,
+and Android TV interception hardening described in
+[the release checklist](docs/RELEASES.md). The `feature/focus-info-preview`
+branch is currently ahead of the beta.7 tag with follow-up fixes; those branch
+changes are not a published release until a later signed APK is created.
 
 ## Features
 
@@ -149,8 +149,8 @@ packaging does: configure the five `relay.signing.*` values shown in
 variables. Then set an explicit release identity and run:
 
 ```bash
-export RELAY_VERSION_NAME=0.1.0-beta.7
-export RELAY_VERSION_CODE=30
+export RELAY_VERSION_NAME=0.1.0-beta.8
+export RELAY_VERSION_CODE=31
 ./gradlew :app:verifyRelayReleaseVersion :app:lintRelease \
   :app:testReleaseUnitTest :app:assembleRelease
 ```

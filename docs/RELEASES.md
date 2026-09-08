@@ -5,10 +5,10 @@ Stable channel ignores prereleases; Beta & pre-releases includes them. Publish
 only a SemVer-style tag such as `v0.1.0-beta.7`, with one signed production APK
 whose package is `com.relayhome.launcher`.
 
-## Published beta.6
+## Published beta.6 (previous signed prerelease)
 
 [v0.1.0-beta.6](https://github.com/saappleg/Relay-Home-Launcher/releases/tag/v0.1.0-beta.6)
-is the current published prerelease. It is not a draft and contains exactly
+is a previous published prerelease. It is not a draft and contains exactly
 one APK asset:
 
 - file: `relay-home-0.1.0-beta.6.apk`;
@@ -25,8 +25,8 @@ Back, hero/rail handoffs, and rapid D-pad traversal.
 
 ## Beta.7 release notes
 
-Beta.7 is the next signed prerelease and packages the completed next-phase
-hardening work from the current branch:
+Beta.7 is the current published signed prerelease and packages the next-phase
+hardening work that was complete at its tag:
 
 - root navigation transitions use generation-aware focus restoration, preventing
   stale Details/Home callbacks and redundant scroll resets during rapid D-pad
@@ -57,10 +57,17 @@ Published beta.7 verification:
 The GitHub release is non-draft and marked as a prerelease. The APK was
 downloaded from that release and independently checked before TV installation.
 
+The `feature/focus-info-preview` branch is ahead of the beta.7 tag. Its
+post-beta.7 follow-ups include clearer debug-versus-production updater guidance,
+an additional Home route-restoration focus acknowledgement, Settings tile
+accessibility semantics, and bounded Continue Watching adaptation. These branch
+changes are not part of the published beta.7 APK; validate and release them
+under a new version after the normal release gate passes.
+
 ## Version and signing rules
 
-Use a version code larger than every published APK. Beta.6 is code 29, so the
-next beta must use at least code 30. Never replace the production signing key
+Use a version code larger than every published APK. Beta.7 is code 30, so the
+next beta must use at least code 31. Never replace the production signing key
 after the first signed beta; Android updates require certificate continuity.
 
 The publish workflow requires these repository secrets:
@@ -76,7 +83,7 @@ The checked-in signing example uses the corresponding five
 and key password. A JKS keystore is not accepted by the publish workflow.
 
 Non-release local builds use the development identity `0.1.0-beta.5` / code 28.
-This fallback is useful for debug and test APKs but is not the published beta.6
+This fallback is useful for debug and test APKs but is not the published beta.7
 build and must never be used as release evidence. Release packaging fails closed
 unless `RELAY_VERSION_NAME`, `RELAY_VERSION_CODE`, and the signing values are
 explicitly provided. The local release keystore may be configured in ignored
@@ -87,8 +94,8 @@ explicitly provided. The local release keystore may be configured in ignored
 Use JDK 17. With a permanent PKCS12 keystore configured, run:
 
 ```bash
-export RELAY_VERSION_NAME=0.1.0-beta.7
-export RELAY_VERSION_CODE=30
+export RELAY_VERSION_NAME=0.1.0-beta.8
+export RELAY_VERSION_CODE=31
 ./gradlew :app:verifyRelayReleaseVersion :app:lintRelease \
   :app:testReleaseUnitTest :app:assembleRelease
 ```
@@ -110,8 +117,8 @@ gh workflow run publish-release.yml \
   --repo saappleg/Relay-Home-Launcher \
   --ref feature/focus-info-preview \
   -f channel=beta \
-  -f version_name=0.1.0-beta.7 \
-  -f version_code=30 \
+  -f version_name=0.1.0-beta.8 \
+  -f version_code=31 \
   -f release_notes='Short, factual release notes.'
 ```
 
@@ -136,12 +143,12 @@ workflow's display alone:
 
 ```bash
 gh run list --repo saappleg/Relay-Home-Launcher --workflow publish-release.yml --limit 5
-gh release view v0.1.0-beta.7 --repo saappleg/Relay-Home-Launcher \
+gh release view v0.1.0-beta.8 --repo saappleg/Relay-Home-Launcher \
   --json tagName,isDraft,isPrerelease,targetCommitish,assets
 ```
 
 Confirm the release is not a draft, has the expected prerelease flag, contains
-exactly `relay-home-0.1.0-beta.7.apk`, and that its tag points to the tested
+exactly `relay-home-0.1.0-beta.8.apk`, and that its tag points to the tested
 revision. Install the published asset on a clean TV, then update from the
 signed beta baseline and verify that app data remains intact.
 

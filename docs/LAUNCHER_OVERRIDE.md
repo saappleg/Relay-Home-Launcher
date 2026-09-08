@@ -72,7 +72,7 @@ accessibility service:
 - `enabled_accessibility_services` was `null`; `Bound services` and `Enabled
   services` were empty. The installed package observed on the target was
   `com.relayhome.launcher.debug`, version `0.1.0-beta.5`, version code `28`;
-  it was not the published `com.relayhome.launcher` beta.6 package.
+  it was not the published `com.relayhome.launcher` production package.
 
 These ADB holds are repeatable input-injection controls, not a substitute for
 every OEM remote model. They nevertheless match the source/configuration
