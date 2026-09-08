@@ -50,36 +50,42 @@ does not claim a global `Home` or `Back` key hook. This preserves normal system
 navigation and avoids asking for the broad accessibility capability that can
 inspect/filter typed input.
 
-The Agent 7 hardware spike on 2026-09-06 used the authorized ADB target
+The repeated hardware spike on 2026-09-07 used the authorized ADB target
 `192.168.1.103:35543` (`onn 4K Pro Streaming Device`, Android 14/API 34,
-build `URO3.260203.035.A1.15640252`). The device state was observed without
-uninstalling Relay, clearing data, changing the launcher role, or enabling an
-accessibility service:
+build `URO3.260203.035.A1.15640252`). The installed app was the production
+`com.relayhome.launcher`, version `0.1.0-beta.7`, version code `30`, with
+Relay PID `27649`. The device state was observed without uninstalling Relay,
+clearing data, changing the launcher role, or enabling an accessibility
+service:
 
-- Five repeated `input keyevent --longpress KEYCODE_HOME` holds from a fresh
-  `com.android.tv.settings/.MainSettings` task left Settings focused every
-  time. No recent-app overlay appeared; a screenshot showed the unchanged
-  Settings UI. As a matched control, five ordinary Home presses returned to
-  Relay every time.
-- Five repeated `input keyevent --longpress KEYCODE_BACK` holds from a fresh
-  Settings task returned to Relay every time. Five ordinary Back presses had
-  the same result. This is the normal Back/task-stack result, not evidence of
-  a Relay-owned global interception path.
-- When Relay was already foreground, three Home and three Back holds kept the
-  Relay process alive (`pid 5710`) and the Relay window focused. This confirms
-  no crash, but cannot establish global interception while Relay already owns
-  the window.
+- From Relay Home, five long Home holds, five ordinary Home presses, five
+  long Back holds, and five ordinary Back presses all left
+  `com.relayhome.launcher/.MainActivity` resumed. No recent-app overlay
+  appeared and the process PID stayed `27649`.
+- From the root `com.android.tv.settings/.MainSettings` task, five long Home
+  holds left Settings resumed every time. As the matched control, five
+  ordinary Home presses resolved Relay every time. This distinguishes the
+  normal Home resolver path from a long-press interception path.
+- From that same Settings root, five long Back holds and five ordinary Back
+  presses left Settings resumed every time. The root Settings task consumed
+  Back; no Relay-owned overlay or global interception was observed.
+- After the matrix, one ordinary Home press restored Relay Home. The Relay
+  PID was still `27649`, and a 2,200-line recent Logcat scan contained no
+  `FATAL EXCEPTION`, `AndroidRuntime`, or Relay crash marker.
 - `enabled_accessibility_services` was `null`; `Bound services` and `Enabled
-  services` were empty. The installed package observed on the target was
-  `com.relayhome.launcher.debug`, version `0.1.0-beta.5`, version code `28`;
-  it was not the published `com.relayhome.launcher` production package.
+  services` were empty. Source/configuration inspection confirms that
+  `RelayAutoStartService` listens only for `TYPE_WINDOW_STATE_CHANGED`, its
+  XML declares only `typeWindowStateChanged`, `canRetrieveWindowContent=false`,
+  and it has no key-filter or `onKeyEvent` path.
 
 These ADB holds are repeatable input-injection controls, not a substitute for
 every OEM remote model. They nevertheless match the source/configuration
 boundary: Home is system-owned, Back is delivered to the focused app/task, and
-Relay's current accessibility service is not a key-filter service. Android TV
-does not provide a reliable, app-local way to turn either long press into a
-recent-app overlay here.
+Relay's current accessibility service is not a key-filter service. On this
+production onn firmware, the evidence does not establish a reliable,
+app-local way to turn either long press into a recent-app overlay. This issue
+therefore remains a spike result only; any overlay would require a separate
+follow-up investigation using an OEM-supported Recent/Overview integration.
 
 Recommended fallback: keep Relay as the selected Home app and use the TV
 remote's dedicated Recent/Overview control, if present, or the OEM's own
