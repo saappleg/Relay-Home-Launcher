@@ -206,6 +206,11 @@ private sealed interface HomeFocusRestoreTarget {
 
 /** Kept within Agent E's requested 3–6% range so the texture never competes with key art. */
 internal const val HOME_AMBIENT_GRAIN_ALPHA = 0.04f
+/**
+ * Focus previews should feel immediate while still coalescing a held D-pad burst into the last
+ * card the user settles on. The former 220ms timer made every rail choice feel deliberately late.
+ */
+internal const val HOME_MEDIA_PREVIEW_SETTLE_MS = 80L
 /** Full clearance for the overlaid top bar: 24dp top + 45dp row + 30dp bottom. */
 internal const val HOME_TOP_BAR_CLEARANCE_DP = 99
 internal const val MINIMAL_HOME_TOP_INSET_DP = HOME_TOP_BAR_CLEARANCE_DP
@@ -285,20 +290,36 @@ private fun HomeContentItem(content: @Composable () -> Unit) {
  * attaching; it does not always throw. Retry across a few frames so a route anchor never becomes
  * the user's visible focus destination merely because its real target missed one attachment frame.
  */
+/**
+ * Retries only while the target is unavailable. Keeping this small state machine separate makes
+ * it testable and, importantly, prevents successful requests from needlessly spanning four
+ * display frames.
+ */
+internal suspend fun retryHomeFocusRequest(
+    attempts: Int,
+    awaitFrame: suspend () -> Unit,
+    request: () -> Boolean
+): Boolean {
+    repeat(attempts.coerceAtLeast(1)) {
+        awaitFrame()
+        if (request()) return true
+    }
+    return false
+}
+
 internal suspend fun requestHomeFocusWithRetry(
     requester: FocusRequester,
     attempts: Int = 4
-): Boolean {
-    var requested = false
-    repeat(attempts.coerceAtLeast(1)) {
-        withFrameNanos { }
-        requested = runCatching {
+): Boolean = retryHomeFocusRequest(
+    attempts = attempts,
+    awaitFrame = { withFrameNanos { } },
+    request = {
+        runCatching {
             requester.requestFocus()
             true
-        }.getOrDefault(false) || requested
+        }.getOrDefault(false)
     }
-    return requested
-}
+)
 
 /**
  * Hero actions are part of the fixed top section even though Home's rails share one scroll
@@ -2106,7 +2127,7 @@ internal fun MediaRail(
                                 // item's title/details without waiting for Select or navigation.
                                 // A short settle window prevents a held D-pad from redrawing a
                                 // large hero for every intermediate card.
-                                delay(220)
+                                delay(HOME_MEDIA_PREVIEW_SETTLE_MS)
                                 if (focusedItemKey == itemKey) {
                                     onHeroChanged(Hero(
                                         item.showTitle.visibleRelayText().ifBlank { item.title.visibleRelayText() },
