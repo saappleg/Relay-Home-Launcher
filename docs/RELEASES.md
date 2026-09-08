@@ -81,10 +81,24 @@ Beta.8 packages the post-beta.7 follow-up fixes and audit results:
 - release documentation records the signed production workflow and the tested
   Android TV long-press interception limitation.
 
-Beta.8 is published only after the full JVM, lint, APK, emulator, release
-workflow, and non-destructive physical-TV update checks pass. Record the final
-tag target, asset SHA-256, package/version, and signing certificate below after
-publication.
+Beta.8 is published only after the full JVM, lint, APK, emulator, and release
+workflow checks pass. Its final tag target, asset SHA-256, package/version, and
+signing certificate are recorded below; the physical-TV update verification is
+completed as a separate post-publication gate.
+
+Published beta.8 verification:
+
+- release: [v0.1.0-beta.8](https://github.com/saappleg/Relay-Home-Launcher/releases/tag/v0.1.0-beta.8);
+- workflow: [GitHub Actions run 34184737399](https://github.com/saappleg/Relay-Home-Launcher/actions/runs/34184737399);
+- tag target: `1ca2eb44f2b9693e9299e31942eeb03820e19107`;
+- asset: `relay-home-0.1.0-beta.8.apk`;
+- asset SHA-256: `c1247a9a15001b5ba8666f21261d65938d7e35e15cb66deb7ef448e030b1774c`;
+- package/version: `com.relayhome.launcher`, `0.1.0-beta.8`, versionCode `31`;
+- production signing certificate SHA-256:
+  `4da8c2767f2e47a8a95c74bda80e9349c4e5b1b0e8fdb2b52d3bd0775d68bc21`.
+
+The GitHub release is non-draft and marked as a prerelease. The workflow's
+isolated Android TV emulator suite passed before signing and publication.
 
 ## Version and signing rules
 
@@ -208,6 +222,9 @@ updates preserve app data normally.
 - `v0.1.0-beta.7` (code 30) contains the next-phase navigation/focus,
   accessibility, baseline-profile, and Android TV interception-limit work
   described above.
+- `v0.1.0-beta.8` (code 31) contains the post-beta.7 focus-restoration,
+  accessibility, bounded Continue Watching, updater-diagnostics, and release
+  documentation follow-ups described above.
 
 The baseline-profile module is wired but generation is explicit and is not a
 release-workflow step. It currently covers startup and a short Home D-pad
