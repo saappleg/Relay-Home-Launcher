@@ -14,6 +14,7 @@ import com.relayhome.launcher.ui.state.capHeroSource
 import com.relayhome.launcher.ui.shared.heroNavigationIndex
 import com.relayhome.launcher.ui.state.MAX_HERO_CANDIDATES_PER_SOURCE
 import com.relayhome.launcher.ui.home.MINIMAL_HOME_TOP_INSET_DP
+import com.relayhome.launcher.ui.home.smartTubeMediaItems
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -186,6 +187,17 @@ class RelayHomeStateHolderTest {
             listOf("subscription-1", "subscription-2", "subscription-3", "subscription-4"),
             candidates.map { it.providerContentId }
         )
+    }
+
+    @Test
+    fun homeRelayTubeAdapter_capsContinueWatchingBeforeMediaItemAllocation() {
+        val videos = (1..800).map { smartTubeItem("continue-$it") }
+
+        val items = smartTubeMediaItems(videos, maxItems = ContinueWatchingLimits.defaultLimit)
+
+        assertEquals(ContinueWatchingLimits.defaultLimit, items.size)
+        assertEquals("continue-1", items.first().providerContentId)
+        assertEquals("continue-8", items.last().providerContentId)
     }
 
     @Test

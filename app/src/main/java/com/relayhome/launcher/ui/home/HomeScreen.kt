@@ -240,6 +240,37 @@ private fun ambientFocusFor(app: InstalledApp, palette: RelayPalette): HomeAmbie
 )
 
 /**
+ * Adapts only the provider items the Home surface can display. Continue Watching is capped by
+ * provider before MediaItem allocation so a large RelayTube cache does not block first
+ * composition with work that the rail will immediately discard.
+ */
+internal fun smartTubeMediaItems(
+    videos: List<SmartTubeSubscriptionVideo>,
+    maxItems: Int = Int.MAX_VALUE
+): List<MediaItem> = videos.asSequence()
+    .take(maxItems.coerceAtLeast(0))
+    .map { video ->
+        MediaItem(
+            title = video.title,
+            provider = Provider.SMARTTUBE,
+            progress = video.progress,
+            colors = listOf(Provider.SMARTTUBE.accent.copy(alpha = .5f), midnight),
+            artworkUrl = video.artworkUrl.orEmpty(),
+            providerContentId = video.videoId,
+            providerChannelId = video.channelId,
+            resumePositionMs = video.resumePositionMs,
+            contentType = "video",
+            episodeInfo = video.channel,
+            description = video.description,
+            releaseInfo = video.metadata,
+            durationMs = video.durationMs,
+            channel = video.channel,
+            playbackPositionMs = video.resumePositionMs
+        )
+    }
+    .toList()
+
+/**
  * Home has a small, bounded number of vertical sections. Keeping the section entry points
  * mounted avoids sending focus search into a LazyColumn item that has just been recycled while
  * a TV remote is delivering a held D-pad direction.
@@ -662,27 +693,14 @@ internal fun HomeScreen(
         }
     }
     val smartTubeItem = smartTubeNowPlaying?.toRelayMediaItem()
-    fun smartTubeItems(videos: List<SmartTubeSubscriptionVideo>) = videos.map { video ->
-            MediaItem(
-                title = video.title,
-                provider = Provider.SMARTTUBE,
-                progress = video.progress,
-                colors = listOf(Provider.SMARTTUBE.accent.copy(alpha = .5f), midnight),
-                artworkUrl = video.artworkUrl.orEmpty(),
-                providerContentId = video.videoId,
-                providerChannelId = video.channelId,
-                resumePositionMs = video.resumePositionMs,
-                contentType = "video",
-                episodeInfo = video.channel,
-                description = video.description,
-                releaseInfo = video.metadata,
-                durationMs = video.durationMs,
-                channel = video.channel,
-                playbackPositionMs = video.resumePositionMs
-            )
+    val smartTubeContinueWatchingLimit = continueWatchingLimits[Provider.SMARTTUBE]
+        ?: ContinueWatchingLimits.defaultLimit
+    val smartTubeSubscriptionItems = remember(smartTubeSubscriptions) {
+        smartTubeMediaItems(smartTubeSubscriptions)
     }
-    val smartTubeSubscriptionItems = remember(smartTubeSubscriptions) { smartTubeItems(smartTubeSubscriptions) }
-    val smartTubeContinueWatchingItems = remember(smartTubeContinueWatching) { smartTubeItems(smartTubeContinueWatching) }
+    val smartTubeContinueWatchingItems = remember(smartTubeContinueWatching, smartTubeContinueWatchingLimit) {
+        smartTubeMediaItems(smartTubeContinueWatching, smartTubeContinueWatchingLimit)
+    }
     val visibleSmartTubeSubscriptionItems = remember(smartTubeSubscriptionItems, hiddenSmartTubeChannels) {
         smartTubeSubscriptionItems.filter { it.providerChannelId == null || it.providerChannelId !in hiddenSmartTubeChannels }
     }
