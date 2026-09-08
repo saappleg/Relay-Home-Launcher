@@ -149,6 +149,106 @@ class DpadFocusTraversalTest {
     }
 
     @Test
+    fun homeTopBar_focusActivatesNuvioPeek_beforePeekPanelIsMounted() {
+        assertProviderPeekActivates(Provider.NUVIO)
+    }
+
+    @Test
+    fun homeTopBar_focusActivatesRelayTubePeek_beforePeekPanelIsMounted() {
+        assertProviderPeekActivates(Provider.SMARTTUBE)
+    }
+
+    @Test
+    fun homeTopBar_suppressedProviderFocus_clearsStalePeekWithoutReactivatingIt() {
+        val events = mutableListOf<Provider?>()
+        val homeRequester = FocusRequester()
+        val providerRequesters = Provider.entries.associateWith { FocusRequester() }
+
+        composeRule.setContent {
+            TopBar(
+                providers = setOf(Provider.NUVIO, Provider.SMARTTUBE),
+                palette = orbitalPalette,
+                peekProvider = Provider.NUVIO,
+                homeFocusRequester = homeRequester,
+                heroFocusRequester = FocusRequester(),
+                peekFocusRequester = FocusRequester(),
+                providerFocusRequesters = providerRequesters,
+                firstContentFocusRequester = FocusRequester(),
+                onDestination = {},
+                onProvider = {},
+                onSettings = {},
+                onPeekProvider = { events += it },
+                allowProviderPeek = false,
+                providerPeekReady = false,
+                onTopFocused = {},
+                nuvioProfiles = emptyList(),
+                activeNuvioProfile = 0,
+                profileImageUri = null,
+                weatherCity = "",
+                onProfileClick = {}
+            )
+            LaunchedEffect(Unit) { requestHomeFocusWithRetry(homeRequester, attempts = 8) }
+        }
+        composeRule.waitForIdle()
+
+        val home = composeRule.onNodeWithTag("home-top-destination-home", useUnmergedTree = true)
+        val nuvio = composeRule.onNodeWithTag("home-top-destination-nuvio", useUnmergedTree = true)
+        home.performKeyInput { pressKey(Key.DirectionRight) }
+        composeRule.awaitFocused(nuvio)
+
+        assertTrue("a suppressed provider focus must clear stale peek state", events.contains(null))
+        assertTrue("a suppressed provider focus must not publish a provider peek", events.none { it != null })
+    }
+
+    private fun assertProviderPeekActivates(provider: Provider) {
+        val events = mutableListOf<Provider?>()
+        val homeRequester = FocusRequester()
+        val providerRequesters = Provider.entries.associateWith { FocusRequester() }
+
+        composeRule.setContent {
+            TopBar(
+                providers = setOf(Provider.NUVIO, Provider.SMARTTUBE),
+                palette = orbitalPalette,
+                peekProvider = null,
+                homeFocusRequester = homeRequester,
+                heroFocusRequester = FocusRequester(),
+                peekFocusRequester = FocusRequester(),
+                providerFocusRequesters = providerRequesters,
+                firstContentFocusRequester = FocusRequester(),
+                onDestination = {},
+                onProvider = {},
+                onSettings = {},
+                onPeekProvider = { events += it },
+                // The panel is not ready on the first provider focus frame. Activation must
+                // still publish the provider; only the Down handoff waits for readiness.
+                allowProviderPeek = true,
+                providerPeekReady = false,
+                onTopFocused = {},
+                nuvioProfiles = emptyList(),
+                activeNuvioProfile = 0,
+                profileImageUri = null,
+                weatherCity = "",
+                onProfileClick = {}
+            )
+            LaunchedEffect(Unit) { requestHomeFocusWithRetry(homeRequester, attempts = 8) }
+        }
+        composeRule.waitForIdle()
+
+        val home = composeRule.onNodeWithTag("home-top-destination-home", useUnmergedTree = true)
+        val target = composeRule.onNodeWithTag(
+            "home-top-destination-${provider.label.lowercase()}",
+            useUnmergedTree = true
+        )
+        home.performKeyInput {
+            repeat(if (provider == Provider.NUVIO) 1 else 2) {
+                pressKey(Key.DirectionRight)
+            }
+        }
+        composeRule.awaitFocused(target)
+        assertEquals("focused provider must activate its Peek path", provider, events.lastOrNull())
+    }
+
+    @Test
     fun homeProfileSwitcher_usesOneStableVerticalFocusPath() {
         composeRule.setContent {
             ProfileSwitcher(

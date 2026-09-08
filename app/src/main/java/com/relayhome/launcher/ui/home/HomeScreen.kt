@@ -1047,7 +1047,11 @@ internal fun HomeScreen(
                 onProvider = onProvider,
                 onSettings = onSettings,
                 onPeekProvider = ::activatePeek,
-                allowProviderPeek = !suppressProviderPeek && activePeekProvider != null,
+                // Activation must not depend on the panel already being mounted: the panel can
+                // only become active after this focus callback publishes the provider. Keep the
+                // separate readiness gate for Down so a held key cannot target an unmounted Peek.
+                allowProviderPeek = !suppressProviderPeek,
+                providerPeekReady = activePeekProvider != null,
                 onTopFocused = ::scrollHomeToTop,
                 nuvioProfiles = nuvioProfiles,
                 activeNuvioProfile = activeNuvioProfile,
@@ -1242,6 +1246,7 @@ internal fun TopBar(
     onSettings: () -> Unit,
     onPeekProvider: (Provider?) -> Unit,
     allowProviderPeek: Boolean,
+    providerPeekReady: Boolean = false,
     onTopFocused: () -> Unit,
     nuvioProfiles: List<NuvioProfile>,
     activeNuvioProfile: Int,
@@ -1331,7 +1336,7 @@ internal fun TopBar(
                     rightFocusRequester = topNeighbor("provider:${provider.name}", 1),
                     // A suppressed peek is used while returning from a provider. In that
                     // window the peek target is not composed, so Down must fall back to Hero.
-                    downFocusRequester = if (allowProviderPeek) peekFocusRequester else heroFocusRequester,
+                    downFocusRequester = if (allowProviderPeek && providerPeekReady) peekFocusRequester else heroFocusRequester,
                     onFocused = {
                     if (it) {
                         if (allowProviderPeek) {
