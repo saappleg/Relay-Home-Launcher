@@ -13,15 +13,29 @@ import android.widget.Toast
 internal object ProviderHandoff {
     private const val nuvioPackage = "com.nuvio.tv"
     private const val stremioPackage = "com.stremio.one"
+    private const val relayTubePackage = "com.relaytube.stable"
     private val smartTubePackages = listOf(
-        "com.relaytube.stable",
+        relayTubePackage,
         "app.smarttube.stable",
         "org.smarttube.stable",
         "org.smarttube.beta"
     )
+    @Volatile private var relayTubeInstalledCache: Boolean? = null
 
     fun isSmartTubeInstalled(context: Context): Boolean =
         smartTubePackages.any { context.packageManager.getLaunchIntentForPackage(it) != null }
+
+    fun refreshRelayTubeInstallation(context: Context) {
+        relayTubeInstalledCache = context.packageManager.getLaunchIntentForPackage(relayTubePackage) != null
+    }
+
+    fun isRelayTubeInstalled(context: Context): Boolean = relayTubeInstalledCache
+        ?: (context.packageManager.getLaunchIntentForPackage(relayTubePackage) != null).also {
+            relayTubeInstalledCache = it
+        }
+
+    fun mediaAppDisplayName(context: Context): String =
+        if (isRelayTubeInstalled(context)) "RelayTube" else "SmartTube"
 
     fun isProviderPackage(packageName: String): Boolean =
         packageName == nuvioPackage || packageName == stremioPackage || packageName in smartTubePackages
@@ -69,10 +83,10 @@ internal object ProviderHandoff {
             .mapNotNull { context.packageManager.getLaunchIntentForPackage(it) }
             .firstOrNull()
         if (intent == null) {
-            notice(context, "RelayTube is not installed. Install RelayTube, then Relay will add it automatically.")
+            notice(context, "RelayTube or SmartTube is not installed on this device.")
         } else {
             runCatching { context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
-                .onFailure { notice(context, "RelayTube could not be opened.") }
+                .onFailure { notice(context, "${mediaAppDisplayName(context)} could not be opened.") }
         }
     }
 
@@ -82,7 +96,7 @@ internal object ProviderHandoff {
             context.packageManager.getLaunchIntentForPackage(it) != null
         }
         if (packageName == null) {
-            notice(context, "RelayTube is not installed. Install RelayTube first.")
+            notice(context, "RelayTube or SmartTube is not installed on this device.")
             return
         }
         val uri = Uri.parse("https://www.youtube.com/watch").buildUpon()
@@ -95,12 +109,12 @@ internal object ProviderHandoff {
             .setPackage(packageName)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         if (intent.resolveActivity(context.packageManager) == null) {
-            notice(context, "This RelayTube build does not support direct video links.")
+            notice(context, "This ${mediaAppDisplayName(context)} build does not support direct video links.")
             openSmartTube(context)
             return
         }
         runCatching { context.startActivity(intent) }
-            .onFailure { notice(context, "RelayTube could not open that video.") }
+            .onFailure { notice(context, "${mediaAppDisplayName(context)} could not open that video.") }
     }
 
     fun openStremio(context: Context) {
@@ -147,7 +161,7 @@ internal object ProviderHandoff {
                     context.packageManager.getLaunchIntentForPackage(it) != null
                 }
                 if (packageName == null) {
-                    notice(context, "RelayTube is not installed on this device.")
+                    notice(context, "RelayTube or SmartTube is not installed on this device.")
                     return
                 }
                 val uri = Uri.parse("https://www.youtube.com/results").buildUpon()
@@ -167,6 +181,17 @@ internal object ProviderHandoff {
     }
 
     fun play(context: Context, item: MediaItem) {
+        item.providerSearchQuery?.takeIf { it.isNotBlank() }?.let { episodeQuery ->
+            search(context, item.provider, episodeQuery)
+            return
+        }
+        // Search/recommendation cards carry TMDB metadata ids, not provider playback ids.
+        // Passing those ids into native detail URIs produces dead links (or malformed YouTube
+        // video ids), so hand off by title through the provider's own search instead.
+        if (item.providerContentId?.startsWith("tmdb:") == true) {
+            search(context, item.provider, item.showTitle ?: item.title)
+            return
+        }
         when (item.provider) {
             Provider.STREMIO -> {
                 val id = item.providerContentId

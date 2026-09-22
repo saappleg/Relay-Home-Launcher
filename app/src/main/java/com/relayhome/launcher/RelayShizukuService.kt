@@ -17,19 +17,36 @@ class RelayShizukuService : IRelayHomeShell.Stub() {
             return "Stock launcher restored and verified: $resolved"
         }
 
-        runCommand("/system/bin/pm", "disable-user", "--user", "0", packageName)
-        val setHome = runCatching {
+        // Select Relay before disabling the stock launcher. If Shizuku or the system service
+        // stops mid-operation, Android still has an enabled Home activity selected.
+        val selectRelay = runCatching {
             runCommand(
                 "/system/bin/cmd", "package", "set-home-activity", "--user", "0",
                 "com.relayhome.launcher/com.relayhome.launcher.MainActivity"
             )
         }
-        val resolved = runCatching { resolveHome() }.getOrElse { "verification failed: ${it.message}" }
-        if (setHome.isFailure || !resolved.contains("com.relayhome.launcher")) {
-            runCatching { runCommand("/system/bin/pm", "enable", "--user", "0", packageName) }
+        val selectedHome = runCatching { resolveHome() }.getOrElse { "verification failed: ${it.message}" }
+        if (selectRelay.isFailure || !selectedHome.contains("com.relayhome.launcher")) {
             throw IllegalStateException(
-                setHome.exceptionOrNull()?.message
-                    ?: "Android rejected Relay as Home (resolved: $resolved). The stock launcher was restored."
+                selectRelay.exceptionOrNull()?.message
+                    ?: "Android did not select Relay as Home (resolved: $selectedHome). The stock launcher is still enabled."
+            )
+        }
+
+        val disableStock = runCatching { runCommand("/system/bin/pm", "disable-user", "--user", "0", packageName) }
+        val resolved = runCatching { resolveHome() }.getOrElse { "verification failed: ${it.message}" }
+        if (disableStock.isFailure || !resolved.contains("com.relayhome.launcher")) {
+            runCatching { runCommand("/system/bin/pm", "enable", "--user", "0", packageName) }
+            // Keep Relay selected if the stock launcher's state had to be rolled back.
+            runCatching {
+                runCommand(
+                    "/system/bin/cmd", "package", "set-home-activity", "--user", "0",
+                    "com.relayhome.launcher/com.relayhome.launcher.MainActivity"
+                )
+            }
+            throw IllegalStateException(
+                disableStock.exceptionOrNull()?.message
+                    ?: "Android did not keep Relay selected as Home (resolved: $resolved). The stock launcher was restored."
             )
         }
         return "Relay Home override applied and verified: $resolved"

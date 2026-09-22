@@ -106,6 +106,15 @@ internal object SmartTubePlaybackStore {
         nowPlaying = null
     }
 
+    /** Clears provider cards while an explicit cross-service profile match is unavailable. */
+    fun deactivateProfile(context: Context) {
+        activeProfileId = null
+        subscriptionVideos = emptyList()
+        continueWatchingVideos = emptyList()
+        nowPlaying = null
+        preferences(context).edit().remove(RELAY_TUBE_ACTIVE_PROFILE).apply()
+    }
+
     private fun preferences(context: Context) =
         context.getSharedPreferences(RELAY_TUBE_CACHE_PREFS, Context.MODE_PRIVATE)
 
@@ -291,20 +300,53 @@ internal object RelayTubeProfileBridge {
 /** Relay-only display preferences; these never modify the viewer's YouTube subscriptions. */
 internal object SmartTubeChannelFilter {
     var hiddenChannelIds by mutableStateOf(emptySet<String>())
+    private val preferencesLock = Any()
 
-    fun load(context: Context) {
-        hiddenChannelIds = context.getSharedPreferences(RELAY_TUBE_CACHE_PREFS, Context.MODE_PRIVATE)
-            .getStringSet(RELAY_TUBE_HIDDEN_CHANNELS, emptySet())
-            .orEmpty()
+    fun load(context: Context, profileScope: String = "default") {
+        val preferences = context.getSharedPreferences(RELAY_TUBE_CACHE_PREFS, Context.MODE_PRIVATE)
+        val scopedKey = "${RELAY_TUBE_HIDDEN_CHANNELS}_${profileScope.preferenceKey()}"
+        val loaded = synchronized(preferencesLock) {
+            val stored = preferences.getStringSet(scopedKey, null)
+            val hasLegacyValue = preferences.contains(RELAY_TUBE_HIDDEN_CHANNELS)
+            if (stored != null) {
+                // A legacy value may remain if an earlier profile already had a scoped entry.
+                // Never copy that ambiguous household-wide value into another profile.
+                if (hasLegacyValue) {
+                    preferences.edit().remove(RELAY_TUBE_HIDDEN_CHANNELS).apply()
+                }
+                stored.toSet()
+            } else if (hasLegacyValue) {
+                val hasAnyScopedValue = preferences.all.keys.any {
+                    it.startsWith("${RELAY_TUBE_HIDDEN_CHANNELS}_")
+                }
+                val legacy = preferences.getStringSet(RELAY_TUBE_HIDDEN_CHANNELS, emptySet())
+                    .orEmpty()
+                    .toSet()
+                // The old global setting has no owner metadata. Assign it to the first profile
+                // only when no profile-scoped setting exists; otherwise discard the ambiguous
+                // leftover rather than cloning one viewer's filters to another viewer.
+                preferences.edit().apply {
+                    if (!hasAnyScopedValue) putStringSet(scopedKey, legacy)
+                    else putStringSet(scopedKey, emptySet())
+                    remove(RELAY_TUBE_HIDDEN_CHANNELS)
+                }.apply()
+                if (hasAnyScopedValue) emptySet() else legacy
+            } else {
+                emptySet()
+            }
+        }
+        hiddenChannelIds = loaded
     }
 
-    fun setVisible(context: Context, channelId: String, visible: Boolean) {
+    fun setVisible(context: Context, channelId: String, visible: Boolean, profileScope: String = "default") {
         hiddenChannelIds = if (visible) hiddenChannelIds - channelId else hiddenChannelIds + channelId
         context.getSharedPreferences(RELAY_TUBE_CACHE_PREFS, Context.MODE_PRIVATE)
             .edit()
-            .putStringSet(RELAY_TUBE_HIDDEN_CHANNELS, hiddenChannelIds)
+            .putStringSet("${RELAY_TUBE_HIDDEN_CHANNELS}_${profileScope.preferenceKey()}", hiddenChannelIds)
             .apply()
     }
+
+    private fun String.preferenceKey(): String = replace(Regex("[^A-Za-z0-9_.-]"), "_")
 }
 private const val RELAY_TUBE_HIDDEN_CHANNELS = "hidden_channel_ids"
 
@@ -354,16 +396,25 @@ class SmartTubeNowPlayingService : NotificationListenerService() {
         val extras = sbn.notification.extras
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()?.trim().orEmpty()
         if (title.isBlank()) return
+        val matchingPlayback = SmartTubePlaybackStore.nowPlaying
+            ?.takeIf {
+                sbn.packageName.startsWith("com.relaytube") && it.title.trim().equals(title, ignoreCase = true)
+            }
         SmartTubePlaybackStore.updateNowPlaying(SmartTubeNowPlaying(
-            videoId = null,
+            // RelayTube's bridge carries the exact video ID and resume position. Its
+            // notification can arrive afterward with only display text, so keep the richer
+            // record when both refer to the same title.
+            videoId = matchingPlayback?.videoId,
             title = title,
             channel = extras.getCharSequence(Notification.EXTRA_SUB_TEXT)?.toString()?.trim()
                 ?.takeIf { it.isNotBlank() }
                 ?: extras.getCharSequence(Notification.EXTRA_TEXT)?.toString()?.trim()?.takeIf { it.isNotBlank() },
-            artworkUrl = null,
-            description = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.trim()?.takeIf { it.isNotBlank() },
-            positionMs = 0L,
-            durationMs = 0L,
+            artworkUrl = matchingPlayback?.artworkUrl,
+            description = extras.getCharSequence(Notification.EXTRA_BIG_TEXT)?.toString()?.trim()?.takeIf { it.isNotBlank() }
+                ?: matchingPlayback?.description,
+            metadata = matchingPlayback?.metadata,
+            positionMs = matchingPlayback?.positionMs ?: 0L,
+            durationMs = matchingPlayback?.durationMs ?: 0L,
             playing = true
         ))
     }

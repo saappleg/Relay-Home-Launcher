@@ -6,7 +6,7 @@ Relay Home is an Android TV / Google TV media launcher. It is the discovery and 
 
 ## Beta features
 
-- A media-first 10-foot Home view with a provider-powered rotating hero, Continue Watching, and Recommended TV Shows.
+- A media-first 10-foot Home view with a provider-powered hero that follows focused media, Continue Watching, and Recommended TV Shows.
 - D-pad focus behavior across Home, App Peek, details, Search, All Apps, provider hubs, and Settings.
 - Provider tabs are opt-in and persist between launches. Home shows only the providers enabled in Settings.
 - Nuvio sign-in, encrypted session persistence, profile switching, watch-progress sync, season/episode context, and title/resume deep-link handoff.

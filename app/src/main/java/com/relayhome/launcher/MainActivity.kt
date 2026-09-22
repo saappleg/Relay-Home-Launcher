@@ -2,12 +2,15 @@ package com.relayhome.launcher
 
 import android.os.Bundle
 import android.app.role.RoleManager
+import android.app.Activity
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ComponentName
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.provider.Settings
+import android.speech.RecognizerIntent
 import android.view.KeyEvent
 import android.view.ViewConfiguration
 import androidx.activity.ComponentActivity
@@ -70,8 +73,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -89,6 +96,8 @@ import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.res.vectorResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -112,6 +121,8 @@ import java.time.YearMonth
 class MainActivity : ComponentActivity() {
     var homeRequestGeneration by mutableStateOf(0)
         private set
+    var appCatalogRefreshGeneration by mutableStateOf(0)
+        private set
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -123,6 +134,12 @@ class MainActivity : ComponentActivity() {
         if (intent.action == Intent.ACTION_MAIN && intent.hasCategory(Intent.CATEGORY_HOME)) {
             homeRequestGeneration += 1
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        ProviderHandoff.refreshRelayTubeInstallation(this)
+        appCatalogRefreshGeneration += 1
     }
 
     fun requestHomeRole() {
@@ -158,8 +175,11 @@ private enum class Destination(val label: String) { HOME("Home"), DETAIL("Detail
 internal enum class Provider(val label: String, val accent: Color) {
     STREMIO("Stremio", Color(0xFF5B87FF)),
     NUVIO("Nuvio", Color(0xFFAF7AFF)),
-    SMARTTUBE("RelayTube", Color(0xFFFF5F5F))
+    SMARTTUBE("SmartTube", Color(0xFFFF5F5F))
 }
+
+private fun Provider.displayName(context: Context): String =
+    if (this == Provider.SMARTTUBE) ProviderHandoff.mediaAppDisplayName(context) else label
 
 internal data class MediaItem(
     val title: String,
@@ -181,7 +201,9 @@ internal data class MediaItem(
     val releaseInfo: String? = null,
     val rating: Double? = null,
     val genres: String? = null,
-    val durationMs: Long = 0L
+    val durationMs: Long = 0L,
+    /** Provider search query for an episode selection that lacks a native episode deep link. */
+    val providerSearchQuery: String? = null
 )
 
 private fun SmartTubeNowPlaying.toRelayMediaItem() = MediaItem(
@@ -201,6 +223,17 @@ private fun SmartTubeNowPlaying.toRelayMediaItem() = MediaItem(
 /** Removes invisible format/control characters that some provider payloads use for empty fields. */
 internal fun String?.visibleRelayText(): String =
     this.orEmpty().replace(Regex("[\\p{C}\\s]+"), " ").trim()
+
+private fun MediaItem.focusRestoreKey(): String = "${provider.name}:${providerContentId ?: title}"
+
+private inline fun <reified T : Throwable> Throwable.causes(): Boolean {
+    var current: Throwable? = this
+    while (current != null) {
+        if (current is T) return true
+        current = current.cause?.takeUnless { it === current }
+    }
+    return false
+}
 
 private fun formatMediaDuration(durationMs: Long): String {
     val totalMinutes = (durationMs / 60_000L).coerceAtLeast(1L)
@@ -249,9 +282,12 @@ private fun RelayHomeApp() {
     val context = LocalContext.current
     val stockLauncherOverride = remember { LauncherOverride.detect(context) }
     var dateFormat by remember { mutableStateOf(DateFormatSettings.load(context)) }
-    var profileImageUri by remember { mutableStateOf(ProfileImageSettings.load(context)) }
-    var favoriteApps by remember { mutableStateOf(FavoriteAppsStore.load(context)) }
+    var installedApps by remember { mutableStateOf(emptyList<InstalledApp>()) }
+    val appCatalogRefreshGeneration = (context as? MainActivity)?.appCatalogRefreshGeneration ?: 0
     var destination by remember { mutableStateOf(Destination.HOME) }
+    var detailOrigin by remember { mutableStateOf(Destination.HOME) }
+    var detailFocusRestoreKey by remember { mutableStateOf<String?>(null) }
+    var detailHomeRow by remember { mutableStateOf<HomeRow?>(null) }
     var activeProvider by remember { mutableStateOf(Provider.STREMIO) }
     var peekProvider by remember { mutableStateOf<Provider?>(null) }
     val homeGeneration = (context as? MainActivity)?.homeRequestGeneration ?: 0
@@ -259,9 +295,9 @@ private fun RelayHomeApp() {
         if (homeGeneration > 0) {
             destination = Destination.HOME
             peekProvider = null
+            detailFocusRestoreKey = null
         }
     }
-    var continueWatchingLimits by remember { mutableStateOf(ContinueWatchingLimits.load(context)) }
     var nuvioSession by remember { mutableStateOf(NuvioSessionStore.load(context)) }
     val defaultProviders = remember(nuvioSession) {
         buildSet {
@@ -279,26 +315,64 @@ private fun RelayHomeApp() {
     }
     // App Peek is a transient Home state. Never carry it through Details, Apps, Calendar,
     // Settings, or a provider screen and then restore a stale provider overlay on return.
-    LaunchedEffect(destination) {
-        if (destination != Destination.HOME) peekProvider = null
+    LaunchedEffect(destination, detailOrigin) {
+        if (destination != Destination.HOME && !(destination == Destination.DETAIL && detailOrigin == Destination.HOME)) {
+            peekProvider = null
+        }
     }
     var nuvioProfiles by remember { mutableStateOf(emptyList<NuvioProfile>()) }
     var activeNuvioProfile by remember { mutableStateOf(NuvioSessionStore.loadProfile(context)) }
+    val currentNuvioProfile = rememberUpdatedState(activeNuvioProfile)
+    val currentNuvioAccountId = rememberUpdatedState(nuvioSession?.accountId)
+    val profileScope = nuvioSession?.profileScope(activeNuvioProfile) ?: "local"
+    var profileImageUri by remember(profileScope) { mutableStateOf(ProfileImageSettings.load(context, profileScope)) }
+    var favoriteApps by remember(profileScope) { mutableStateOf(emptyList<String>()) }
+    var continueWatchingLimits by remember(profileScope) { mutableStateOf(ContinueWatchingLimits.load(context, profileScope)) }
+    var homeLayout by remember(profileScope) { mutableStateOf(HomeLayoutStore.load(context, profileScope)) }
+    LaunchedEffect(appCatalogRefreshGeneration, profileScope) {
+        installedApps = withContext(Dispatchers.IO) { InstalledApps.discover(context) }
+        favoriteApps = FavoriteAppsStore.load(context, installedApps, profileScope)
+    }
+    LaunchedEffect(profileScope) {
+        SmartTubeChannelFilter.load(context, profileScope)
+    }
     var nuvioMedia by remember { mutableStateOf(emptyList<MediaItem>()) }
+    var nuvioLibrary by remember { mutableStateOf(emptyList<MediaItem>()) }
+    var nuvioContinueWatching by remember { mutableStateOf(emptyList<MediaItem>()) }
     var nuvioSyncing by remember { mutableStateOf(false) }
     var nuvioSyncError by remember { mutableStateOf<String?>(null) }
+    var nuvioNeedsReauth by remember { mutableStateOf(false) }
     var nuvioRefreshGeneration by remember { mutableStateOf(0) }
     var upcomingEpisodes by remember { mutableStateOf(emptyList<TmdbCalendarEntry>()) }
     var tmdbRecommendations by remember { mutableStateOf(emptyList<MediaItem>()) }
-    val smartTubeNowPlaying = SmartTubePlaybackStore.nowPlaying
+    fun clearNuvioProfileContent() {
+        nuvioMedia = emptyList()
+        nuvioLibrary = emptyList()
+        nuvioContinueWatching = emptyList()
+        upcomingEpisodes = emptyList()
+        tmdbRecommendations = emptyList()
+    }
     val relayTubeProfiles = SmartTubePlaybackStore.profiles
-    val smartTubeSubscriptions = SmartTubePlaybackStore.subscriptionVideos
-        .ifEmpty { SmartTubePlaybackStore.loadSubscriptionVideos(context) }
-    val smartTubeContinueWatching = SmartTubePlaybackStore.continueWatchingVideos
-        .ifEmpty { SmartTubePlaybackStore.loadContinueWatchingVideos(context) }
+    val activeNuvioProfileForPairing = nuvioProfiles.firstOrNull { it.index == activeNuvioProfile }
+    val savedRelayTubeProfileId = activeNuvioProfileForPairing?.let { profile ->
+        RelayProfileMappingStore.get(context, nuvioSession?.accountId.orEmpty(), profile.index)
+            ?.takeIf { saved -> relayTubeProfiles.any { it.id == saved } }
+    }
+    val namedRelayTubeProfileId = activeNuvioProfileForPairing?.takeIf { !nuvioSession?.accountId.isNullOrBlank() }?.let { profile ->
+        relayTubeProfiles.singleOrNull { it.name.trim().equals(profile.name.trim(), ignoreCase = true) }?.id
+    }
+    val expectedRelayTubeProfileId = savedRelayTubeProfileId ?: namedRelayTubeProfileId
+    val relayTubeProfileDataAllowed = !ProviderHandoff.isRelayTubeInstalled(context) || nuvioSession == null ||
+        (expectedRelayTubeProfileId != null && expectedRelayTubeProfileId == SmartTubePlaybackStore.activeProfileId)
+    val smartTubeNowPlaying = SmartTubePlaybackStore.nowPlaying.takeIf { relayTubeProfileDataAllowed }
+    val smartTubeSubscriptions = if (relayTubeProfileDataAllowed) {
+        SmartTubePlaybackStore.subscriptionVideos.ifEmpty { SmartTubePlaybackStore.loadSubscriptionVideos(context) }
+    } else emptyList()
+    val smartTubeContinueWatching = if (relayTubeProfileDataAllowed) {
+        SmartTubePlaybackStore.continueWatchingVideos.ifEmpty { SmartTubePlaybackStore.loadContinueWatchingVideos(context) }
+    } else emptyList()
     val hiddenSmartTubeChannels = SmartTubeChannelFilter.hiddenChannelIds
     LaunchedEffect(Unit) {
-        SmartTubeChannelFilter.load(context)
         SmartTubePlaybackStore.initialize(context)
         RelayTubeProfileBridge.requestProfiles(context)
     }
@@ -306,68 +380,74 @@ private fun RelayHomeApp() {
         nuvioSession?.let { session ->
             NuvioApi.pullProfiles(session).onSuccess { profiles ->
                 nuvioProfiles = profiles
-                if (profiles.none { it.index == activeNuvioProfile }) activeNuvioProfile = profiles.firstOrNull()?.index ?: 1
+                if (profiles.none { it.index == activeNuvioProfile }) {
+                    val nextProfile = profiles.firstOrNull()?.index ?: 1
+                    clearNuvioProfileContent()
+                    activeNuvioProfile = nextProfile
+                }
             }
         }
     }
     LaunchedEffect(nuvioSession, activeNuvioProfile, nuvioRefreshGeneration) {
         nuvioSession?.let { session ->
+            val requestedProfile = activeNuvioProfile
+            fun isCurrentRequest() = currentNuvioProfile.value == requestedProfile && currentNuvioAccountId.value == session.accountId
             nuvioSyncing = true
             nuvioSyncError = null
-            NuvioApi.pullRelayMedia(session, activeNuvioProfile)
-                .onSuccess { nuvioMedia = it }
-                .onFailure { error ->
-                    // Retain the last successful cards while making the real recovery action
-                    // obvious. A transient provider outage should never turn Home into samples.
-                    nuvioSyncError = error.message?.take(160)
-                        ?.takeIf { it.isNotBlank() }
-                        ?: "Couldn’t sync Nuvio yet. Check the connection and try again."
+            NuvioApi.pullRelayMediaSnapshot(session, requestedProfile)
+                .onSuccess { snapshot ->
+                    if (isCurrentRequest()) {
+                        nuvioMedia = snapshot.all
+                        nuvioLibrary = snapshot.library
+                        nuvioContinueWatching = snapshot.continueWatching
+                        nuvioNeedsReauth = false
+                    }
                 }
-            nuvioSyncing = false
+                .onFailure { error ->
+                    if (isCurrentRequest()) {
+                        // Keep the last successful cards for a transient failure within the same
+                        // profile; profile switches clear them before this request begins.
+                        nuvioSyncError = error.message?.take(160)
+                            ?.takeIf { it.isNotBlank() }
+                            ?: "Couldn’t sync Nuvio yet. Check the connection and try again."
+                        nuvioNeedsReauth = error.causes<NuvioReauthRequiredException>()
+                    }
+                }
+            if (isCurrentRequest()) nuvioSyncing = false
         }
     }
-    LaunchedEffect(nuvioProfiles, relayTubeProfiles, activeNuvioProfile) {
-        if (nuvioProfiles.size == relayTubeProfiles.size && nuvioProfiles.size > 1) {
-            nuvioProfiles.forEachIndexed { index, profile ->
-                if (RelayProfileMappingStore.get(context, profile.index) == null) {
-                    val exact = relayTubeProfiles.firstOrNull { it.name.equals(profile.name, ignoreCase = true) }
-                    RelayProfileMappingStore.set(context, profile.index, (exact ?: relayTubeProfiles[index]).id)
-                }
-            }
-        }
+    LaunchedEffect(nuvioProfiles, relayTubeProfiles, activeNuvioProfile, nuvioSession?.accountId) {
         val nuvioProfile = nuvioProfiles.firstOrNull { it.index == activeNuvioProfile }
         if (nuvioProfile != null && relayTubeProfiles.isNotEmpty()) {
-            val pairedId = RelayProfileMappingStore.resolve(
-                context,
-                nuvioProfile,
-                relayTubeProfiles,
-                allowSelectedFallback = true
-            )
+            val pairedId = RelayProfileMappingStore.resolve(context, nuvioSession?.accountId.orEmpty(), nuvioProfile, relayTubeProfiles)
             if (pairedId != null && pairedId != SmartTubePlaybackStore.activeProfileId) {
                 RelayTubeProfileBridge.selectProfile(context, pairedId)
+            } else if (pairedId == null) {
+                SmartTubePlaybackStore.deactivateProfile(context)
             }
         }
     }
     fun selectRelayProfile(profileIndex: Int) {
+        if (profileIndex != activeNuvioProfile) clearNuvioProfileContent()
         activeNuvioProfile = profileIndex
         NuvioSessionStore.saveProfile(context, profileIndex)
         val nuvioProfile = nuvioProfiles.firstOrNull { it.index == profileIndex } ?: return
-        RelayProfileMappingStore.resolve(
-            context,
-            nuvioProfile,
-            relayTubeProfiles,
-            allowSelectedFallback = false
-        )?.let { RelayTubeProfileBridge.selectProfile(context, it) }
+        val pairedId = RelayProfileMappingStore.resolve(context, nuvioSession?.accountId.orEmpty(), nuvioProfile, relayTubeProfiles)
+        if (pairedId != null) RelayTubeProfileBridge.selectProfile(context, pairedId)
+        else SmartTubePlaybackStore.deactivateProfile(context)
     }
-    LaunchedEffect(nuvioMedia) {
-        upcomingEpisodes = TmdbApi.upcomingEpisodes(nuvioMedia)
+    LaunchedEffect(nuvioMedia, enabledProviders) {
+        upcomingEpisodes = if (Provider.NUVIO in enabledProviders) TmdbApi.upcomingEpisodes(nuvioMedia) else emptyList()
     }
-    LaunchedEffect(nuvioMedia) {
-        tmdbRecommendations = TmdbApi.recommendations(nuvioMedia)
+    LaunchedEffect(nuvioMedia, enabledProviders) {
+        tmdbRecommendations = if (Provider.NUVIO in enabledProviders) TmdbApi.recommendations(nuvioMedia) else emptyList()
     }
     var selectedMedia by remember { mutableStateOf(MediaItem("", Provider.NUVIO, 0f, emptyList(), "")) }
     val detailScope = rememberCoroutineScope()
-    fun openMediaDetails(item: MediaItem) {
+    fun openMediaDetails(item: MediaItem, sourceHomeRow: HomeRow? = null) {
+        detailOrigin = destination
+        detailHomeRow = sourceHomeRow.takeIf { destination == Destination.HOME }
+        detailFocusRestoreKey = item.focusRestoreKey()
         selectedMedia = item
         destination = Destination.DETAIL
         if (Regex("(?i)S\\s*\\d+\\D{0,8}E\\s*\\d+").containsMatchIn(item.episodeInfo.orEmpty())) {
@@ -386,8 +466,8 @@ private fun RelayHomeApp() {
         ))
     }
     val smartTubeHeroItem = smartTubeNowPlaying?.toRelayMediaItem()
-    val heroCandidates = remember(enabledProviders, nuvioMedia, smartTubeHeroItem, smartTubeContinueWatching, smartTubeSubscriptions) {
-        (nuvioMedia + listOfNotNull(smartTubeHeroItem) + smartTubeContinueWatching.map { video ->
+    val heroCandidates = remember(enabledProviders, nuvioContinueWatching, smartTubeHeroItem, smartTubeContinueWatching, smartTubeSubscriptions) {
+        (nuvioContinueWatching + listOfNotNull(smartTubeHeroItem) + smartTubeContinueWatching.map { video ->
             MediaItem(video.title, Provider.SMARTTUBE, video.progress, listOf(Provider.SMARTTUBE.accent.copy(alpha = .5f), midnight), video.artworkUrl.orEmpty(), providerContentId = video.videoId, resumePositionMs = video.resumePositionMs, providerChannelId = video.channelId, contentType = "video", episodeInfo = video.channel, description = video.description, releaseInfo = video.metadata, durationMs = video.durationMs)
         } + smartTubeSubscriptions.map { video ->
             MediaItem(video.title, Provider.SMARTTUBE, video.progress, listOf(Provider.SMARTTUBE.accent.copy(alpha = .5f), midnight), video.artworkUrl.orEmpty(), providerContentId = video.videoId, resumePositionMs = video.resumePositionMs, providerChannelId = video.channelId, contentType = "video", episodeInfo = video.channel, description = video.description, releaseInfo = video.metadata, durationMs = video.durationMs)
@@ -395,20 +475,57 @@ private fun RelayHomeApp() {
             .filter { it.provider in enabledProviders }
             .distinctBy { "${it.provider}:${it.providerContentId ?: it.title}" }
     }
-    LaunchedEffect(heroCandidates) {
-        if (heroCandidates.isEmpty()) return@LaunchedEffect
-        var index = 0
-        while (true) {
-            val item = heroCandidates[index % heroCandidates.size]
-            activeHero = Hero(
+    LaunchedEffect(heroCandidates, enabledProviders, nuvioSyncing) {
+        val currentHeroItem = activeHero.item
+        val matchingHeroItem = currentHeroItem?.let { current ->
+            heroCandidates.firstOrNull { candidate ->
+                candidate.provider == current.provider &&
+                    (candidate.providerContentId ?: candidate.title) == (current.providerContentId ?: current.title)
+            }
+        }
+        if (currentHeroItem != null && matchingHeroItem != null) {
+            val updatedResume = currentHeroItem.copy(
+                progress = matchingHeroItem.progress,
+                resumePositionMs = matchingHeroItem.resumePositionMs,
+                durationMs = matchingHeroItem.durationMs
+            )
+            if (updatedResume != currentHeroItem) activeHero = activeHero.copy(item = updatedResume)
+            return@LaunchedEffect
+        }
+        // TMDB discovery cards are selected from the recommendation/search rail, so they are
+        // intentionally absent from the provider playback feeds used for hero candidates.
+        // Keep that focused preview while the underlying live feeds refresh.
+        if (currentHeroItem?.providerContentId?.startsWith("tmdb:") == true && currentHeroItem.provider in enabledProviders) {
+            return@LaunchedEffect
+        }
+
+        val item = heroCandidates.firstOrNull()
+        activeHero = when {
+            item != null -> Hero(
                 item.showTitle ?: item.title,
                 item.episodeInfo ?: item.description ?: "Continue where you left off.",
                 paletteFor(item),
                 item.artworkUrl,
                 item
             )
-            delay(11_000)
-            index++
+            enabledProviders.isEmpty() -> Hero(
+                "Make Relay Home yours",
+                "Choose your services and favorite apps to build a home that feels like yours.",
+                orbitalPalette,
+                ""
+            )
+            nuvioSyncing -> Hero(
+                "Loading your connected media",
+                "Syncing your library and finding your latest episodes.",
+                orbitalPalette,
+                ""
+            )
+            else -> Hero(
+                "Your home, ready to explore",
+                "Your connected services and favorite apps will appear here.",
+                orbitalPalette,
+                ""
+            )
         }
     }
 
@@ -416,6 +533,7 @@ private fun RelayHomeApp() {
     // The hero already crossfades through Coil. Animating this root gradient as well forced the
     // entire launcher tree to recompose for many frames after every settled card selection.
     val background = palette.backdrop
+    val saveableStateHolder = rememberSaveableStateHolder()
 
     MaterialTheme(colorScheme = darkColorScheme(background = midnight, onBackground = ivory)) {
         Box(
@@ -427,11 +545,15 @@ private fun RelayHomeApp() {
                     )
                 )
         ) {
+            saveableStateHolder.SaveableStateProvider(destination.name) {
             when (destination) {
                 Destination.HOME -> HomeScreen(
                     hero = activeHero,
                     palette = palette,
                     focusResetGeneration = homeGeneration,
+                    focusRestoreKey = detailFocusRestoreKey.takeIf { detailOrigin == Destination.HOME },
+                    focusRestoreRow = detailHomeRow.takeIf { detailOrigin == Destination.HOME },
+                    onFocusRestored = { detailFocusRestoreKey = null; detailHomeRow = null },
                     providers = enabledProviders,
                     onDestination = { destination = it },
                     onProvider = { provider -> activeProvider = provider; destination = Destination.PROVIDER },
@@ -439,8 +561,11 @@ private fun RelayHomeApp() {
                     onPeekProvider = { peekProvider = it },
                     onSettings = { destination = Destination.SETTINGS },
                     onHeroChanged = { hero -> if (hero != activeHero) activeHero = hero },
-                    onItemSelected = ::openMediaDetails,
-                    nuvioItems = nuvioMedia,
+                    onItemSelected = { openMediaDetails(it) },
+                    onItemSelectedFromHomeRow = { item, row -> openMediaDetails(item, row) },
+                    nuvioItems = nuvioLibrary,
+                    nuvioContinueWatching = nuvioContinueWatching,
+                    nuvioConnected = nuvioSession != null,
                     nuvioSyncing = nuvioSyncing,
                     nuvioSyncError = nuvioSyncError,
                     upcomingEpisodes = upcomingEpisodes,
@@ -452,6 +577,8 @@ private fun RelayHomeApp() {
                     hiddenSmartTubeChannels = hiddenSmartTubeChannels,
                     continueWatchingLimits = continueWatchingLimits,
                     favoriteApps = favoriteApps,
+                    homeLayout = homeLayout,
+                    installedApps = installedApps,
                     nuvioProfiles = nuvioProfiles,
                     activeNuvioProfile = activeNuvioProfile,
                     profileImageUri = profileImageUri,
@@ -467,14 +594,15 @@ private fun RelayHomeApp() {
                     nuvioSession = nuvioSession,
                     nuvioProfileId = activeNuvioProfile,
                     onLibraryChanged = { nuvioRefreshGeneration++ },
-                    onBackHome = { destination = Destination.HOME }
+                    onBackHome = { destination = detailOrigin }
                 )
                 Destination.APPS -> AppsScreen(
                     palette = palette,
+                    installedApps = installedApps,
                     favoriteApps = favoriteApps,
+                    onMoveFavorite = { pkg, offset -> favoriteApps = FavoriteAppsStore.move(context, pkg, offset, profileScope) },
                     onFavoriteChanged = { pkg, _ ->
-                        FavoriteAppsStore.toggle(context, pkg)
-                        favoriteApps = FavoriteAppsStore.load(context)
+                        favoriteApps = FavoriteAppsStore.toggle(context, pkg, profileScope)
                     },
                     onBackHome = { destination = Destination.HOME }
                 )
@@ -492,16 +620,22 @@ private fun RelayHomeApp() {
                     continueWatchingLimits = continueWatchingLimits,
                     onContinueWatchingLimitChanged = { provider, limit ->
                         continueWatchingLimits = continueWatchingLimits + (provider to limit)
-                        ContinueWatchingLimits.save(context, provider, limit)
+                        ContinueWatchingLimits.save(context, provider, limit, profileScope)
+                    },
+                    homeLayout = homeLayout,
+                    onHomeLayoutChanged = {
+                        homeLayout = it
+                        HomeLayoutStore.save(context, profileScope, it)
                     },
                     smartTubeSubscriptions = smartTubeSubscriptions,
                     smartTubeInstalled = ProviderHandoff.isSmartTubeInstalled(context),
                     hiddenSmartTubeChannels = hiddenSmartTubeChannels,
-                    onSmartTubeChannelVisible = { channelId, visible -> SmartTubeChannelFilter.setVisible(context, channelId, visible) },
+                    onSmartTubeChannelVisible = { channelId, visible -> SmartTubeChannelFilter.setVisible(context, channelId, visible, profileScope) },
                     nuvioConnected = nuvioSession != null,
                     nuvioSyncing = nuvioSyncing,
-                    nuvioItemCount = nuvioMedia.size,
+                    nuvioItemCount = nuvioContinueWatching.size,
                     nuvioSyncError = nuvioSyncError,
+                    nuvioNeedsReauth = nuvioNeedsReauth,
                     onRefreshNuvio = { nuvioRefreshGeneration++ },
                     onManageProvider = { provider -> activeProvider = provider; destination = Destination.PROVIDER },
                     dateFormat = dateFormat,
@@ -512,15 +646,19 @@ private fun RelayHomeApp() {
                     profileImageUri = profileImageUri,
                     onProfileImageChanged = { uri ->
                         profileImageUri = uri
-                        if (uri == null) ProfileImageSettings.clear(context) else ProfileImageSettings.save(context, uri)
+                        if (uri == null) ProfileImageSettings.clear(context, profileScope) else ProfileImageSettings.save(context, uri, profileScope)
                     },
                     stockLauncherOverride = stockLauncherOverride
                 )
                 Destination.SEARCH -> SearchScreen(
                     palette = palette,
                     providers = enabledProviders,
+                    installedApps = installedApps,
+                    profileScope = profileScope,
+                    focusRestoreKey = detailFocusRestoreKey.takeIf { detailOrigin == Destination.SEARCH },
+                    onFocusRestored = { detailFocusRestoreKey = null },
                     onBackHome = { destination = Destination.HOME },
-                    onItemSelected = ::openMediaDetails
+                    onItemSelected = { openMediaDetails(it) }
                 )
                 Destination.CALENDAR -> CalendarScreen(
                     palette = palette,
@@ -528,8 +666,10 @@ private fun RelayHomeApp() {
                     nuvioItems = nuvioMedia,
                     upcomingEpisodes = upcomingEpisodes,
                     dateFormat = dateFormat,
+                    focusRestoreKey = detailFocusRestoreKey.takeIf { detailOrigin == Destination.CALENDAR },
+                    onFocusRestored = { detailFocusRestoreKey = null },
                     onBackHome = { destination = Destination.HOME },
-                    onItemSelected = ::openMediaDetails
+                    onItemSelected = { openMediaDetails(it) }
                 )
                 Destination.PROVIDER -> ProviderHubScreen(
                     activeProvider,
@@ -538,8 +678,9 @@ private fun RelayHomeApp() {
                     onConnectNuvio = { destination = Destination.NUVIO_CONNECT },
                     nuvioConnected = nuvioSession != null,
                     nuvioSyncing = nuvioSyncing,
-                    nuvioItemCount = nuvioMedia.size,
+                    nuvioItemCount = nuvioContinueWatching.size,
                     nuvioSyncError = nuvioSyncError,
+                    nuvioNeedsReauth = nuvioNeedsReauth,
                     nuvioProfiles = nuvioProfiles,
                     activeNuvioProfile = activeNuvioProfile,
                     onNuvioProfileSelected = {
@@ -551,24 +692,41 @@ private fun RelayHomeApp() {
                         nuvioSession = null
                         nuvioProfiles = emptyList()
                         nuvioMedia = emptyList()
+                        nuvioLibrary = emptyList()
+                        nuvioContinueWatching = emptyList()
+                        upcomingEpisodes = emptyList()
+                        tmdbRecommendations = emptyList()
+                        nuvioSyncing = false
+                        nuvioNeedsReauth = false
+                        nuvioSyncError = null
                         enabledProviders -= Provider.NUVIO
                         ProviderSettingsStore.save(context, enabledProviders)
                     }
                 )
                 Destination.NUVIO_CONNECT -> NuvioConnectScreen(
                     palette = violetPalette,
-                    connected = nuvioSession != null,
+                    connected = nuvioSession != null && !nuvioNeedsReauth,
                     onConnected = {
+                        if (nuvioSession?.accountId != it.accountId) {
+                            activeNuvioProfile = 1
+                            NuvioSessionStore.saveProfile(context, 1)
+                            nuvioProfiles = emptyList()
+                            clearNuvioProfileContent()
+                            SmartTubePlaybackStore.deactivateProfile(context)
+                        }
                         NuvioSessionStore.save(context, it)
                         nuvioSession = it
                         if (Provider.NUVIO !in enabledProviders) {
                             enabledProviders += Provider.NUVIO
                             ProviderSettingsStore.save(context, enabledProviders)
                         }
+                        nuvioNeedsReauth = false
+                        nuvioSyncError = null
                         destination = Destination.PROVIDER
                     },
                     onBack = { destination = Destination.PROVIDER }
                 )
+            }
             }
         }
     }
@@ -579,6 +737,9 @@ private fun HomeScreen(
     hero: Hero,
     palette: RelayPalette,
     focusResetGeneration: Int,
+    focusRestoreKey: String?,
+    focusRestoreRow: HomeRow?,
+    onFocusRestored: () -> Unit,
     providers: Set<Provider>,
     onDestination: (Destination) -> Unit,
     onProvider: (Provider) -> Unit,
@@ -587,7 +748,10 @@ private fun HomeScreen(
     onSettings: () -> Unit,
     onHeroChanged: (Hero) -> Unit,
     onItemSelected: (MediaItem) -> Unit,
+    onItemSelectedFromHomeRow: (MediaItem, HomeRow) -> Unit,
     nuvioItems: List<MediaItem>,
+    nuvioContinueWatching: List<MediaItem>,
+    nuvioConnected: Boolean,
     nuvioSyncing: Boolean,
     nuvioSyncError: String?,
     upcomingEpisodes: List<TmdbCalendarEntry>,
@@ -598,7 +762,9 @@ private fun HomeScreen(
     smartTubeContinueWatching: List<SmartTubeSubscriptionVideo>,
     hiddenSmartTubeChannels: Set<String>,
     continueWatchingLimits: Map<Provider, Int>,
-    favoriteApps: Set<String>,
+    favoriteApps: List<String>,
+    homeLayout: HomeLayout,
+    installedApps: List<InstalledApp>,
     nuvioProfiles: List<NuvioProfile>,
     activeNuvioProfile: Int,
     profileImageUri: String?,
@@ -610,6 +776,8 @@ private fun HomeScreen(
     val peekFocusRequester = remember { FocusRequester() }
     val heroFocusRequester = remember { FocusRequester() }
     val homeListState = rememberLazyListState()
+    var hasInitializedHomeFocus by rememberSaveable { mutableStateOf(false) }
+    var lastFocusResetGeneration by rememberSaveable { mutableStateOf(-1) }
     var profilePickerVisible by remember { mutableStateOf(false) }
     val smartTubeItem = smartTubeNowPlaying?.toRelayMediaItem()
     fun smartTubeItems(videos: List<SmartTubeSubscriptionVideo>) = videos.map { video ->
@@ -645,6 +813,7 @@ private fun HomeScreen(
             null -> emptyList()
         }
     }
+    val visibleLibraryItems = remember(providers, nuvioItems) { nuvioItems.filter { it.provider in providers } }
     fun activatePeek(provider: Provider?) {
         if (provider != peekProvider) {
             onPeekProvider(provider)
@@ -654,17 +823,16 @@ private fun HomeScreen(
     // The primary rail is deliberately provider-neutral: real Nuvio progress,
     // active SmartTube playback, and each enabled provider's available feed.
     val nuvioOnly = providers == setOf(Provider.NUVIO)
-    val continueWatching = remember(providers, nuvioItems, smartTubeItem, smartTubeContinueWatchingItems, nuvioOnly, continueWatchingLimits) {
-        (if (nuvioOnly) nuvioItems else listOfNotNull(smartTubeItem) + smartTubeContinueWatchingItems + nuvioItems)
+    val continueWatching = remember(providers, nuvioItems, nuvioContinueWatching, smartTubeItem, smartTubeContinueWatchingItems, nuvioOnly, continueWatchingLimits) {
+        (if (nuvioOnly) nuvioContinueWatching else listOfNotNull(smartTubeItem) + smartTubeContinueWatchingItems + nuvioContinueWatching)
             .filter { it.provider in providers }
             .distinctBy { "${it.provider}:${it.providerContentId ?: it.title}" }
             .groupBy { it.provider }
             .flatMap { (provider, items) -> items.take(continueWatchingLimits[provider] ?: ContinueWatchingLimits.defaultLimit) }
     }
-    val favoriteInstalledApps = remember(favoriteApps) {
-        InstalledApps.discover(context)
-            .filter { it.packageName in favoriteApps }
-            .sortedBy { it.label.lowercase() }
+    val favoriteInstalledApps = remember(favoriteApps, installedApps) {
+        val appsByPackage = installedApps.associateBy { it.packageName }
+        favoriteApps.mapNotNull(appsByPackage::get)
     }
     val recommendationItems = remember(providers, recommendations, nuvioOnly) {
         recommendations.filter { it.provider in providers }
@@ -672,11 +840,88 @@ private fun HomeScreen(
     val subscriptionItems = remember(providers, visibleSmartTubeSubscriptionItems) {
         if (Provider.SMARTTUBE in providers) visibleSmartTubeSubscriptionItems else emptyList()
     }
+    val visibleHomeRows = remember(homeLayout) { homeLayout.order.filterNot { it in homeLayout.hidden } }
+    val showFavoriteApps = HomeRow.FAVORITE_APPS in visibleHomeRows
+    fun mediaForHomeRow(row: HomeRow): List<MediaItem> = when (row) {
+        HomeRow.CONTINUE_WATCHING -> continueWatching
+        HomeRow.FAVORITE_APPS -> emptyList()
+        HomeRow.LIBRARY -> visibleLibraryItems
+        HomeRow.RECOMMENDATIONS -> recommendationItems
+        HomeRow.SUBSCRIPTIONS -> subscriptionItems
+        HomeRow.UPCOMING -> upcomingEpisodes.map { it.item }
+    }
+    fun homeRowHasContent(row: HomeRow): Boolean = when (row) {
+        HomeRow.FAVORITE_APPS -> favoriteInstalledApps.isNotEmpty()
+        else -> mediaForHomeRow(row).isNotEmpty()
+    }
+    val populatedHomeRows = visibleHomeRows.filter(::homeRowHasContent)
+    val hasVisibleMediaContent = visibleHomeRows.any { row ->
+        homeRowHasContent(row)
+    }
+    val targetIsHero = focusRestoreRow == null && hero.item?.focusRestoreKey() == focusRestoreKey
+    val matchingRestoreRow = when {
+        focusRestoreKey == null || peekProvider != null || targetIsHero -> null
+        focusRestoreRow != null -> focusRestoreRow.takeIf { row ->
+            row in populatedHomeRows && mediaForHomeRow(row).any { it.focusRestoreKey() == focusRestoreKey }
+        }
+        else -> populatedHomeRows.firstOrNull { row ->
+            mediaForHomeRow(row).any { it.focusRestoreKey() == focusRestoreKey }
+        }
+    }
     val homeScope = rememberCoroutineScope()
     // Do not restore a previous focus-scroll offset into the hero when returning to Home.
     LaunchedEffect(focusResetGeneration) {
-        homeListState.scrollToItem(0)
-        homeFocusRequester.requestFocus()
+        if (!hasInitializedHomeFocus || focusResetGeneration != lastFocusResetGeneration) {
+            homeListState.scrollToItem(0)
+            homeFocusRequester.requestFocus()
+            hasInitializedHomeFocus = true
+            lastFocusResetGeneration = focusResetGeneration
+        } else if (focusRestoreKey == null) {
+            // The route is recreated when returning from Apps, Search, or Settings. Saved
+            // Compose state keeps the flag and scroll offset, but the old focus node is gone.
+            delay(60)
+            homeFocusRequester.requestFocus()
+        }
+    }
+    LaunchedEffect(
+        focusRestoreKey, focusRestoreRow, targetIsHero, matchingRestoreRow, peekProvider, peekItems, populatedHomeRows,
+        continueWatching, visibleLibraryItems, recommendationItems, subscriptionItems, upcomingEpisodes, nuvioSyncing
+    ) {
+        val restoreKey = focusRestoreKey ?: return@LaunchedEffect
+        if (peekProvider != null) {
+            if (peekItems.any { it.focusRestoreKey() == restoreKey }) {
+                homeListState.scrollToItem(0)
+            } else if (!nuvioSyncing) {
+                homeListState.scrollToItem(0)
+                repeat(3) {
+                    delay(60)
+                    homeFocusRequester.requestFocus()
+                }
+                onFocusRestored()
+            }
+            return@LaunchedEffect
+        }
+        if (targetIsHero) {
+            homeListState.scrollToItem(0)
+            repeat(3) {
+                delay(60)
+                heroFocusRequester.requestFocus()
+            }
+            onFocusRestored()
+            return@LaunchedEffect
+        }
+        val matchingRow = matchingRestoreRow?.let(populatedHomeRows::indexOf) ?: -1
+        if (matchingRow >= 0) {
+            homeListState.scrollToItem(matchingRow + 1)
+        } else if (!nuvioSyncing) {
+            homeListState.scrollToItem(0)
+            repeat(3) {
+                delay(60)
+                if (hero.item?.focusRestoreKey() == restoreKey) heroFocusRequester.requestFocus()
+                else homeFocusRequester.requestFocus()
+            }
+            onFocusRestored()
+        }
     }
     Box(modifier = Modifier.fillMaxSize()) {
         LazyColumn(
@@ -691,6 +936,8 @@ private fun HomeScreen(
                         items = peekItems,
                         palette = palette,
                         focusRequester = peekFocusRequester,
+                        focusRestoreKey = focusRestoreKey,
+                        onFocusRestored = onFocusRestored,
                         onPreviewFocused = { homeScope.launch { homeListState.scrollToItem(0) } },
                         onItemSelected = onItemSelected,
                         onArtworkColor = { accent ->
@@ -700,14 +947,16 @@ private fun HomeScreen(
                 } else HeroPanel(
                     hero, palette, homeFocusRequester, heroFocusRequester,
                     onHeroFocused = { homeScope.launch { homeListState.scrollToItem(0) } },
-                    onItemSelected = onItemSelected
+                    onItemSelected = onItemSelected,
+                    onBrowseApps = { onDestination(Destination.APPS) },
+                    onSettings = onSettings
                 ) { accent ->
                     if (accent != null) onHeroChanged(hero.copy(palette = hero.palette.copy(accent = accent, glow = accent.copy(alpha = .32f))))
                 }
                 Spacer(Modifier.height(18.dp))
             }
             if (providers.isEmpty()) {
-                if (favoriteInstalledApps.isNotEmpty()) {
+                if (showFavoriteApps && favoriteInstalledApps.isNotEmpty()) {
                     item {
                         FavoriteAppsRail(favoriteInstalledApps, palette) { app -> InstalledApps.launch(context, app) }
                         Spacer(Modifier.height(18.dp))
@@ -716,44 +965,69 @@ private fun HomeScreen(
                 item {
                     EmptyHomeState(palette, onSettings)
                 }
-            } else if (continueWatching.isEmpty() && favoriteInstalledApps.isEmpty() && recommendationItems.isEmpty() && subscriptionItems.isEmpty() && upcomingEpisodes.isEmpty()) {
+            } else if (!hasVisibleMediaContent) {
                 item {
                     ProviderDataEmptyState(
                         palette = palette,
-                        syncing = nuvioSyncing,
-                        nuvioError = nuvioSyncError,
+                        nuvioConnected = nuvioConnected && Provider.NUVIO in providers,
+                        syncing = nuvioSyncing && Provider.NUVIO in providers,
+                        nuvioError = nuvioSyncError.takeIf { Provider.NUVIO in providers },
+                        hiddenContent = homeLayout.hidden.any(::homeRowHasContent),
                         onRefresh = onRefreshNuvio,
                         onSettings = onSettings
                     )
                 }
             } else {
-                if (continueWatching.isNotEmpty()) {
-                    item {
-                        MediaRail("Continue Watching", continueWatching, palette, dateFormat, onHeroChanged, onItemSelected, upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester)
-                        Spacer(Modifier.height(18.dp))
-                    }
-                }
-                if (favoriteInstalledApps.isNotEmpty()) {
-                    item {
-                        FavoriteAppsRail(favoriteInstalledApps, palette) { app -> InstalledApps.launch(context, app) }
-                        Spacer(Modifier.height(18.dp))
-                    }
-                }
-                if (recommendationItems.isNotEmpty()) {
-                    item {
-                        MediaRail("Recommended TV Shows", recommendationItems, palette, dateFormat, onHeroChanged, onItemSelected, posters = true, upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester)
-                        Spacer(Modifier.height(18.dp))
-                    }
-                }
-                if (subscriptionItems.isNotEmpty()) {
-                    item {
-                        MediaRail("New from subscriptions", subscriptionItems, palette, dateFormat, onHeroChanged, onItemSelected, upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester)
-                        Spacer(Modifier.height(18.dp))
-                    }
-                }
-                if (upcomingEpisodes.isNotEmpty()) {
-                    item {
-                        MediaRail("Coming Up", upcomingEpisodes.map { it.item }, palette, dateFormat, onHeroChanged, onItemSelected, showPremiereDate = true, upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester)
+                visibleHomeRows.forEach { row ->
+                    when (row) {
+                        HomeRow.CONTINUE_WATCHING -> if (continueWatching.isNotEmpty()) item {
+                            MediaRail(
+                                "Continue Watching", continueWatching, palette, dateFormat, onHeroChanged,
+                                onItemSelected = { onItemSelectedFromHomeRow(it, HomeRow.CONTINUE_WATCHING) },
+                                focusRestoreKey = focusRestoreKey.takeIf { peekProvider == null && matchingRestoreRow == HomeRow.CONTINUE_WATCHING }, onFocusRestored = onFocusRestored,
+                                upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester
+                            )
+                            Spacer(Modifier.height(18.dp))
+                        }
+                        HomeRow.FAVORITE_APPS -> if (favoriteInstalledApps.isNotEmpty()) item {
+                            FavoriteAppsRail(favoriteInstalledApps, palette) { app -> InstalledApps.launch(context, app) }
+                            Spacer(Modifier.height(18.dp))
+                        }
+                        HomeRow.LIBRARY -> if (visibleLibraryItems.isNotEmpty()) item {
+                            MediaRail(
+                                "Your Library", visibleLibraryItems, palette, dateFormat, onHeroChanged,
+                                onItemSelected = { onItemSelectedFromHomeRow(it, HomeRow.LIBRARY) },
+                                posters = true, focusRestoreKey = focusRestoreKey.takeIf { peekProvider == null && matchingRestoreRow == HomeRow.LIBRARY }, onFocusRestored = onFocusRestored,
+                                upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester
+                            )
+                            Spacer(Modifier.height(18.dp))
+                        }
+                        HomeRow.RECOMMENDATIONS -> if (recommendationItems.isNotEmpty()) item {
+                            MediaRail(
+                                "Recommended TV Shows", recommendationItems, palette, dateFormat, onHeroChanged,
+                                onItemSelected = { onItemSelectedFromHomeRow(it, HomeRow.RECOMMENDATIONS) },
+                                posters = true, focusRestoreKey = focusRestoreKey.takeIf { peekProvider == null && matchingRestoreRow == HomeRow.RECOMMENDATIONS }, onFocusRestored = onFocusRestored,
+                                upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester
+                            )
+                            Spacer(Modifier.height(18.dp))
+                        }
+                        HomeRow.SUBSCRIPTIONS -> if (subscriptionItems.isNotEmpty()) item {
+                            MediaRail(
+                                "New from subscriptions", subscriptionItems, palette, dateFormat, onHeroChanged,
+                                onItemSelected = { onItemSelectedFromHomeRow(it, HomeRow.SUBSCRIPTIONS) },
+                                focusRestoreKey = focusRestoreKey.takeIf { peekProvider == null && matchingRestoreRow == HomeRow.SUBSCRIPTIONS }, onFocusRestored = onFocusRestored,
+                                upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester
+                            )
+                            Spacer(Modifier.height(18.dp))
+                        }
+                        HomeRow.UPCOMING -> if (upcomingEpisodes.isNotEmpty()) item {
+                            MediaRail(
+                                "Coming Up", upcomingEpisodes.map { it.item }, palette, dateFormat, onHeroChanged,
+                                onItemSelected = { onItemSelectedFromHomeRow(it, HomeRow.UPCOMING) },
+                                showPremiereDate = true, focusRestoreKey = focusRestoreKey.takeIf { peekProvider == null && matchingRestoreRow == HomeRow.UPCOMING }, onFocusRestored = onFocusRestored,
+                                upFocusRequester = if (peekProvider != null) peekFocusRequester else heroFocusRequester
+                            )
+                        }
                     }
                 }
             }
@@ -789,11 +1063,16 @@ private fun HomeScreen(
                 palette = palette,
                 profiles = nuvioProfiles,
                 relayTubeProfiles = SmartTubePlaybackStore.profiles,
+                nuvioAccountId = nuvioSession?.accountId.orEmpty(),
                 activeProfile = activeNuvioProfile,
                 profileImageUri = profileImageUri,
                 onSelect = {
                     onNuvioProfileSelected(it)
                     profilePickerVisible = false
+                },
+                onPairRelayTube = { nuvioIndex, relayTubeProfileId ->
+                    RelayProfileMappingStore.set(context, nuvioSession?.accountId.orEmpty(), nuvioIndex, relayTubeProfileId)
+                    if (nuvioIndex == activeNuvioProfile) RelayTubeProfileBridge.selectProfile(context, relayTubeProfileId)
                 },
                 onDismiss = { profilePickerVisible = false }
             )
@@ -804,34 +1083,51 @@ private fun HomeScreen(
 @Composable
 private fun ProviderDataEmptyState(
     palette: RelayPalette,
+    nuvioConnected: Boolean,
     syncing: Boolean,
     nuvioError: String?,
+    hiddenContent: Boolean,
     onRefresh: () -> Unit,
     onSettings: () -> Unit
 ) {
     Column(Modifier.padding(horizontal = 76.dp, vertical = 18.dp)) {
-        Text(if (nuvioError != null) "Nuvio needs attention" else "Waiting for your media", color = ivory, fontSize = 24.sp, fontWeight = FontWeight.Light)
+        Text(
+            when {
+                nuvioError != null -> "Nuvio needs attention"
+                hiddenContent -> "Your Home rows are hidden"
+                else -> "Waiting for your media"
+            },
+            color = ivory, fontSize = 24.sp, fontWeight = FontWeight.Light
+        )
         Spacer(Modifier.height(8.dp))
         Text(
-            nuvioError ?: if (syncing) "Syncing your connected providers…" else "No live Continue Watching, recommendations, or subscription videos are available yet.",
+            nuvioError ?: when {
+                hiddenContent -> "Your providers have content, but its Home rows are hidden. Open Settings, then Home layout, to show those rows again."
+                syncing -> "Syncing your connected providers…"
+                !nuvioConnected -> "Connect a provider or open one of your media apps to bring its content to Home."
+                else -> "No live Continue Watching, recommendations, or subscription videos are available yet."
+            },
             color = muted,
             fontSize = 16.sp,
             lineHeight = 22.sp
         )
         Spacer(Modifier.height(16.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            ActionButton(if (syncing) "Refreshing Nuvio…" else "Refresh Nuvio", palette.copy(accent = Provider.NUVIO.accent), primary = true, onClick = onRefresh)
-            ActionButton("Provider settings", palette, primary = false, onClick = onSettings)
+            if (nuvioConnected) {
+                ActionButton(if (syncing) "Refreshing Nuvio…" else "Refresh Nuvio", palette.copy(accent = Provider.NUVIO.accent), primary = true, onClick = onRefresh)
+            }
+            ActionButton(if (hiddenContent) "Open Settings" else "Provider settings", palette, primary = false, onClick = onSettings)
         }
     }
 }
 
 @Composable
 private fun EmptyHomeState(palette: RelayPalette, onSettings: () -> Unit) {
+    val context = LocalContext.current
     Column(Modifier.padding(horizontal = 76.dp, vertical = 18.dp)) {
         Text("Add your media", color = ivory, fontSize = 24.sp, fontWeight = FontWeight.Light)
         Spacer(Modifier.height(8.dp))
-        Text("Choose Nuvio, Stremio, or SmartTube in Settings to build your personal Home view.", color = muted, fontSize = 16.sp)
+        Text("Choose Nuvio, Stremio, or ${Provider.SMARTTUBE.displayName(context)} in Settings to build your personal Home view.", color = muted, fontSize = 16.sp)
         Spacer(Modifier.height(16.dp))
         ActionButton("Open Settings", palette, primary = true, onClick = onSettings)
     }
@@ -855,6 +1151,7 @@ private fun TopBar(
     profileImageUri: String?,
     onProfileClick: () -> Unit
 ) {
+    val context = LocalContext.current
     BoxWithConstraints(Modifier.fillMaxWidth()) {
         // Android TV reports markedly different dp widths at 1080p versus 4K. Keep the
         // full navigation visible on the narrower layout instead of allowing its final
@@ -878,8 +1175,8 @@ private fun TopBar(
                 onPeekProvider(null)
                 onDestination(Destination.HOME)
             }
-            providers.sortedBy { it.label }.forEach { provider ->
-                TopDestination(provider.label, selected = peekProvider == provider, palette = palette, compact = compact, downFocusRequester = peekFocusRequester, onFocused = {
+            providers.sortedBy { it.displayName(context) }.forEach { provider ->
+                TopDestination(provider.displayName(context), selected = peekProvider == provider, palette = palette, compact = compact, downFocusRequester = peekFocusRequester, onFocused = {
                     if (it) {
                         onTopFocused()
                         onPeekProvider(provider)
@@ -955,7 +1252,8 @@ private fun ProfileAvatarButton(
     val focused by source.collectIsFocusedAsState()
     LaunchedEffect(focused) { onFocused(focused) }
     Box(
-        modifier = Modifier.size(if (compact) 38.dp else 45.dp).clip(CircleShape)
+        modifier = Modifier.semantics { contentDescription = "Profiles" }
+            .size(if (compact) 38.dp else 45.dp).clip(CircleShape)
             .background(Provider.NUVIO.accent.copy(alpha = .78f))
             .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .3f), CircleShape)
             .clickable(interactionSource = source, indication = null, onClick = onClick),
@@ -965,7 +1263,7 @@ private fun ProfileAvatarButton(
         if (displayedImage != null) {
             AsyncImage(
                 model = displayedImage,
-                contentDescription = "Profile picture",
+                contentDescription = "Profiles",
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
@@ -980,11 +1278,16 @@ private fun ProfileSwitcher(
     palette: RelayPalette,
     profiles: List<NuvioProfile>,
     relayTubeProfiles: List<RelayTubeProfile>,
+    nuvioAccountId: String,
     activeProfile: Int,
     profileImageUri: String?,
     onSelect: (Int) -> Unit,
+    onPairRelayTube: (Int, String) -> Unit,
     onDismiss: () -> Unit
 ) {
+    val context = LocalContext.current
+    val relayTubeAvailable = ProviderHandoff.isRelayTubeInstalled(context)
+    var pairingForProfile by remember { mutableStateOf<Int?>(null) }
     val initialFocusRequester = remember(activeProfile, profiles) { FocusRequester() }
     Dialog(
         onDismissRequest = onDismiss,
@@ -1007,49 +1310,96 @@ private fun ProfileSwitcher(
             ) {
                 Text("Who’s watching?", color = ivory, fontSize = 26.sp, fontWeight = FontWeight.Light)
                 Spacer(Modifier.height(8.dp))
-                Text("Each Relay profile keeps its own Nuvio and RelayTube viewing feeds.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+                Text(
+                    if (relayTubeAvailable) "Profiles with matching names link automatically. Choose a RelayTube profile manually when names differ."
+                    else "Relay profiles switch Nuvio feeds. Install RelayTube to keep a separate video feed for each profile.",
+                    color = muted,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp
+                )
                 Spacer(Modifier.height(24.dp))
-                profiles.forEachIndexed { index, profile ->
-                    val relayTubeProfile = RelayProfileMappingStore.get(LocalContext.current, profile.index)
-                        ?.let { id -> relayTubeProfiles.firstOrNull { it.id == id } }
-                        ?: relayTubeProfiles.firstOrNull { it.name.equals(profile.name, ignoreCase = true) }
-                    val source = remember(profile.index) { MutableInteractionSource() }
-                    val focused by source.collectIsFocusedAsState()
-                    val receivesInitialFocus = profile.index == activeProfile ||
-                        (profiles.none { it.index == activeProfile } && index == 0)
-                    Row(
-                        (if (receivesInitialFocus) Modifier.focusRequester(initialFocusRequester) else Modifier)
-                            .fillMaxWidth().clip(RoundedCornerShape(20.dp))
-                            .background(if (focused || profile.index == activeProfile) Provider.NUVIO.accent.copy(alpha = .22f) else Color(0xFF1A1C23))
-                            .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .10f), RoundedCornerShape(20.dp))
-                            // clickable already contributes the TV focus target. Adding a second
-                            // focusable node made each visible profile consume two D-pad moves.
-                            .clickable(interactionSource = source, indication = null) { onSelect(profile.index) }
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(Modifier.size(42.dp).clip(CircleShape).background(Provider.NUVIO.accent.copy(alpha = .82f)), contentAlignment = Alignment.Center) {
-                            val displayedImage = if (profile.index == activeProfile) profileImageUri ?: profile.imageUrl else profile.imageUrl
-                            if (displayedImage != null) {
-                                AsyncImage(
-                                    model = displayedImage,
-                                    contentDescription = profile.name,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize()
-                                )
-                            } else {
-                                Text(profile.name.firstOrNull()?.uppercase() ?: "P", color = ivory, fontWeight = FontWeight.Bold)
+                if (pairingForProfile == null) {
+                    profiles.forEachIndexed { index, profile ->
+                        val savedRelayTubeId = RelayProfileMappingStore.get(context, nuvioAccountId, profile.index)
+                        val exactRelayTubeMatch = nuvioAccountId.takeIf { it.isNotBlank() }
+                            ?.let { relayTubeProfiles.singleOrNull { candidate -> candidate.name.trim().equals(profile.name.trim(), ignoreCase = true) } }
+                        val exactMatchUsedElsewhere = exactRelayTubeMatch?.let { match ->
+                            profiles.any { other ->
+                                other.index != profile.index && RelayProfileMappingStore.get(context, nuvioAccountId, other.index) == match.id
                             }
+                        } == true
+                        val relayTubeProfile = savedRelayTubeId?.let { id -> relayTubeProfiles.firstOrNull { it.id == id } }
+                            ?: exactRelayTubeMatch.takeUnless { exactMatchUsedElsewhere }
+                        val source = remember(profile.index) { MutableInteractionSource() }
+                        val focused by source.collectIsFocusedAsState()
+                        val receivesInitialFocus = profile.index == activeProfile ||
+                            (profiles.none { it.index == activeProfile } && index == 0)
+                        Row(
+                            (if (receivesInitialFocus) Modifier.focusRequester(initialFocusRequester) else Modifier)
+                                .fillMaxWidth().clip(RoundedCornerShape(20.dp))
+                                .background(if (focused || profile.index == activeProfile) Provider.NUVIO.accent.copy(alpha = .22f) else Color(0xFF1A1C23))
+                                .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .10f), RoundedCornerShape(20.dp))
+                                .clickable(interactionSource = source, indication = null) { onSelect(profile.index) }
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(Modifier.size(42.dp).clip(CircleShape).background(Provider.NUVIO.accent.copy(alpha = .82f)), contentAlignment = Alignment.Center) {
+                                val displayedImage = if (profile.index == activeProfile) profileImageUri ?: profile.imageUrl else profile.imageUrl
+                                if (displayedImage != null) {
+                                    AsyncImage(
+                                        model = displayedImage,
+                                        contentDescription = profile.name,
+                                        contentScale = ContentScale.Crop,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                } else {
+                                    Text(profile.name.firstOrNull()?.uppercase() ?: "P", color = ivory, fontWeight = FontWeight.Bold)
+                                }
+                            }
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(profile.name, color = ivory, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
+                                if (relayTubeAvailable) Text(
+                                    relayTubeProfile?.let { "RelayTube · ${it.name}" } ?: "RelayTube profile not linked",
+                                    color = muted,
+                                    fontSize = 12.sp
+                                )
+                            }
+                            if (profile.index == activeProfile) Text("Watching", color = Provider.NUVIO.accent, fontSize = 13.sp)
                         }
-                        Spacer(Modifier.width(12.dp))
-                        Column {
-                            Text(profile.name, color = ivory, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                            relayTubeProfile?.let { Text("RelayTube · ${it.name}", color = muted, fontSize = 12.sp) }
+                        if (relayTubeAvailable && relayTubeProfiles.isNotEmpty()) {
+                            Spacer(Modifier.height(5.dp))
+                            ActionButton(
+                                if (relayTubeProfile == null) "Link RelayTube profile" else "Change RelayTube profile",
+                                palette.copy(accent = Provider.SMARTTUBE.accent),
+                                primary = false
+                            ) { pairingForProfile = profile.index }
                         }
-                        Spacer(Modifier.weight(1f))
-                        if (profile.index == activeProfile) Text("Watching", color = Provider.NUVIO.accent, fontSize = 13.sp)
+                        Spacer(Modifier.height(10.dp))
                     }
-                    Spacer(Modifier.height(10.dp))
+                } else {
+                    val profile = profiles.firstOrNull { it.index == pairingForProfile }
+                    Text("Link RelayTube profile to ${profile?.name ?: "profile"}", color = ivory, fontSize = 19.sp, fontWeight = FontWeight.Medium)
+                    Spacer(Modifier.height(14.dp))
+                    relayTubeProfiles.forEach { relayProfile ->
+                        val linkedNuvioProfile = profiles.firstOrNull { other ->
+                            other.index != pairingForProfile && RelayProfileMappingStore.get(context, nuvioAccountId, other.index) == relayProfile.id
+                        }
+                        ActionButton(
+                            "${relayProfile.name}${when {
+                                linkedNuvioProfile != null -> " · linked to ${linkedNuvioProfile.name}"
+                                relayProfile.selected -> " · currently active"
+                                else -> ""
+                            }}",
+                            palette.copy(accent = Provider.SMARTTUBE.accent),
+                            primary = false
+                        ) {
+                            pairingForProfile?.let { onPairRelayTube(it, relayProfile.id) }
+                            pairingForProfile = null
+                        }
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    ActionButton("Cancel pairing", palette, primary = false) { pairingForProfile = null }
                 }
                 Spacer(Modifier.height(8.dp))
                 ActionButton("Cancel", palette, primary = false, onClick = onDismiss)
@@ -1098,6 +1448,8 @@ private fun AppPeekPanel(
     items: List<MediaItem>,
     palette: RelayPalette,
     focusRequester: FocusRequester,
+    focusRestoreKey: String?,
+    onFocusRestored: () -> Unit,
     onPreviewFocused: () -> Unit,
     onItemSelected: (MediaItem) -> Unit,
     onArtworkColor: (Color?) -> Unit
@@ -1142,10 +1494,10 @@ private fun AppPeekPanel(
             )
         )
         Column(Modifier.padding(start = 78.dp, top = 136.dp, end = 78.dp, bottom = 24.dp).width(620.dp)) {
-            Text("${provider.label.uppercase()} PEEK", color = provider.accent, fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
+            Text("${provider.displayName(context).uppercase()} PEEK", color = provider.accent, fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp)
             Spacer(Modifier.height(10.dp))
             Text(
-                lead?.showTitle ?: lead?.title ?: provider.label,
+                lead?.showTitle ?: lead?.title ?: provider.displayName(context),
                 color = ivory,
                 fontSize = 33.sp,
                 lineHeight = 40.sp,
@@ -1158,8 +1510,8 @@ private fun AppPeekPanel(
             Text(
                 lead?.episodeInfo ?: lead?.let { item ->
                     if (item.progress > 0f) "Continue watching • ${(item.progress * 100).toInt()}% complete"
-                    else "Ready to watch in ${provider.label}"
-                } ?: "Recent picks from ${provider.label}",
+                    else "Ready to watch in ${provider.displayName(context)}"
+                } ?: "Recent picks from ${provider.displayName(context)}",
                 color = muted,
                 fontSize = 15.sp,
                 lineHeight = 21.sp,
@@ -1173,14 +1525,30 @@ private fun AppPeekPanel(
                     val source = remember { MutableInteractionSource() }
                     val focused by source.collectIsFocusedAsState()
                     val selected = index == selectedIndex
+                    val itemFocusKey = item.focusRestoreKey()
+                    val shouldRestoreFocus = focusRestoreKey == itemFocusKey
+                    val restoreRequester = remember(itemFocusKey) { FocusRequester() }
+                    if (shouldRestoreFocus) {
+                        LaunchedEffect(focusRestoreKey) {
+                            repeat(4) {
+                                delay(75)
+                                (if (index == 0) focusRequester else restoreRequester).requestFocus()
+                            }
+                        }
+                    }
                     LaunchedEffect(focused) {
                         if (focused) {
                             selectedIndex = index
                             onPreviewFocused()
+                            if (shouldRestoreFocus) onFocusRestored()
                         }
                     }
                     Box(
-                        modifier = (if (index == 0) Modifier.focusRequester(focusRequester) else Modifier)
+                        modifier = when {
+                            index == 0 -> Modifier.focusRequester(focusRequester)
+                            shouldRestoreFocus -> Modifier.focusRequester(restoreRequester)
+                            else -> Modifier
+                        }
                             .size(126.dp, 82.dp)
                             .scale(if (focused) 1.08f else 1f)
                             .clip(RoundedCornerShape(9.dp))
@@ -1210,12 +1578,12 @@ private fun AppPeekPanel(
             }
             if (usableItems.isEmpty()) {
                 ActionButton(
-                    "No recent ${provider.label} media",
+                    "Open ${provider.displayName(context)}",
                     palette.copy(accent = provider.accent),
                     primary = false,
                     focusRequester = focusRequester,
                     onFocused = { if (it) onPreviewFocused() },
-                    onClick = {}
+                    onClick = { ProviderHandoff.openProvider(context, provider) }
                 )
             }
             lead?.let { item ->
@@ -1225,16 +1593,18 @@ private fun AppPeekPanel(
                 }
             }
             Spacer(Modifier.height(12.dp))
-            ActionButton(
-                when {
-                    provider == Provider.SMARTTUBE -> "Video details"
-                    lead?.episodeInfo != null -> "Episode details"
-                    else -> "Title details"
-                },
-                palette.copy(accent = provider.accent),
-                primary = false,
-                onFocused = { if (it) onPreviewFocused() }
-            ) { lead?.let(onItemSelected) }
+            lead?.let { item ->
+                ActionButton(
+                    when {
+                        provider == Provider.SMARTTUBE -> "Video details"
+                        item.episodeInfo != null -> "Episode details"
+                        else -> "Title details"
+                    },
+                    palette.copy(accent = provider.accent),
+                    primary = false,
+                    onFocused = { if (it) onPreviewFocused() }
+                ) { onItemSelected(item) }
+            }
         }
     }
 }
@@ -1250,7 +1620,7 @@ private fun EmbossedSettingsButton(
     val focused by source.collectIsFocusedAsState()
     LaunchedEffect(focused) { onFocused(focused) }
     Box(
-        modifier = Modifier
+        modifier = Modifier.semantics { contentDescription = "Settings" }
             .size(if (compact) 38.dp else 42.dp)
             .scale(if (focused) 1.1f else 1f)
             .clip(CircleShape)
@@ -1290,6 +1660,8 @@ private fun HeroPanel(
     resumeFocusRequester: FocusRequester,
     onHeroFocused: () -> Unit,
     onItemSelected: (MediaItem) -> Unit,
+    onBrowseApps: () -> Unit,
+    onSettings: () -> Unit,
     onArtworkColor: (Color?) -> Unit
 ) {
     val context = LocalContext.current
@@ -1341,15 +1713,28 @@ private fun HeroPanel(
             Text(hero.subtitle, color = muted, fontSize = 15.sp, lineHeight = 22.sp)
             Spacer(Modifier.height(20.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                ActionButton(
-                    if ((hero.item?.progress ?: 0f) > 0f) "▶  Resume" else "▶  Play",
-                    palette,
-                    primary = true,
-                    focusRequester = resumeFocusRequester,
-                    upFocusRequester = homeFocusRequester,
-                    onFocused = { if (it) onHeroFocused() }
-                ) { hero.item?.let { ProviderHandoff.play(context, it) } }
-                ActionButton("ⓘ  Details", palette, primary = false, onFocused = { if (it) onHeroFocused() }) { hero.item?.let(onItemSelected) }
+                if (hero.item != null) {
+                    ActionButton(
+                        if (hero.item.progress > 0f) "▶  Resume" else if (hero.item.providerContentId?.startsWith("tmdb:") == true) "⌕  Search in ${hero.item.provider.displayName(context)}" else "▶  Play",
+                        palette,
+                        primary = true,
+                        focusRequester = resumeFocusRequester,
+                        upFocusRequester = homeFocusRequester,
+                        onFocused = { if (it) onHeroFocused() }
+                    ) { ProviderHandoff.play(context, hero.item) }
+                    ActionButton("ⓘ  Details", palette, primary = false, onFocused = { if (it) onHeroFocused() }) { onItemSelected(hero.item) }
+                } else {
+                    ActionButton(
+                        "Browse apps",
+                        palette,
+                        primary = true,
+                        focusRequester = resumeFocusRequester,
+                        upFocusRequester = homeFocusRequester,
+                        onFocused = { if (it) onHeroFocused() },
+                        onClick = onBrowseApps
+                    )
+                    ActionButton("Choose providers", palette, primary = false, onFocused = { if (it) onHeroFocused() }, onClick = onSettings)
+                }
             }
         }
     }
@@ -1403,6 +1788,8 @@ private fun MediaRail(
     onItemSelected: (MediaItem) -> Unit,
     posters: Boolean = false,
     showPremiereDate: Boolean = false,
+    focusRestoreKey: String? = null,
+    onFocusRestored: () -> Unit = {},
     upFocusRequester: FocusRequester
 ) {
     if (items.isEmpty()) return
@@ -1442,16 +1829,29 @@ private fun MediaRail(
                         "${item.provider}:${item.providerContentId ?: item.title}:${item.episodeInfo.orEmpty()}:$index"
                     }
                 ) { index ->
+                    val item = items[index]
+                    val itemFocusKey = item.focusRestoreKey()
+                    val restoreRequester = remember(itemFocusKey) { FocusRequester() }
+                    val shouldRestoreFocus = focusRestoreKey == itemFocusKey
+                    if (shouldRestoreFocus) {
+                        LaunchedEffect(focusRestoreKey) {
+                            repeat(4) {
+                                delay(75)
+                                restoreRequester.requestFocus()
+                            }
+                        }
+                    }
                     MediaCard(
-                        item = items[index],
+                        item = item,
                         palette = palette,
                         poster = posters,
                         dateFormat = dateFormat,
                         showEpisodeInfo = title == "Continue Watching" || title == "Coming Up",
                         showPremiereDate = showPremiereDate,
                         upFocusRequester = upFocusRequester,
+                        focusRequester = restoreRequester.takeIf { shouldRestoreFocus },
+                        onRestoreFocus = if (shouldRestoreFocus) onFocusRestored else null,
                         onClick = {
-                        val item = items[index]
                         if (item.provider == Provider.SMARTTUBE && item.providerContentId != null) {
                             ProviderHandoff.play(context, item)
                         } else {
@@ -1484,6 +1884,10 @@ private fun MediaRail(
             )
         }
     }
+    LaunchedEffect(focusRestoreKey, items) {
+        val targetIndex = focusRestoreKey?.let { target -> items.indexOfFirst { it.focusRestoreKey() == target } } ?: -1
+        if (targetIndex >= 0) listState.scrollToItem(targetIndex)
+    }
 }
 
 @Composable
@@ -1495,6 +1899,8 @@ private fun MediaCard(
     showEpisodeInfo: Boolean = false,
     showPremiereDate: Boolean = false,
     upFocusRequester: FocusRequester? = null,
+    focusRequester: FocusRequester? = null,
+    onRestoreFocus: (() -> Unit)? = null,
     onClick: () -> Unit,
     onFocused: (Color?) -> Unit
 ) {
@@ -1518,6 +1924,8 @@ private fun MediaCard(
             .scale(scale).clip(shape)
             .background(Color(0xFF141519))
             .border(if (focused) 2.dp else 1.dp, if (focused) ivory.copy(alpha = .78f) else Color.White.copy(alpha = .12f), shape)
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .onFocusChanged { if (it.hasFocus) onRestoreFocus?.invoke() }
             .clickable(interactionSource = source, indication = null, onClick = onClick)
             .then(if (upFocusRequester != null) Modifier.focusProperties { up = upFocusRequester } else Modifier)
     ) {
@@ -1535,7 +1943,7 @@ private fun MediaCard(
             )
         )
         if (!poster) {
-            Text(item.provider.label.uppercase(), color = ivory, fontSize = 10.sp, fontWeight = FontWeight.Bold,
+            Text(item.provider.displayName(context).uppercase(), color = ivory, fontSize = 10.sp, fontWeight = FontWeight.Bold,
                 modifier = Modifier.align(Alignment.TopEnd).padding(top = 8.dp, end = 8.dp)
                     .clip(RoundedCornerShape(8.dp)).background(item.provider.accent)
                     .padding(horizontal = 7.dp, vertical = 4.dp))
@@ -1673,18 +2081,35 @@ private fun FavoriteAppCard(
 @Composable
 private fun AppsScreen(
     palette: RelayPalette,
-    favoriteApps: Set<String>,
+    installedApps: List<InstalledApp>,
+    favoriteApps: List<String>,
+    onMoveFavorite: (String, Int) -> Unit,
     onFavoriteChanged: (String, Boolean) -> Unit,
     onBackHome: () -> Unit
 ) {
     val context = LocalContext.current
-    val apps = remember { InstalledApps.discover(context).sortedBy { it.label.lowercase() } }
+    val apps = remember(installedApps) { installedApps.sortedBy { it.label.lowercase() } }
     val firstAppFocusRequester = remember { FocusRequester() }
     val appsGridState = rememberLazyGridState()
     var activeMenuApp by remember { mutableStateOf<InstalledApp?>(null) }
+    var focusedAppPackage by rememberSaveable { mutableStateOf<String?>(null) }
+    val restoredAppFocusRequester = remember(focusedAppPackage) { FocusRequester() }
+    val focusedAppStillInstalled = focusedAppPackage != null && apps.any { it.packageName == focusedAppPackage }
+    var hasFocusedAppGridThisEntry by remember { mutableStateOf(false) }
     LaunchedEffect(apps) {
-        appsGridState.scrollToItem(0)
-        if (apps.isNotEmpty()) firstAppFocusRequester.requestFocus()
+        if (!hasFocusedAppGridThisEntry && apps.isNotEmpty()) {
+            val restoreIndex = focusedAppPackage?.let { packageName -> apps.indexOfFirst { it.packageName == packageName } } ?: -1
+            if (restoreIndex >= 0) {
+                appsGridState.scrollToItem(restoreIndex)
+                delay(75)
+                restoredAppFocusRequester.requestFocus()
+            } else {
+                appsGridState.scrollToItem(0)
+                delay(60)
+                firstAppFocusRequester.requestFocus()
+            }
+            hasFocusedAppGridThisEntry = true
+        }
     }
     BackHandler(enabled = activeMenuApp == null, onBack = onBackHome)
     Column(Modifier.fillMaxSize().padding(horizontal = 56.dp, vertical = 48.dp)) {
@@ -1712,7 +2137,12 @@ private fun AppsScreen(
                     InstalledAppTile(
                         app = app,
                         palette = palette,
-                        focusRequester = if (index == 0) firstAppFocusRequester else null,
+                        focusRequester = when {
+                            focusedAppStillInstalled && app.packageName == focusedAppPackage -> restoredAppFocusRequester
+                            !focusedAppStillInstalled && index == 0 -> firstAppFocusRequester
+                            else -> null
+                        },
+                        onFocused = { focusedAppPackage = it },
                         menuOpen = activeMenuApp != null,
                         onLongClick = { activeMenuApp = app },
                         onClick = { InstalledApps.launch(context, app) }
@@ -1723,9 +2153,12 @@ private fun AppsScreen(
     }
     activeMenuApp?.let { app ->
         val isFavorite = app.packageName in favoriteApps
+        val favoriteIndex = favoriteApps.indexOf(app.packageName)
         AppActionsDialog(
             app = app,
             isFavorite = isFavorite,
+            canMoveEarlier = favoriteIndex > 0,
+            canMoveLater = favoriteIndex >= 0 && favoriteIndex < favoriteApps.lastIndex,
             palette = palette,
             onOpen = {
                 activeMenuApp = null
@@ -1734,6 +2167,10 @@ private fun AppsScreen(
             onToggleFavorite = {
                 activeMenuApp = null
                 onFavoriteChanged(app.packageName, !isFavorite)
+            },
+            onMoveFavorite = { offset ->
+                activeMenuApp = null
+                onMoveFavorite(app.packageName, offset)
             },
             onAppInfo = {
                 activeMenuApp = null
@@ -1753,6 +2190,7 @@ private fun InstalledAppTile(
     app: InstalledApp,
     palette: RelayPalette,
     focusRequester: FocusRequester? = null,
+    onFocused: (String) -> Unit = {},
     menuOpen: Boolean,
     onLongClick: () -> Unit,
     onClick: () -> Unit
@@ -1763,6 +2201,9 @@ private fun InstalledAppTile(
     var selectHoldJob by remember { mutableStateOf<Job?>(null) }
     var longPressHandled by remember { mutableStateOf(false) }
     val showFocus = focused && !menuOpen
+    LaunchedEffect(focused) {
+        if (focused) onFocused(app.packageName)
+    }
     val scale by animateFloatAsState(if (showFocus) 1.07f else 1f, label = "app tile focus")
     val shape = RoundedCornerShape(16.dp)
     val artwork = remember(app.packageName) {
@@ -1779,6 +2220,10 @@ private fun InstalledAppTile(
             longPressHandled = false
         }
     }
+    Column(
+        Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
     Box(
         modifier = (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
             .fillMaxWidth()
@@ -1786,6 +2231,7 @@ private fun InstalledAppTile(
             .scale(scale)
             .clip(shape)
             .background(if (showFocus) palette.accent.copy(alpha = .24f) else Color(0xFF20232A))
+            .border(if (showFocus) 2.dp else 0.dp, if (showFocus) ivory else Color.Transparent, shape)
             .onPreviewKeyEvent { event ->
                 val nativeEvent = event.nativeKeyEvent
                 val isSelectKey = nativeEvent.keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
@@ -1845,15 +2291,28 @@ private fun InstalledAppTile(
             )
         }
     }
+    Spacer(Modifier.height(7.dp))
+    Text(
+        app.label,
+        color = if (showFocus) ivory else muted,
+        fontSize = 13.sp,
+        fontWeight = if (showFocus) FontWeight.SemiBold else FontWeight.Normal,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis
+    )
+    }
 }
 
 @Composable
 private fun AppActionsDialog(
     app: InstalledApp,
     isFavorite: Boolean,
+    canMoveEarlier: Boolean,
+    canMoveLater: Boolean,
     palette: RelayPalette,
     onOpen: () -> Unit,
     onToggleFavorite: () -> Unit,
+    onMoveFavorite: (Int) -> Unit,
     onAppInfo: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -1903,6 +2362,14 @@ private fun AppActionsDialog(
                 Spacer(Modifier.height(10.dp))
                 ActionButton(if (isFavorite) "Remove from favorites" else "Add to favorites", palette, primary = false, onClick = onToggleFavorite)
                 Spacer(Modifier.height(10.dp))
+                if (isFavorite && canMoveEarlier) {
+                    ActionButton("Move earlier in favorites", palette, primary = false) { onMoveFavorite(-1) }
+                    Spacer(Modifier.height(10.dp))
+                }
+                if (isFavorite && canMoveLater) {
+                    ActionButton("Move later in favorites", palette, primary = false) { onMoveFavorite(1) }
+                    Spacer(Modifier.height(10.dp))
+                }
                 ActionButton("App info & uninstall", palette, primary = false, onClick = onAppInfo)
                 Spacer(Modifier.height(14.dp))
                 ActionButton("Cancel", palette, primary = false, onClick = onDismiss)
@@ -1918,20 +2385,26 @@ private fun CalendarScreen(
     nuvioItems: List<MediaItem>,
     upcomingEpisodes: List<TmdbCalendarEntry>,
     dateFormat: RelayDateFormat,
+    focusRestoreKey: String?,
+    onFocusRestored: () -> Unit,
     onBackHome: () -> Unit,
     onItemSelected: (MediaItem) -> Unit
 ) {
-    var month by remember { mutableStateOf(YearMonth.now()) }
-    var weekView by remember { mutableStateOf(false) }
-    var weekStart by remember { mutableStateOf(LocalDate.now().with(DayOfWeek.MONDAY)) }
-    var selectedDay by remember { mutableStateOf<LocalDate?>(null) }
+    var month by rememberSaveable(stateSaver = yearMonthSaver) { mutableStateOf(YearMonth.now()) }
+    var weekView by rememberSaveable { mutableStateOf(false) }
+    var weekStart by rememberSaveable(stateSaver = localDateSaver) { mutableStateOf(LocalDate.now().with(DayOfWeek.MONDAY)) }
+    var selectedDayIso by rememberSaveable { mutableStateOf("") }
+    val selectedDay = selectedDayIso.takeIf { it.isNotBlank() }?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
     var tmdbEntries by remember(providers, nuvioItems) { mutableStateOf(emptyList<TmdbCalendarEntry>()) }
     var scheduleLoading by remember(providers, nuvioItems) { mutableStateOf(false) }
+    var calendarDataReady by remember(providers, nuvioItems) { mutableStateOf(false) }
     val providerItems = remember(providers, nuvioItems) { nuvioItems.filter { it.provider in providers } }
     LaunchedEffect(providerItems) {
         scheduleLoading = providerItems.isNotEmpty()
+        calendarDataReady = false
         tmdbEntries = TmdbApi.calendarEntries(providerItems)
         scheduleLoading = false
+        calendarDataReady = true
     }
     val nativeEntries = remember(providerItems) {
         nuvioItems.filter { it.provider in providers }.mapNotNull { item ->
@@ -1947,6 +2420,27 @@ private fun CalendarScreen(
     }
     val visibleDays = if (weekView) (0..6).map { weekStart.plusDays(it.toLong()) } else monthDays
     val visibleEntries = if (weekView) entries.filter { it.date in weekStart..weekStart.plusDays(6) } else entries.filter { YearMonth.from(it.date) == month }
+    val eventListState = rememberLazyListState()
+    val calendarBackFocusRequester = remember { FocusRequester() }
+    val calendarMonthFocusRequester = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        if (focusRestoreKey == null) {
+            delay(75)
+            calendarMonthFocusRequester.requestFocus()
+        }
+    }
+    LaunchedEffect(focusRestoreKey, visibleEntries, calendarDataReady) {
+        val targetIndex = focusRestoreKey?.let { target -> visibleEntries.indexOfFirst { it.item.focusRestoreKey() == target } } ?: -1
+        if (targetIndex >= 0) {
+            eventListState.scrollToItem(targetIndex)
+        } else if (focusRestoreKey != null && calendarDataReady) {
+            repeat(3) {
+                delay(60)
+                calendarBackFocusRequester.requestFocus()
+            }
+            onFocusRestored()
+        }
+    }
     BackHandler(onBack = onBackHome)
     Column(Modifier.fillMaxSize().padding(horizontal = 76.dp, vertical = 42.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1954,7 +2448,7 @@ private fun CalendarScreen(
             Spacer(Modifier.width(16.dp))
             Text("Premieres & episodes from your connected libraries", color = muted, fontSize = 16.sp)
             Spacer(Modifier.weight(1f))
-            ActionButton("‹  Back", palette, primary = false, onClick = onBackHome)
+            ActionButton("‹  Back", palette, primary = false, focusRequester = calendarBackFocusRequester, onClick = onBackHome)
         }
         Spacer(Modifier.height(25.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1974,7 +2468,7 @@ private fun CalendarScreen(
             Spacer(Modifier.width(24.dp))
             Text(if (scheduleLoading) "Loading TMDB schedule…" else if (entries.isEmpty()) "No dated provider events yet" else "${visibleEntries.size} event${if (visibleEntries.size == 1) "" else "s"} in view", color = muted, fontSize = 14.sp)
             Spacer(Modifier.weight(1f))
-            ActionButton("Month", palette, primary = !weekView) { weekView = false }
+            ActionButton("Month", palette, primary = !weekView, focusRequester = calendarMonthFocusRequester) { weekView = false }
             Spacer(Modifier.width(9.dp))
             ActionButton("Week", palette, primary = weekView) {
                 weekStart = LocalDate.now().with(DayOfWeek.MONDAY)
@@ -1998,16 +2492,33 @@ private fun CalendarScreen(
                 val date = visibleDays[index]
                 val dayEvents = date?.let { selected -> entries.filter { it.date == selected } }.orEmpty()
                 val event = dayEvents.firstOrNull()
-                Box(
-                    modifier = Modifier.aspectRatio(1.15f).clip(RoundedCornerShape(10.dp))
-                        .background(if (event != null) palette.accent.copy(alpha = .24f) else Color.White.copy(alpha = .045f))
-                        .border(if (event != null) 1.dp else 0.dp, palette.accent.copy(alpha = .7f), RoundedCornerShape(10.dp))
-                        .then(if (dayEvents.isNotEmpty()) Modifier.clickable { date?.let { selectedDay = it } } else Modifier)
-                        .padding(9.dp)
-                ) {
-                    date?.let { Text(if (weekView) "${it.dayOfWeek.name.take(3).lowercase().replaceFirstChar { char -> char.uppercase() }} ${it.dayOfMonth}" else it.dayOfMonth.toString(), color = if (event != null) ivory else muted, fontSize = 14.sp, fontWeight = if (event != null) FontWeight.Bold else FontWeight.Normal) }
-                    event?.let {
-                        Text(if (dayEvents.size > 1) "${dayEvents.size} new episodes" else it.item.episodeInfo ?: it.item.title, color = ivory, fontSize = 10.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.align(Alignment.BottomStart))
+                if (date == null) {
+                    Spacer(Modifier.aspectRatio(1.15f))
+                } else {
+                    val source = remember(date) { MutableInteractionSource() }
+                    val focused by source.collectIsFocusedAsState()
+                    val selected = date == selectedDay
+                    Box(
+                        modifier = Modifier.aspectRatio(1.15f).clip(RoundedCornerShape(10.dp))
+                            .background(if (event != null) palette.accent.copy(alpha = .24f) else Color.White.copy(alpha = .045f))
+                            .border(
+                                when { focused -> 2.dp; selected -> 2.dp; event != null -> 1.dp; else -> 0.dp },
+                                when { focused -> ivory; selected -> palette.accent; else -> palette.accent.copy(alpha = .7f) },
+                                RoundedCornerShape(10.dp)
+                            )
+                            .clickable(interactionSource = source, indication = null) { selectedDayIso = date.toString() }
+                            .padding(9.dp)
+                    ) {
+                        Text(
+                            if (weekView) "${date.dayOfWeek.name.take(3).lowercase().replaceFirstChar { char -> char.uppercase() }} ${date.dayOfMonth}"
+                            else date.dayOfMonth.toString(),
+                            color = if (event != null || focused || selected) ivory else muted,
+                            fontSize = 14.sp,
+                            fontWeight = if (event != null || focused || selected) FontWeight.Bold else FontWeight.Normal
+                        )
+                        event?.let {
+                            Text(if (dayEvents.size > 1) "${dayEvents.size} new episodes" else it.item.episodeInfo ?: it.item.title, color = ivory, fontSize = 10.sp, maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.align(Alignment.BottomStart))
+                        }
                     }
                 }
             }
@@ -2016,12 +2527,26 @@ private fun CalendarScreen(
         Text(if (weekView) "This week" else "This month", color = ivory, fontSize = 19.sp, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(10.dp))
         if (visibleEntries.isEmpty()) {
-            Text(if (scheduleLoading) "Looking up exact premiere and episode dates…" else "No scheduled events for this month. Nuvio library titles are supplemented with exact TMDB dates; Stremio and SmartTube will join as their schedule data becomes available.", color = muted, fontSize = 15.sp, lineHeight = 22.sp)
+            Text(if (scheduleLoading) "Looking up exact premiere and episode dates…" else "No scheduled events for this month. Nuvio titles are supplemented with exact TMDB dates; other connected providers will join as schedule data becomes available.", color = muted, fontSize = 15.sp, lineHeight = 22.sp)
         } else {
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            LazyRow(state = eventListState, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(visibleEntries.size) { index ->
                     val event = visibleEntries[index]
-                    ActionButton("${formatRelayDate(event.date, dateFormat)}  ${event.item.showTitle ?: event.item.title}", palette, primary = false) { onItemSelected(event.item) }
+                    val target = focusRestoreKey == event.item.focusRestoreKey()
+                    val requester = remember(event.item.focusRestoreKey()) { FocusRequester() }
+                    if (target) LaunchedEffect(focusRestoreKey) {
+                        repeat(4) {
+                            delay(75)
+                            requester.requestFocus()
+                        }
+                    }
+                    ActionButton(
+                        "${formatRelayDate(event.date, dateFormat)}  ${event.item.showTitle ?: event.item.title}",
+                        palette,
+                        primary = false,
+                        focusRequester = requester.takeIf { target },
+                        onFocused = { if (it && target) onFocusRestored() }
+                    ) { onItemSelected(event.item) }
                 }
             }
         }
@@ -2032,8 +2557,11 @@ private fun CalendarScreen(
             date = date,
             dateFormat = dateFormat,
             entries = entries.filter { it.date == date },
+            dataReady = calendarDataReady,
+            focusRestoreKey = focusRestoreKey,
+            onFocusRestored = onFocusRestored,
             onItemSelected = onItemSelected,
-            onDismiss = { selectedDay = null }
+            onDismiss = { selectedDayIso = "" }
         )
     }
 }
@@ -2044,23 +2572,86 @@ private fun CalendarDayOverlay(
     date: LocalDate,
     dateFormat: RelayDateFormat,
     entries: List<TmdbCalendarEntry>,
+    dataReady: Boolean,
+    focusRestoreKey: String?,
+    onFocusRestored: () -> Unit,
     onItemSelected: (MediaItem) -> Unit,
     onDismiss: () -> Unit
 ) {
-    Box(Modifier.fillMaxSize().background(midnight.copy(alpha = .84f)), contentAlignment = Alignment.Center) {
-        Column(Modifier.width(720.dp).clip(RoundedCornerShape(22.dp)).background(Color(0xFF15121C)).border(1.dp, palette.accent.copy(alpha = .65f), RoundedCornerShape(22.dp)).padding(30.dp)) {
-            Text(formatRelayDate(date, dateFormat), color = ivory, fontSize = 27.sp, fontWeight = FontWeight.Light)
-            Spacer(Modifier.height(8.dp))
-            Text(if (entries.size == 1) "New episode or premiere" else "${entries.size} shows to watch", color = muted, fontSize = 15.sp)
-            Spacer(Modifier.height(24.dp))
-            entries.forEach { entry ->
-                ActionButton("${entry.item.showTitle ?: entry.item.title}  ·  ${entry.item.episodeInfo ?: "Premiere"}", palette, primary = false) {
-                    onItemSelected(entry.item)
+    val firstEntryFocusRequester = remember(date, entries) { FocusRequester() }
+    val closeFocusRequester = remember(date) { FocusRequester() }
+    val entriesListState = rememberLazyListState()
+    val targetEntryIndex = focusRestoreKey?.let { target -> entries.indexOfFirst { it.item.focusRestoreKey() == target } } ?: -1
+    val fallbackToFirstEntry = focusRestoreKey != null && targetEntryIndex < 0
+    LaunchedEffect(focusRestoreKey, entries, dataReady) {
+        if (targetEntryIndex >= 0) entriesListState.scrollToItem(targetEntryIndex)
+    }
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+            usePlatformDefaultWidth = false
+        )
+    ) {
+        BackHandler(onBack = onDismiss)
+        LaunchedEffect(date, entries, focusRestoreKey, dataReady) {
+            if (entries.isNotEmpty() && (focusRestoreKey == null || (dataReady && fallbackToFirstEntry))) {
+                repeat(4) {
+                    delay(75)
+                    firstEntryFocusRequester.requestFocus()
                 }
-                Spacer(Modifier.height(10.dp))
+            } else if (dataReady && entries.isEmpty()) {
+                repeat(4) {
+                    delay(75)
+                    closeFocusRequester.requestFocus()
+                }
             }
-            Spacer(Modifier.height(6.dp))
-            ActionButton("Close", palette, primary = true, onClick = onDismiss)
+        }
+        Box(Modifier.fillMaxSize().background(midnight.copy(alpha = .84f)), contentAlignment = Alignment.Center) {
+            Column(Modifier.width(720.dp).fillMaxHeight(.82f).clip(RoundedCornerShape(22.dp)).background(Color(0xFF15121C)).border(1.dp, palette.accent.copy(alpha = .65f), RoundedCornerShape(22.dp)).padding(30.dp)) {
+                Text(formatRelayDate(date, dateFormat), color = ivory, fontSize = 27.sp, fontWeight = FontWeight.Light)
+                Spacer(Modifier.height(8.dp))
+                Text(if (entries.size == 1) "New episode or premiere" else "${entries.size} shows to watch", color = muted, fontSize = 15.sp)
+                Spacer(Modifier.height(24.dp))
+                LazyColumn(state = entriesListState, modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    items(entries.size) { index ->
+                        val entry = entries[index]
+                        val target = focusRestoreKey == entry.item.focusRestoreKey()
+                        val requester = remember(entry.item.focusRestoreKey()) { FocusRequester() }
+                        if (target) LaunchedEffect(focusRestoreKey) {
+                            repeat(4) {
+                                delay(75)
+                                requester.requestFocus()
+                            }
+                        }
+                        ActionButton(
+                            "${entry.item.showTitle ?: entry.item.title}  ·  ${entry.item.episodeInfo ?: "Premiere"}",
+                            palette,
+                            primary = false,
+                            focusRequester = when {
+                                target -> requester
+                                (focusRestoreKey == null || (dataReady && fallbackToFirstEntry)) && index == 0 -> firstEntryFocusRequester
+                                else -> null
+                            },
+                            onFocused = { if (it && (target || (dataReady && fallbackToFirstEntry && index == 0))) onFocusRestored() }
+                        ) {
+                            onItemSelected(entry.item)
+                        }
+                    }
+                }
+                if (entries.isEmpty()) {
+                    Text("No events are scheduled for this day.", color = muted, fontSize = 16.sp)
+                    Spacer(Modifier.weight(1f))
+                }
+                Spacer(Modifier.height(6.dp))
+                ActionButton(
+                    "Close", palette, primary = true,
+                    focusRequester = closeFocusRequester.takeIf { dataReady && entries.isEmpty() },
+                    onFocused = { if (it && focusRestoreKey != null && dataReady && entries.isEmpty()) onFocusRestored() },
+                    onClick = onDismiss
+                )
+            }
         }
     }
 }
@@ -2069,44 +2660,104 @@ private fun CalendarDayOverlay(
 private fun SearchScreen(
     palette: RelayPalette,
     providers: Set<Provider>,
+    installedApps: List<InstalledApp>,
+    profileScope: String,
+    focusRestoreKey: String?,
+    onFocusRestored: () -> Unit,
     onBackHome: () -> Unit,
     onItemSelected: (MediaItem) -> Unit
 ) {
     val context = LocalContext.current
-    var query by remember { mutableStateOf("") }
+    var query by rememberSaveable { mutableStateOf("") }
     var results by remember { mutableStateOf(emptyList<MediaItem>()) }
     var loading by remember { mutableStateOf(false) }
-    var searchProvider by remember { mutableStateOf(providers.firstOrNull { it == Provider.STREMIO } ?: providers.firstOrNull() ?: Provider.NUVIO) }
-    LaunchedEffect(query, searchProvider) {
+    var searchCompleted by remember { mutableStateOf(false) }
+    var searchError by remember { mutableStateOf<String?>(null) }
+    var retryGeneration by remember { mutableStateOf(0) }
+    var hasFocusedSearchThisEntry by remember { mutableStateOf(false) }
+    val searchFocusRequester = remember { FocusRequester() }
+    val resultsListState = rememberLazyListState()
+    var searchProviderName by rememberSaveable(providers) {
+        mutableStateOf((providers.firstOrNull { it == Provider.STREMIO } ?: providers.firstOrNull() ?: Provider.NUVIO).name)
+    }
+    val searchProvider = Provider.valueOf(searchProviderName)
+    var recentSearches by remember(profileScope) { mutableStateOf(SearchHistoryStore.load(context, profileScope)) }
+    val voiceIntent = remember(context) {
+        Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+            .putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            .putExtra(RecognizerIntent.EXTRA_PROMPT, "Search Relay")
+    }
+    val voiceAvailable = remember(voiceIntent) { voiceIntent.resolveActivity(context.packageManager) != null }
+    val voiceSearchLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            result.data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+                ?.takeIf { it.isNotBlank() }
+                ?.let { query = it }
+        }
+    }
+    LaunchedEffect(Unit) {
+        if (!hasFocusedSearchThisEntry) {
+            if (focusRestoreKey == null) {
+                repeat(4) {
+                    delay(75)
+                    searchFocusRequester.requestFocus()
+                }
+            }
+            hasFocusedSearchThisEntry = true
+        }
+    }
+    LaunchedEffect(query, searchProvider, retryGeneration) {
         if (query.trim().length < 2) {
             results = emptyList()
+            searchError = null
             loading = false
+            searchCompleted = false
             return@LaunchedEffect
         }
         loading = true
+        searchCompleted = false
+        searchError = null
         delay(350)
-        results = TmdbApi.search(query.trim(), searchProvider)
+        TmdbApi.search(query.trim(), searchProvider)
+            .onSuccess { results = it }
+            .onFailure { error ->
+                results = emptyList()
+                searchError = error.message
+            }
         loading = false
+        searchCompleted = true
+    }
+    LaunchedEffect(focusRestoreKey, results, searchCompleted) {
+        val targetIndex = focusRestoreKey?.let { target -> results.indexOfFirst { it.focusRestoreKey() == target } } ?: -1
+        if (targetIndex >= 0) {
+            resultsListState.scrollToItem(targetIndex)
+        } else if (focusRestoreKey != null && searchCompleted) {
+            repeat(3) {
+                delay(60)
+                searchFocusRequester.requestFocus()
+            }
+            onFocusRestored()
+        }
     }
     BackHandler(onBack = onBackHome)
     Column(Modifier.fillMaxSize().padding(horizontal = 76.dp, vertical = 42.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("Search", color = ivory, fontSize = 38.sp, fontWeight = FontWeight.Light)
             Spacer(Modifier.width(18.dp))
-            Text("Across your connected media", color = muted, fontSize = 16.sp)
+            Text("Find titles, then open them in a provider", color = muted, fontSize = 16.sp)
             Spacer(Modifier.weight(1f))
             ActionButton("‹  Back", palette, primary = false, onClick = onBackHome)
         }
         Spacer(Modifier.height(20.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("Search in:", color = muted, fontSize = 15.sp)
-            providers.sortedBy { it.label }.forEach { provider ->
+            providers.sortedBy { it.displayName(context) }.forEach { provider ->
                 ActionButton(
-                    provider.label,
+                    provider.displayName(context),
                     palette.copy(accent = provider.accent),
                     primary = searchProvider == provider
                 ) {
-                    searchProvider = provider
+                    searchProviderName = provider.name
                 }
             }
         }
@@ -2115,9 +2766,9 @@ private fun SearchScreen(
             value = query,
             onValueChange = { query = it },
             singleLine = true,
-            label = { Text("Search movies, series, and videos in ${searchProvider.label}") },
+            label = { Text("Search movies, series, and videos") },
             textStyle = androidx.compose.ui.text.TextStyle(color = ivory, fontSize = 20.sp),
-            modifier = Modifier.fillMaxWidth().height(70.dp),
+            modifier = Modifier.fillMaxWidth().height(70.dp).focusRequester(searchFocusRequester),
             colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
                 focusedBorderColor = searchProvider.accent,
                 unfocusedBorderColor = Color(0xFF3C4049),
@@ -2126,35 +2777,95 @@ private fun SearchScreen(
                 cursorColor = searchProvider.accent
             )
         )
+        if (voiceAvailable) {
+            Spacer(Modifier.height(8.dp))
+            ActionButton("🎙  Voice search", palette.copy(accent = searchProvider.accent), primary = false) {
+                voiceSearchLauncher.launch(voiceIntent)
+            }
+        }
+        if (query.isBlank() && recentSearches.isNotEmpty()) {
+            Spacer(Modifier.height(14.dp))
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text("Recent searches", color = ivory, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+                Spacer(Modifier.weight(1f))
+                ActionButton("Clear", palette, primary = false) {
+                    SearchHistoryStore.clear(context, profileScope)
+                    recentSearches = emptyList()
+                }
+            }
+            Spacer(Modifier.height(7.dp))
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(recentSearches.size) { index ->
+                    val recent = recentSearches[index]
+                    ActionButton(recent, palette.copy(accent = searchProvider.accent), primary = false) { query = recent }
+                }
+            }
+        }
         Spacer(Modifier.height(24.dp))
-        Text(if (query.isBlank()) "Start typing to search ${searchProvider.label}" else "Results for “$query”", color = ivory, fontSize = 21.sp, fontWeight = FontWeight.Medium)
+        Text(if (query.isBlank()) "Find title details, then search in ${searchProvider.displayName(context)}" else "Results for “$query”", color = ivory, fontSize = 21.sp, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(13.dp))
         if (loading) {
             Text("Searching…", color = muted, fontSize = 17.sp)
         } else if (query.trim().length < 2) {
             Text("Enter at least two characters to find titles with artwork and descriptions.", color = muted, fontSize = 17.sp)
+        } else if (searchError != null) {
+            Column {
+                Text(
+                    if (!TmdbApi.isConfigured) "Metadata search needs a TMDB API key. You can still search directly in ${searchProvider.displayName(context)}."
+                    else "Metadata search is temporarily unavailable. Check your connection and try again.",
+                    color = muted,
+                    fontSize = 17.sp,
+                    lineHeight = 23.sp
+                )
+                if (TmdbApi.isConfigured) {
+                    Spacer(Modifier.height(10.dp))
+                    ActionButton("Try again", palette.copy(accent = searchProvider.accent), primary = false) { retryGeneration++ }
+                }
+            }
         } else if (results.isEmpty()) {
             Text("No matches found. Try a more specific title.", color = muted, fontSize = 17.sp)
         } else {
-            LazyRow(horizontalArrangement = Arrangement.spacedBy(15.dp)) {
+            LazyRow(state = resultsListState, horizontalArrangement = Arrangement.spacedBy(15.dp)) {
                 items(results.size) { index ->
-                    MediaCard(results[index], palette, poster = true, onClick = { onItemSelected(results[index]) }) { }
+                    val item = results[index]
+                    val target = focusRestoreKey == item.focusRestoreKey()
+                    val requester = remember(item.focusRestoreKey()) { FocusRequester() }
+                    if (target) LaunchedEffect(focusRestoreKey) {
+                        repeat(4) {
+                            delay(75)
+                            requester.requestFocus()
+                        }
+                    }
+                    MediaCard(
+                        item = item,
+                        palette = palette,
+                        poster = true,
+                        focusRequester = requester.takeIf { target },
+                        onRestoreFocus = if (target) onFocusRestored else null,
+                        onClick = {
+                            recentSearches = SearchHistoryStore.add(context, profileScope, query)
+                            onItemSelected(item)
+                        }
+                    ) { }
                 }
             }
         }
         if (query.isNotBlank()) {
             Spacer(Modifier.height(20.dp))
             ActionButton(
-                "Search “$query” in ${searchProvider.label}",
+                "Search “$query” in ${searchProvider.displayName(context)}",
                 palette.copy(accent = searchProvider.accent),
                 primary = false
-            ) { ProviderHandoff.search(context, searchProvider, query) }
+            ) {
+                recentSearches = SearchHistoryStore.add(context, profileScope, query)
+                ProviderHandoff.search(context, searchProvider, query)
+            }
         }
         Spacer(Modifier.height(30.dp))
         Text("Apps", color = ivory, fontSize = 21.sp, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(13.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(13.dp)) {
-            InstalledApps.discover(context)
+            installedApps
                 .filterNot { ProviderHandoff.isProviderPackage(it.packageName) }
                 .take(6)
                 .forEach { app -> AppTile(app.label, palette) { InstalledApps.launch(context, app) } }
@@ -2182,8 +2893,18 @@ private fun AppTile(
 }
 
 private enum class SettingsPage(val label: String) {
-    STATUS("Relay status"), DISPLAY("Display"), PROVIDERS("Providers"), PROFILE("Profile"), SUBSCRIPTIONS("Subscriptions"), UPDATES("Updates"), LAUNCHER("Launcher"), SYSTEM("System")
+    STATUS("Relay status"), DISPLAY("Display"), HOME_LAYOUT("Home layout"), PROVIDERS("Providers"), PROFILE("Profile"), SUBSCRIPTIONS("Subscriptions"), UPDATES("Updates"), LAUNCHER("Launcher"), SYSTEM("System")
 }
+
+private val yearMonthSaver = listSaver<YearMonth, Int>(
+    save = { listOf(it.year, it.monthValue) },
+    restore = { YearMonth.of(it[0], it[1]) }
+)
+
+private val localDateSaver = listSaver<LocalDate, Int>(
+    save = { listOf(it.year, it.monthValue, it.dayOfMonth) },
+    restore = { LocalDate.of(it[0], it[1], it[2]) }
+)
 
 private data class SystemSettingsEntry(val label: String, val action: String, val symbol: String)
 
@@ -2212,6 +2933,8 @@ private fun openSystemSettings(context: android.content.Context, action: String)
 private fun SettingsScreen(
     palette: RelayPalette,
     providers: Set<Provider>,
+    homeLayout: HomeLayout,
+    onHomeLayoutChanged: (HomeLayout) -> Unit,
     onBackHome: () -> Unit,
     onProviderToggle: (Provider) -> Unit,
     onRequestHome: () -> Unit,
@@ -2227,6 +2950,7 @@ private fun SettingsScreen(
     nuvioSyncing: Boolean,
     nuvioItemCount: Int,
     nuvioSyncError: String?,
+    nuvioNeedsReauth: Boolean,
     onRefreshNuvio: () -> Unit,
     onManageProvider: (Provider) -> Unit,
     dateFormat: RelayDateFormat,
@@ -2236,7 +2960,9 @@ private fun SettingsScreen(
     stockLauncherOverride: StockLauncherOverride?
 ) {
     val context = LocalContext.current
-    var page by remember { mutableStateOf(SettingsPage.DISPLAY) }
+    val mediaAppName = ProviderHandoff.mediaAppDisplayName(context)
+    var page by rememberSaveable { mutableStateOf(SettingsPage.DISPLAY) }
+    var lastSettingsPage by rememberSaveable { mutableStateOf(page) }
     var showAdvancedHomeSetup by remember { mutableStateOf(false) }
     var showSmartTubeAdbSetup by remember { mutableStateOf(false) }
     var shizukuMessage by remember { mutableStateOf<String?>(null) }
@@ -2253,6 +2979,7 @@ private fun SettingsScreen(
     // A regular scroll container lets focus reveal only the actual control being selected.
     val settingsContentState = rememberScrollState()
     val settingsNavigationState = rememberScrollState()
+    val firstSettingsPageFocusRequester = remember { FocusRequester() }
     val shizukuReadinessRevision = RelayShizuku.readinessRevisionForUi
     val shizukuReady = remember(shizukuReadinessRevision) { RelayShizuku.isReady() }
     val profileImagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
@@ -2263,11 +2990,18 @@ private fun SettingsScreen(
             onProfileImageChanged(it.toString())
         }
     }
+    LaunchedEffect(Unit) {
+        delay(75)
+        firstSettingsPageFocusRequester.requestFocus()
+    }
     // A selected Settings category can reuse this screen while its old list offset is still
     // remembered. Reset it before handing focus to the newly-selected content so its heading
     // is never left above the rounded panel.
     LaunchedEffect(page) {
-        settingsContentState.scrollTo(0)
+        if (lastSettingsPage != page) {
+            settingsContentState.scrollTo(0)
+            lastSettingsPage = page
+        }
     }
     BackHandler(onBack = onBackHome)
     Column(Modifier.fillMaxSize().padding(horizontal = 58.dp, vertical = 42.dp)) {
@@ -2284,7 +3018,12 @@ private fun SettingsScreen(
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 SettingsPage.entries.forEach { destination ->
-                    SettingsNavigationItem(destination.label, page == destination, palette) { page = destination }
+                    SettingsNavigationItem(
+                        destination.label,
+                        page == destination,
+                        palette,
+                        focusRequester = firstSettingsPageFocusRequester.takeIf { destination == SettingsPage.entries.first() }
+                    ) { page = destination }
                 }
             }
             Column(
@@ -2301,21 +3040,23 @@ private fun SettingsScreen(
                                 detail = when {
                                     !nuvioConnected -> "Not connected"
                                     nuvioSyncing -> "Syncing active profile…"
+                                    nuvioNeedsReauth -> "Session expired · reconnect your account"
                                     nuvioSyncError != null -> nuvioSyncError
                                     else -> "Connected · $nuvioItemCount Continue Watching item${if (nuvioItemCount == 1) "" else "s"} available"
                                 },
-                                healthy = nuvioConnected && nuvioSyncError == null,
+                                healthy = nuvioConnected && nuvioSyncError == null && !nuvioNeedsReauth,
                                 palette = palette.copy(accent = Provider.NUVIO.accent)
                             ) {
-                                if (nuvioConnected) onRefreshNuvio() else onManageProvider(Provider.NUVIO)
+                                if (!nuvioConnected || nuvioNeedsReauth) onManageProvider(Provider.NUVIO) else onRefreshNuvio()
                             }
                             Spacer(Modifier.height(12.dp))
                             StatusCard(
-                                title = "SmartTube",
+                                title = mediaAppName,
                                 detail = when {
                                     !smartTubeInstalled -> "App not installed"
                                     smartTubeSubscriptions.isNotEmpty() -> "Connected · ${smartTubeSubscriptions.size} subscription video${if (smartTubeSubscriptions.size == 1) "" else "s"} received"
-                                    else -> "Installed · waiting for RelayTube/SmartTube shared data"
+                                    ProviderHandoff.isRelayTubeInstalled(context) -> "Installed · waiting for $mediaAppName shared data"
+                                    else -> "Installed · RelayTube is required for shared subscriptions and resume data"
                                 },
                                 healthy = smartTubeInstalled && smartTubeSubscriptions.isNotEmpty(),
                                 palette = palette.copy(accent = Provider.SMARTTUBE.accent)
@@ -2341,6 +3082,45 @@ private fun SettingsScreen(
                                 }
                             }
                         }
+                        SettingsPage.HOME_LAYOUT -> {
+                            SettingsSectionTitle("Home layout", "Choose which rows appear and arrange them for this profile.")
+                            Spacer(Modifier.height(18.dp))
+                            homeLayout.order.forEach { row ->
+                                val rowIndex = homeLayout.order.indexOf(row)
+                                val visible = row !in homeLayout.hidden
+                                Row(
+                                    Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(Color(0xFF171A20))
+                                        .padding(horizontal = 14.dp, vertical = 10.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Text(row.label, color = ivory, fontSize = 16.sp, modifier = Modifier.weight(1f))
+                                    ActionButton(if (visible) "Shown" else "Hidden", palette, primary = visible) {
+                                        val nextHidden = if (visible) homeLayout.hidden + row else homeLayout.hidden - row
+                                        onHomeLayoutChanged(homeLayout.copy(hidden = nextHidden))
+                                    }
+                                    ActionButton("↑", palette, primary = false) {
+                                        if (rowIndex > 0) {
+                                            val reordered = homeLayout.order.toMutableList()
+                                            val current = reordered.removeAt(rowIndex)
+                                            reordered.add(rowIndex - 1, current)
+                                            onHomeLayoutChanged(homeLayout.copy(order = reordered))
+                                        }
+                                    }
+                                    ActionButton("↓", palette, primary = false) {
+                                        if (rowIndex in 0 until homeLayout.order.lastIndex) {
+                                            val reordered = homeLayout.order.toMutableList()
+                                            val current = reordered.removeAt(rowIndex)
+                                            reordered.add(rowIndex + 1, current)
+                                            onHomeLayoutChanged(homeLayout.copy(order = reordered))
+                                        }
+                                    }
+                                }
+                                Spacer(Modifier.height(9.dp))
+                            }
+                            Spacer(Modifier.height(8.dp))
+                            Text("These choices follow the active Relay profile. Unavailable rows stay out of view until they have content.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+                        }
                         SettingsPage.PROVIDERS -> {
                             SettingsSectionTitle("Media providers", "Connect services here, then choose which ones appear in Relay's Home navigation.")
                             Spacer(Modifier.height(22.dp))
@@ -2353,7 +3133,7 @@ private fun SettingsScreen(
                                     Row(verticalAlignment = Alignment.CenterVertically) {
                                         Box(Modifier.size(9.dp).clip(CircleShape).background(provider.accent))
                                         Spacer(Modifier.width(10.dp))
-                                        Text(provider.label, color = ivory, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+                                        Text(provider.displayName(context), color = ivory, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
                                         Spacer(Modifier.weight(1f))
                                         Text(if (connected) "Shown on Home" else "Hidden from Home", color = muted, fontSize = 14.sp)
                                     }
@@ -2365,7 +3145,7 @@ private fun SettingsScreen(
                                     Spacer(Modifier.height(18.dp))
                                     Text("Continue Watching cards", color = ivory, fontSize = 15.sp, fontWeight = FontWeight.Medium)
                                     Spacer(Modifier.height(5.dp))
-                                    Text("${continueWatchingLimits[provider] ?: ContinueWatchingLimits.defaultLimit} maximum from ${provider.label}", color = muted, fontSize = 14.sp)
+                                    Text("${continueWatchingLimits[provider] ?: ContinueWatchingLimits.defaultLimit} maximum from ${provider.displayName(context)}", color = muted, fontSize = 14.sp)
                                     Spacer(Modifier.height(10.dp))
                                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                         listOf(1, 2, 4, 6, 8, 12).forEach { limit ->
@@ -2469,7 +3249,13 @@ private fun SettingsScreen(
                                 }
                             } else {
                                 Spacer(Modifier.height(24.dp))
-                                Text("No RelayTube subscriptions found yet. Subscriptions from RelayTube will appear here automatically.", color = muted, fontSize = 15.sp, lineHeight = 22.sp)
+                                Text(
+                                    if (ProviderHandoff.isRelayTubeInstalled(context)) "No $mediaAppName subscriptions found yet. Subscriptions from $mediaAppName will appear here automatically."
+                                    else "Stock SmartTube does not share subscription feeds with Relay. Install RelayTube to enable this section.",
+                                    color = muted,
+                                    fontSize = 15.sp,
+                                    lineHeight = 22.sp
+                                )
                             }
                         }
                         SettingsPage.UPDATES -> {
@@ -2614,18 +3400,23 @@ private fun SettingsScreen(
                                         Spacer(Modifier.height(12.dp))
                                         ActionButton(
                                             when {
-                                                shizukuWorking -> "Applying Relay override…"
+                                                shizukuWorking -> "Updating Android Home…"
                                                 shizukuReady -> "Enable Relay Home override"
                                                 else -> "Authorize Shizuku override"
                                             },
                                             palette,
                                             primary = true
                                         ) {
+                                            if (shizukuWorking) return@ActionButton
                                             if (!shizukuReady) {
                                                 shizukuMessage = RelayShizuku.requestAccess()
                                             } else {
                                                 shizukuWorking = true
-                                                RelayShizuku.setStockLauncherEnabled(override, enabled = false) { result ->
+                                                RelayShizuku.setStockLauncherEnabled(
+                                                    override,
+                                                    enabled = false,
+                                                    onStillRunning = { shizukuMessage = "Shizuku is still applying the launcher change. Keep this screen open; it will update when complete." }
+                                                ) { result ->
                                                     shizukuMessage = result.fold(onSuccess = { it }, onFailure = { it.message ?: "Could not apply the override." })
                                                     shizukuWorking = false
                                                 }
@@ -2652,8 +3443,13 @@ private fun SettingsScreen(
                                     if (override != null && shizukuReady) {
                                         Spacer(Modifier.height(10.dp))
                                         ActionButton("Restore stock launcher with Shizuku", palette, primary = false) {
+                                            if (shizukuWorking) return@ActionButton
                                             shizukuWorking = true
-                                            RelayShizuku.setStockLauncherEnabled(override, enabled = true) { result ->
+                                            RelayShizuku.setStockLauncherEnabled(
+                                                override,
+                                                enabled = true,
+                                                onStillRunning = { shizukuMessage = "Shizuku is still restoring the stock launcher. Keep this screen open; it will update when complete." }
+                                            ) { result ->
                                                 shizukuMessage = result.fold(onSuccess = { it }, onFailure = { it.message ?: "Could not restore the stock launcher." })
                                                 shizukuWorking = false
                                             }
@@ -2707,11 +3503,18 @@ private fun SystemSettingsTile(entry: SystemSettingsEntry, palette: RelayPalette
 }
 
 @Composable
-private fun SettingsNavigationItem(label: String, selected: Boolean, palette: RelayPalette, onClick: () -> Unit) {
+private fun SettingsNavigationItem(
+    label: String,
+    selected: Boolean,
+    palette: RelayPalette,
+    focusRequester: FocusRequester? = null,
+    onClick: () -> Unit
+) {
     val source = remember { MutableInteractionSource() }
     val focused by source.collectIsFocusedAsState()
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+        (if (focusRequester == null) Modifier else Modifier.focusRequester(focusRequester))
+            .fillMaxWidth().clip(RoundedCornerShape(12.dp))
             .background(if (selected || focused) palette.accent.copy(alpha = .20f) else Color.Transparent)
             .border(if (focused) 2.dp else 0.dp, if (focused) palette.accent else Color.Transparent, RoundedCornerShape(12.dp))
             .clickable(interactionSource = source, indication = null, onClick = onClick)
@@ -2776,6 +3579,7 @@ private fun ProviderHubScreen(
     nuvioSyncing: Boolean,
     nuvioItemCount: Int,
     nuvioSyncError: String?,
+    nuvioNeedsReauth: Boolean,
     nuvioProfiles: List<NuvioProfile>,
     activeNuvioProfile: Int,
     onNuvioProfileSelected: (Int) -> Unit,
@@ -2784,17 +3588,28 @@ private fun ProviderHubScreen(
 ) {
     val context = LocalContext.current
     val primaryActionFocusRequester = remember { FocusRequester() }
-    LaunchedEffect(provider) { primaryActionFocusRequester.requestFocus() }
+    LaunchedEffect(provider, nuvioConnected, nuvioNeedsReauth) {
+        repeat(4) {
+            delay(75)
+            primaryActionFocusRequester.requestFocus()
+        }
+    }
     Column(Modifier.fillMaxSize().padding(64.dp), verticalArrangement = Arrangement.Center) {
-        Text(provider.label, color = ivory, fontSize = 42.sp, fontWeight = FontWeight.Light)
+        val mediaAppName = ProviderHandoff.mediaAppDisplayName(context)
+        Text(provider.displayName(context), color = ivory, fontSize = 42.sp, fontWeight = FontWeight.Light)
         Spacer(Modifier.height(12.dp))
         Text(
             when (provider) {
                 Provider.STREMIO -> "Stremio handoff is ready. Relay can open Stremio's board and search using its Android TV deep links. Catalog sync comes next."
-                Provider.SMARTTUBE -> "SmartTube is ready as a focused video destination. Relay launches the installed stable or beta app directly, while SmartTube keeps its own subscriptions and playback experience."
+                Provider.SMARTTUBE -> when {
+                    ProviderHandoff.isRelayTubeInstalled(context) -> "RelayTube shares playback, subscriptions, and profile data with Relay while keeping its own viewing experience."
+                    ProviderHandoff.isSmartTubeInstalled(context) -> "SmartTube is ready for direct playback. Install RelayTube to share subscriptions, profiles, and Continue Watching with Relay."
+                    else -> "Install RelayTube or SmartTube to open videos from Relay. RelayTube also shares subscriptions, profiles, and Continue Watching."
+                }
                 Provider.NUVIO -> if (nuvioConnected) {
                     when {
                         nuvioSyncing -> "Nuvio is connected. Syncing your profile and Continue Watching…"
+                        nuvioNeedsReauth -> "Your Nuvio session expired. Sign in again to restore syncing."
                         nuvioSyncError != null -> nuvioSyncError
                         else -> "Nuvio is connected. $nuvioItemCount Continue Watching items are now available in Relay."
                     }
@@ -2813,7 +3628,7 @@ private fun ProviderHubScreen(
             Spacer(Modifier.height(12.dp))
         }
         if (provider == Provider.SMARTTUBE) {
-            ActionButton("Open SmartTube", palette.copy(accent = provider.accent), primary = true, focusRequester = primaryActionFocusRequester) {
+            ActionButton("Open $mediaAppName", palette.copy(accent = provider.accent), primary = true, focusRequester = primaryActionFocusRequester) {
                 ProviderHandoff.openSmartTube(context)
             }
             Spacer(Modifier.height(12.dp))
@@ -2831,15 +3646,19 @@ private fun ProviderHubScreen(
                 Spacer(Modifier.height(14.dp))
             }
             if (!nuvioConnected) {
-                ActionButton("Connect Nuvio data", palette.copy(accent = provider.accent), primary = true, onClick = onConnectNuvio)
+                ActionButton("Connect Nuvio data", palette.copy(accent = provider.accent), primary = true, focusRequester = primaryActionFocusRequester, onClick = onConnectNuvio)
                 Spacer(Modifier.height(12.dp))
             } else {
+                if (nuvioNeedsReauth) {
+                    ActionButton("Sign in again", palette.copy(accent = provider.accent), primary = true, focusRequester = primaryActionFocusRequester, onClick = onConnectNuvio)
+                    Spacer(Modifier.height(12.dp))
+                }
                 ActionButton(if (nuvioSyncing) "Refreshing Nuvio…" else "Refresh Nuvio", palette.copy(accent = provider.accent), primary = false, onClick = onRefreshNuvio)
                 Spacer(Modifier.height(12.dp))
                 ActionButton("Disconnect Nuvio", palette, primary = false, onClick = onDisconnectNuvio)
                 Spacer(Modifier.height(12.dp))
             }
-            ActionButton("Open Nuvio", palette.copy(accent = provider.accent), primary = true, focusRequester = primaryActionFocusRequester) {
+            ActionButton("Open Nuvio", palette.copy(accent = provider.accent), primary = true, focusRequester = primaryActionFocusRequester.takeIf { nuvioConnected && !nuvioNeedsReauth }) {
                 ProviderHandoff.openNuvio(context)
             }
             Spacer(Modifier.height(12.dp))
@@ -2933,7 +3752,12 @@ private fun DetailsScreen(
         }
     }
     val selectedPlaybackItem = if (seasonEpisode != null && (selectedSeason != originalSeason || selectedEpisode != originalEpisode)) {
-        item.copy(episodeInfo = "S${selectedSeason.toString().padStart(2, '0')} • E${selectedEpisode.toString().padStart(2, '0')}", progress = 0f)
+        val selectedEpisodeInfo = "S${selectedSeason.toString().padStart(2, '0')} • E${selectedEpisode.toString().padStart(2, '0')}"
+        item.copy(
+            episodeInfo = selectedEpisodeInfo,
+            progress = 0f,
+            providerSearchQuery = "${item.showTitle ?: item.title} S${selectedSeason.toString().padStart(2, '0')}E${selectedEpisode.toString().padStart(2, '0')}"
+        )
     } else item
     BackHandler(enabled = pickerVisible) { pickerVisible = false }
     BackHandler(enabled = !pickerVisible, onBack = onBackHome)
@@ -2971,7 +3795,7 @@ private fun DetailsScreen(
         ) {
             Column(modifier = Modifier.width(800.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    DetailPill(item.provider.label.uppercase(), item.provider.accent)
+                    DetailPill(item.provider.displayName(context).uppercase(), item.provider.accent)
                 }
                 Spacer(Modifier.height(9.dp))
                 Text(
@@ -3002,7 +3826,7 @@ private fun DetailsScreen(
                 )
                 Spacer(Modifier.height(9.dp))
                 Text(
-                    item.description ?: "Details are available in ${item.provider.label}.",
+                    item.description ?: "Details are available in ${item.provider.displayName(context)}.",
                     color = muted,
                     fontSize = 15.sp,
                     lineHeight = 20.sp,
@@ -3025,7 +3849,12 @@ private fun DetailsScreen(
                 Spacer(Modifier.height(12.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     ActionButton(
-                        "▶  ${if (selectedPlaybackItem.progress > 0f) "Resume" else "Play"}",
+                        when {
+                            selectedPlaybackItem.providerSearchQuery != null -> "⌕  Search selected episode in ${selectedPlaybackItem.provider.displayName(context)}"
+                            selectedPlaybackItem.progress > 0f -> "▶  Resume"
+                            selectedPlaybackItem.providerContentId?.startsWith("tmdb:") == true -> "⌕  Search in ${selectedPlaybackItem.provider.displayName(context)}"
+                            else -> "▶  Play"
+                        },
                         palette,
                         primary = true,
                         focusRequester = resumeFocusRequester,
@@ -3067,9 +3896,18 @@ private fun DetailsScreen(
             modifier = Modifier.align(Alignment.BottomStart).padding(start = 78.dp, bottom = 42.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Text("Available in ${item.provider.label}", color = ivory, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+            Text(
+                if (selectedPlaybackItem.providerSearchQuery != null || item.providerContentId?.startsWith("tmdb:") == true) "Search in ${item.provider.displayName(context)}" else "Available in ${item.provider.displayName(context)}",
+                color = ivory,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.Medium
+            )
             Spacer(Modifier.width(12.dp))
-            Text("Playback opens in your connected provider", color = muted, fontSize = 14.sp)
+            Text(
+                if (selectedPlaybackItem.providerSearchQuery != null) "The selected episode opens in provider search" else if (item.providerContentId?.startsWith("tmdb:") == true) "The selected title opens in provider search" else "Playback opens in your connected provider",
+                color = muted,
+                fontSize = 14.sp
+            )
         }
         if (pickerVisible) {
             SeasonEpisodePicker(
@@ -3224,10 +4062,10 @@ private fun sampleContinueWatching(providers: Set<Provider>): List<MediaItem> = 
     MediaItem("Bright Hollow", Provider.NUVIO, .72f, listOf(Color(0xFF0F414E), Color(0xFF050B0D)), "https://images.unsplash.com/photo-1499346030926-9a72daac6c63?auto=format&fit=crop&w=960&q=85")
 ).filter { it.provider in providers }
 
-/** Keeps SmartTube's App Peek navigable before it has reported a live media session. */
+/** Keeps the video provider's App Peek navigable before it has reported a live media session. */
 private fun sampleSmartTubePeek(): List<MediaItem> = listOf(
     MediaItem(
-        title = "Open SmartTube",
+        title = "Open video app",
         provider = Provider.SMARTTUBE,
         progress = 0f,
         colors = listOf(Provider.SMARTTUBE.accent.copy(alpha = .45f), midnight),

@@ -31,13 +31,107 @@ internal data class InstalledApp(
 internal object FavoriteAppsStore {
     private const val PREFS = "relay_favorite_apps"
     private const val KEY_PACKAGES = "favorite_package_names"
-    var favoritePackages by mutableStateOf(emptySet<String>())
+    var favoritePackages by mutableStateOf(emptyList<String>())
         private set
 
-    fun load(context: Context): Set<String> {
-        val stored = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getStringSet(KEY_PACKAGES, null)
-        favoritePackages = stored ?: defaultFavoritePackages(context)
+    fun load(
+        context: Context,
+        availableApps: List<InstalledApp> = emptyList(),
+        profileScope: String = "default"
+    ): List<String> {
+        val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val scopedKey = "${KEY_PACKAGES}_${profileScope.safePreferenceKey()}"
+        val stored = preferences.getString(scopedKey, null)?.split('\n')
+            ?.filter { it.isNotBlank() }
+            ?.distinct()
+        if (stored != null) {
+            if (preferences.contains(KEY_PACKAGES)) preferences.edit().remove(KEY_PACKAGES).apply()
+            favoritePackages = stored
+            return stored
+        }
+
+        // The previous global set has no viewer metadata. Import it only if no scoped
+        // favorite list exists yet, then remove it so another profile cannot inherit it.
+        val hasAnyScopedList = preferences.all.keys.any { it.startsWith("${KEY_PACKAGES}_") }
+        val legacy = runCatching { preferences.getStringSet(KEY_PACKAGES, null)?.toList() }.getOrNull()
+        val importLegacy = legacy != null && !hasAnyScopedList
+        val initial = (legacy.takeIf { importLegacy } ?: availableApps.take(6).map { it.packageName })
+            .distinct()
+        preferences.edit().putString(scopedKey, initial.joinToString("\n")).apply()
+        if (legacy != null) preferences.edit().remove(KEY_PACKAGES).apply()
+        favoritePackages = initial
+        return initial
+    }
+
+    fun toggle(context: Context, packageName: String, profileScope: String = "default"): List<String> {
+        val next = if (packageName in favoritePackages) favoritePackages - packageName else favoritePackages + packageName
+        save(context, next, profileScope)
+        return next
+    }
+
+    fun move(context: Context, packageName: String, offset: Int, profileScope: String = "default"): List<String> {
+        val currentIndex = favoritePackages.indexOf(packageName)
+        if (currentIndex < 0) return favoritePackages
+        val targetIndex = (currentIndex + offset).coerceIn(0, favoritePackages.lastIndex)
+        if (targetIndex == currentIndex) return favoritePackages
+        val next = favoritePackages.toMutableList().apply {
+            add(targetIndex, removeAt(currentIndex))
+        }
+        save(context, next, profileScope)
+        return next
+    }
+
+    private fun save(context: Context, packages: List<String>, profileScope: String) {
+        favoritePackages = packages.distinct()
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString("${KEY_PACKAGES}_${profileScope.safePreferenceKey()}", favoritePackages.joinToString("\n"))
+            .apply()
+    }
+}
+
+private fun String.safePreferenceKey(): String = replace(Regex("[^A-Za-z0-9_.-]"), "_")
+
+internal enum class HomeRow(val label: String) {
+    CONTINUE_WATCHING("Continue Watching"),
+    FAVORITE_APPS("Favorite Apps"),
+    LIBRARY("Your Library"),
+    RECOMMENDATIONS("Recommended TV Shows"),
+    SUBSCRIPTIONS("New from subscriptions"),
+    UPCOMING("Coming Up")
+}
+
+internal data class HomeLayout(
+    val order: List<HomeRow> = HomeRow.entries,
+    val hidden: Set<HomeRow> = emptySet()
+)
+
+internal object HomeLayoutStore {
+    private const val PREFS = "relay_home_layout"
+
+    fun load(context: Context, profileScope: String): HomeLayout {
+        val preferences = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        val suffix = profileScope.safePreferenceKey()
+        val allRows = HomeRow.entries
+        val savedOrder = preferences.getString("order_$suffix", null)
+            ?.split(',')
+            ?.mapNotNull { name -> allRows.firstOrNull { it.name == name } }
+            .orEmpty()
+        val order = (savedOrder + allRows).distinct()
+        val hidden = preferences.getStringSet("hidden_$suffix", emptySet())
+            .orEmpty()
+            .mapNotNull { name -> allRows.firstOrNull { it.name == name } }
+            .toSet()
+        return HomeLayout(order, hidden)
+    }
+
+    fun save(context: Context, profileScope: String, layout: HomeLayout) {
+        val suffix = profileScope.safePreferenceKey()
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString("order_$suffix", layout.order.distinct().joinToString(",") { it.name })
+            .putStringSet("hidden_$suffix", layout.hidden.map { it.name }.toSet())
+            .apply()
+    }
+}
         return favoritePackages
     }
 
@@ -48,10 +142,6 @@ internal object FavoriteAppsStore {
             .edit()
             .putStringSet(KEY_PACKAGES, next)
             .apply()
-    }
-
-    private fun defaultFavoritePackages(context: Context): Set<String> {
-        return InstalledApps.discover(context).take(6).map { it.packageName }.toSet()
     }
 }
 
