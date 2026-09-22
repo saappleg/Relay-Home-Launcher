@@ -1,167 +1,387 @@
 package com.relayhome.launcher
 
+import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import androidx.compose.ui.graphics.Color
+import com.relayhome.launcher.ui.shared.MediaItem
+import com.relayhome.launcher.ui.shared.Provider
+import com.relayhome.launcher.ui.shared.visibleRelayText
+import com.relayhome.launcher.data.RelaySettingsRepository
+import java.io.IOException
+import java.io.InterruptedIOException
+import java.net.ConnectException
 import java.net.HttpURLConnection
+import java.net.NoRouteToHostException
+import java.net.SocketException
+import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.URLEncoder
+import java.text.Normalizer
 import java.time.LocalDate
-import java.util.LinkedHashMap
-import java.util.concurrent.atomic.AtomicReference
-import kotlin.coroutines.resume
-import kotlin.coroutines.resumeWithException
+import java.util.Locale
+import java.net.UnknownHostException
 
 internal data class TmdbCalendarEntry(val date: LocalDate, val item: MediaItem)
 internal data class TvEpisode(val number: Int, val title: String)
 internal data class TvSeason(val seasons: List<Int>, val episodes: List<TvEpisode>)
 
+internal enum class TmdbMatchConfidence {
+    EXACT,
+    FUZZY
+}
+
+internal data class TmdbTitleMatch(
+    val result: JSONObject,
+    val confidence: TmdbMatchConfidence,
+    val score: Double
+)
+
+internal data class TmdbExternalMetadata(
+    val imdbId: String?,
+    val tmdbRating: Double?
+)
+
+internal open class TmdbApiException(message: String, cause: Throwable? = null) : IOException(message, cause)
+
+internal class TmdbNotConfiguredException : TmdbApiException(
+    "TMDB metadata is not configured. Add a TMDB API key to enable metadata enrichment."
+)
+
+internal class TmdbTransientException(
+    val operation: String,
+    val attempts: Int,
+    val statusCode: Int? = null,
+    cause: Throwable? = null
+) : TmdbApiException(
+    buildString {
+        append("TMDB ")
+        append(operation)
+        append(" is temporarily unavailable after ")
+        append(attempts)
+        append(if (attempts == 1) " attempt" else " attempts")
+        statusCode?.let { append(" (HTTP ").append(it).append(")") }
+        append(". Metadata was left unchanged; try again when connected.")
+    },
+    cause
+)
+
+internal class TmdbHttpException(val statusCode: Int) : TmdbApiException(
+    "TMDB metadata lookup failed (HTTP $statusCode)."
+)
+
+internal class TmdbNoConfidentMatchException : TmdbApiException(
+    "TMDB title matching confidence was insufficient; no metadata was attached."
+)
+
+internal class TmdbResponseTooLargeException : TmdbApiException(
+    "TMDB returned a response larger than the supported limit."
+)
+
+internal data class TmdbHttpResponse(val statusCode: Int, val body: String)
+
+/** Runtime access to user-configured metadata keys without exposing them to UI or logs. */
+internal object MetadataApiKeyAccess {
+    @Volatile
+    private var applicationContext: Context? = null
+
+    fun configure(context: Context) {
+        applicationContext = context.applicationContext
+    }
+
+    fun tmdbApiKey(): String = applicationContext
+        ?.let { RelaySettingsRepository.loadTmdbApiKey(it) }
+        ?: BuildConfig.TMDB_API_KEY
+
+    /** OMDb intentionally has no build-time fallback: it is opt-in and user-supplied only. */
+    fun omdbApiKey(): String? = applicationContext?.let { RelaySettingsRepository.loadOmdbApiKey(it) }
+}
+
+/** Conservative title matcher: exact normalized matches win; fuzzy matches need a clear margin. */
+internal object TmdbTitleMatcher {
+    private const val MIN_FUZZY_TITLE_LENGTH = 8
+    private const val MIN_FUZZY_SCORE = 0.90
+    private const val MIN_FUZZY_MARGIN = 0.08
+
+    fun match(results: JSONArray, query: String, vararg titleKeys: String): TmdbTitleMatch? {
+        val normalizedQuery = normalize(query)
+        if (normalizedQuery.isBlank()) return null
+
+        val candidates = (0 until results.length()).mapNotNull { index ->
+            val result = results.optJSONObject(index) ?: return@mapNotNull null
+            val titles = titleKeys.mapNotNull { key -> result.stringValue(key) }
+            if (titles.isEmpty()) return@mapNotNull null
+            if (titles.any { normalize(it) == normalizedQuery }) {
+                TmdbTitleMatch(result, TmdbMatchConfidence.EXACT, 1.0)
+            } else if (normalizedQuery.length >= MIN_FUZZY_TITLE_LENGTH) {
+                TmdbTitleMatch(
+                    result,
+                    TmdbMatchConfidence.FUZZY,
+                    titles.maxOf { fuzzyScore(query, it) }
+                )
+            } else {
+                null
+            }
+        }
+
+        candidates.firstOrNull { it.confidence == TmdbMatchConfidence.EXACT }?.let { return it }
+        val fuzzy = candidates
+            .filter { it.confidence == TmdbMatchConfidence.FUZZY }
+            .sortedByDescending { it.score }
+        val best = fuzzy.firstOrNull() ?: return null
+        val runnerUp = fuzzy.getOrNull(1)
+        if (best.score < MIN_FUZZY_SCORE || runnerUp != null && best.score - runnerUp.score < MIN_FUZZY_MARGIN) {
+            return null
+        }
+        return best
+    }
+
+    fun normalize(value: String): String = Normalizer.normalize(value.trim(), Normalizer.Form.NFD)
+        .replace(Regex("\\p{M}+"), "")
+        .lowercase(Locale.ROOT)
+        .replace(Regex("[^a-z0-9]+"), "")
+
+    private fun fuzzyScore(query: String, candidate: String): Double {
+        val normalizedQuery = normalize(query)
+        val normalizedCandidate = normalize(candidate)
+        if (normalizedCandidate.isBlank()) return 0.0
+        val editScore = levenshteinSimilarity(normalizedQuery, normalizedCandidate)
+        val queryTokens = tokens(query)
+        val candidateTokens = tokens(candidate)
+        val sharedTokenScore = if (queryTokens.isNotEmpty() && candidateTokens.isNotEmpty()) {
+            queryTokens.toSet().intersect(candidateTokens.toSet()).size.toDouble() /
+                maxOf(queryTokens.size, candidateTokens.size)
+        } else {
+            0.0
+        }
+        // Token order changes are safe only when both titles contain the same words. For all
+        // other cases the edit-distance score remains the controlling signal.
+        return maxOf(editScore, if (sharedTokenScore == 1.0) 0.92 else editScore * .8 + sharedTokenScore * .2)
+    }
+
+    private fun levenshteinSimilarity(left: String, right: String): Double {
+        if (left == right) return 1.0
+        if (left.isEmpty() || right.isEmpty()) return 0.0
+        var previous = IntArray(right.length + 1) { it }
+        for (leftIndex in left.indices) {
+            val current = IntArray(right.length + 1)
+            current[0] = leftIndex + 1
+            for (rightIndex in right.indices) {
+                current[rightIndex + 1] = minOf(
+                    current[rightIndex] + 1,
+                    previous[rightIndex + 1] + 1,
+                    previous[rightIndex] + if (left[leftIndex] == right[rightIndex]) 0 else 1
+                )
+            }
+            previous = current
+        }
+        return 1.0 - previous[right.length].toDouble() / maxOf(left.length, right.length)
+    }
+
+    private fun tokens(value: String): List<String> = Normalizer.normalize(value.trim(), Normalizer.Form.NFD)
+        .replace(Regex("\\p{M}+"), "")
+        .lowercase(Locale.ROOT)
+        .splitToSequence(Regex("[^a-z0-9]+"))
+        .filter { it.isNotBlank() }
+        .toList()
+
+    private fun JSONObject.stringValue(key: String): String? = when (val value = opt(key)) {
+        is String -> value.trim().takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+        else -> null
+    }
+}
+
 /** Read-only metadata supplement for Nuvio episodes. Nuvio remains the progress authority. */
 internal object TmdbApi {
     private const val baseUrl = "https://api.themoviedb.org/3"
-    private const val metadataCacheTtlMs = 15 * 60 * 1000L
-    private const val metadataCacheMaxEntries = 160
-    private val apiKey get() = BuildConfig.TMDB_API_KEY
-    private val metadataRequestLimit = Semaphore(4)
-    private data class CachedResponse(val value: String, val storedAtMs: Long)
-    private val responseCache = object : LinkedHashMap<String, CachedResponse>(32, .75f, true) {}
-    val isConfigured: Boolean get() = apiKey.isNotBlank()
-
-    fun enrichEpisodes(items: List<MediaItem>): List<MediaItem> {
-        if (apiKey.isBlank()) return items
-        return items.map { item -> try { enrichEpisodeBlocking(item) } catch (_: Exception) { item } }
-    }
+    private val apiKey get() = MetadataApiKeyAccess.tmdbApiKey()
 
     suspend fun enrichEpisodeDetails(item: MediaItem): MediaItem = withContext(Dispatchers.IO) {
-        if (apiKey.isBlank()) return@withContext item
-        try {
-            enrichEpisode(item)
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (_: Exception) {
-            item
+        enrichEpisodeDetailsResult(item).getOrDefault(item)
+    }
+
+    internal suspend fun enrichEpisodeDetailsResult(item: MediaItem): Result<MediaItem> = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) Result.failure(TmdbNotConfiguredException())
+        else tmdbCall { enrichEpisode(item) }
+    }
+
+    /**
+     * Resolves the stable IMDb identifier for an item without changing the item's provider id.
+     * TMDB ids already attached by Relay skip search; provider-owned items use the same
+     * high-confidence title matching as the rest of this API before external_ids is requested.
+     */
+    internal suspend fun externalMetadataFor(item: MediaItem): Result<TmdbExternalMetadata?> = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) return@withContext Result.failure(TmdbNotConfiguredException())
+        tmdbCall {
+            val isTv = item.contentType.lowercase(Locale.ROOT) in setOf("tv", "show", "series", "episode")
+            val mediaType = if (isTv) "tv" else "movie"
+            val attachedTmdbId = item.providerContentId
+                ?.trim()
+                ?.takeIf { it.startsWith("tmdb:", ignoreCase = true) }
+                ?.substringAfter(':')
+                ?.toIntOrNull()
+                ?.takeIf { it > 0 }
+            val matchedResult = if (attachedTmdbId == null) {
+                val query = (item.showTitle ?: item.title).trim()
+                if (query.isBlank()) return@tmdbCall null
+                val search = JSONObject(get("/search/$mediaType", mapOf("query" to query)))
+                val titleKeys = if (isTv) arrayOf("name", "original_name") else arrayOf("title", "original_title")
+                findTmdbTitleMatch(search.optJSONArray("results") ?: JSONArray(), query, *titleKeys)?.result
+            } else null
+            val tmdbId = attachedTmdbId ?: matchedResult
+                ?.optInt("id", -1)
+                ?.takeIf { it > 0 }
+            if (tmdbId == null) {
+                return@tmdbCall matchedResult?.let { TmdbExternalMetadata(null, it.tmdbRating()) }
+            }
+            TmdbExternalMetadata(
+                imdbId = parseImdbIdFromExternalIds(JSONObject(get("/$mediaType/$tmdbId/external_ids"))),
+                // A provider-owned MediaItem.rating is not TMDB's score. Only use it for items
+                // explicitly carrying a TMDB id, where TmdbApi created that value.
+                tmdbRating = if (attachedTmdbId != null) item.rating?.takeIf { it.isFinite() && it in 0.1..10.0 }
+                else matchedResult?.tmdbRating()
+            )
         }
     }
 
+    internal suspend fun imdbIdFor(item: MediaItem): Result<String?> =
+        externalMetadataFor(item).map { it?.imdbId }
+
+    internal fun parseImdbIdFromExternalIds(payload: JSONObject): String? = payload.optString("imdb_id")
+        .trim()
+        .takeIf { IMDb_ID_PATTERN.matches(it) }
+
     private fun tmdbArtwork(path: String?, size: String): String? = path
         ?.trim()
-        ?.takeIf { it.isNotEmpty() && !it.equals("null", ignoreCase = true) }
+        ?.takeIf { it.startsWith("/") && it.length > 1 && !it.equals("null", ignoreCase = true) }
         ?.let { "https://image.tmdb.org/t/p/$size$it" }
 
-    /** Searches TMDB for real movie and TV metadata; playback still hands off to the chosen provider. */
-    suspend fun search(query: String, provider: Provider): Result<List<MediaItem>> {
-        if (query.isBlank()) return Result.success(emptyList())
-        if (apiKey.isBlank()) return Result.failure(IllegalStateException("TMDB is not configured"))
-        return try {
-            val movies = JSONObject(getCancellable("/search/movie", mapOf("query" to query))).optJSONArray("results") ?: JSONArray()
-            val shows = JSONObject(getCancellable("/search/tv", mapOf("query" to query))).optJSONArray("results") ?: JSONArray()
+    /** Searches TMDB metadata for Nuvio, whose public handoff accepts these title identifiers. */
+    suspend fun search(query: String, provider: Provider): List<MediaItem> = withContext(Dispatchers.IO) {
+        searchResult(query, provider).getOrDefault(emptyList())
+    }
+
+    internal suspend fun searchResult(query: String, provider: Provider): Result<List<MediaItem>> = withContext(Dispatchers.IO) {
+        // TMDB results are metadata only. Relay has no supported Stremio catalog bridge and no
+        // YouTube id resolver, so presenting them as provider-owned cards would create invalid
+        // handoff targets. Those providers are searched through their own public handoff below.
+        if (apiKey.isBlank()) return@withContext Result.failure(TmdbNotConfiguredException())
+        if (query.isBlank() || provider != Provider.NUVIO) return@withContext Result.success(emptyList())
+        tmdbCall {
+            val movies = JSONObject(get("/search/movie", mapOf("query" to query))).optJSONArray("results") ?: JSONArray()
+            val shows = JSONObject(get("/search/tv", mapOf("query" to query))).optJSONArray("results") ?: JSONArray()
             fun map(values: JSONArray, type: String) = (0 until values.length()).mapNotNull { index ->
                 values.optJSONObject(index)?.let { result ->
-                    val title = result.optString(if (type == "movie") "title" else "name").trim().takeIf { it.isNotBlank() } ?: return@let null
+                    val titleKey = if (type == "movie") "title" else "name"
+                    val title = result.firstText(titleKey, if (type == "movie") "original_title" else "original_name")
+                        ?: return@let null
+                    val id = result.optInt("id", -1).takeIf { it > 0 } ?: return@let null
                     MediaItem(
                         title = title,
                         provider = provider,
                         progress = 0f,
                         colors = listOf(provider.accent.copy(alpha = .45f), Color(0xFF080A10)),
-                        artworkUrl = tmdbArtwork(result.optString("poster_path"), "w780").orEmpty(),
-                        providerContentId = "tmdb:${result.optInt("id")}",
+                        artworkUrl = tmdbArtwork(result.optString("poster_path"), "w780")
+                            ?: tmdbArtwork(result.optString("backdrop_path"), "w1280")
+                            ?: "",
+                        providerContentId = "tmdb:$id",
                         contentType = type,
-                        showTitle = if (type == "tv") title else null,
-                        description = result.optString("overview").ifBlank { null },
-                        releaseInfo = result.optString(if (type == "movie") "release_date" else "first_air_date").ifBlank { null },
-                        rating = result.optDouble("vote_average", 0.0).takeIf { it > 0 }
+                        showTitle = if (type == "series") title else null,
+                        description = result.firstText("overview"),
+                        releaseInfo = result.firstText(if (type == "movie") "release_date" else "first_air_date"),
+                        rating = result.tmdbRating(),
+                        genres = result.genreNames(type)
                     )
                 }
             }
-            // Keep same-name titles from different years: their TMDB IDs and dates make them
-            // distinct choices, and collapsing by title can hide the correct version.
-            Result.success((map(shows, "tv") + map(movies, "movie")).distinctBy { "${it.contentType}:${it.providerContentId}" }.take(20))
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: Exception) {
-            Result.failure(error)
+            (map(shows, "series") + map(movies, "movie")).distinctBy { "${it.contentType}:${it.title}" }.take(20)
         }
     }
 
-    /** Personalized TV recommendations seeded by exact titles in the active provider library. */
+    /** Personalized TV recommendations seeded by high-confidence titles in the active library. */
     suspend fun recommendations(items: List<MediaItem>): List<MediaItem> = withContext(Dispatchers.IO) {
-        if (apiKey.isBlank()) return@withContext emptyList()
-        // Three exact seeds already provide a full rail; avoid a burst of serial requests when
-        // Home opens on a TV with a slower connection.
-        items.filter { it.isTvSeries() }
-            .distinctBy { seriesDedupKey(it) }
-            .take(3)
-            .flatMap { item ->
-                try { recommendationsFor(item) }
-                catch (cancelled: CancellationException) { throw cancelled }
-                catch (_: Exception) { emptyList() }
+        recommendationsResult(items).getOrDefault(emptyList())
+    }
+
+    internal suspend fun recommendationsResult(items: List<MediaItem>): Result<List<MediaItem>> = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) return@withContext Result.failure(TmdbNotConfiguredException())
+        tmdbCall {
+            // Three seeds already provide a full rail; avoid a burst of serial requests when Home
+            // opens on a TV with a slower connection.
+            buildList {
+                for (item in items.take(3)) addAll(isolateTmdbItemFailure { recommendationsFor(item) }.orEmpty())
             }
-            .distinctBy { normalize(it.title) }
-            .take(18)
+                .distinctBy { TmdbTitleMatcher.normalize(it.title) }
+                .take(18)
+        }
     }
 
     private suspend fun recommendationsFor(source: MediaItem): List<MediaItem> {
-        val series = resolveTvSeries(source) ?: return emptyList()
-        val results = JSONObject(getCancellable("/tv/${series.getInt("id")}/recommendations")).optJSONArray("results") ?: JSONArray()
+        val queryTitle = source.showTitle ?: source.title
+        val search = JSONObject(get("/search/tv", mapOf("query" to queryTitle)))
+        val series = findTmdbTitleMatch(search.optJSONArray("results") ?: JSONArray(), queryTitle, "name", "original_name")?.result
+            ?: return emptyList()
+        val seriesId = series.optInt("id", -1).takeIf { it > 0 } ?: return emptyList()
+        val results = JSONObject(get("/tv/$seriesId/recommendations")).optJSONArray("results") ?: JSONArray()
         return (0 until minOf(results.length(), 8)).mapNotNull { index ->
             results.optJSONObject(index)?.let { show ->
-                val title = show.optString("name").trim().takeIf { it.isNotBlank() } ?: return@let null
+                val title = show.firstText("name", "original_name") ?: return@let null
+                val id = show.optInt("id", -1).takeIf { it > 0 } ?: return@let null
                 MediaItem(
                     title = title,
                     provider = source.provider,
                     progress = 0f,
                     colors = listOf(source.provider.accent.copy(alpha = .45f), Color(0xFF080A10)),
-                    artworkUrl = tmdbArtwork(show.optString("poster_path"), "w780").orEmpty(),
-                    providerContentId = "tmdb:${show.optInt("id")}",
-                    contentType = "tv",
+                    artworkUrl = tmdbArtwork(show.optString("poster_path"), "w780")
+                        ?: tmdbArtwork(show.optString("backdrop_path"), "w1280")
+                        ?: "",
+                    providerContentId = "tmdb:$id",
+                    contentType = "series",
                     showTitle = title,
-                    description = show.optString("overview").ifBlank { null },
-                    releaseInfo = show.optString("first_air_date").ifBlank { null },
-                    rating = show.optDouble("vote_average", 0.0).takeIf { it > 0 }
+                    description = show.firstText("overview"),
+                    releaseInfo = show.firstText("first_air_date"),
+                    rating = show.tmdbRating(),
+                    genres = show.genreNames("series")
                 )
             }
         }
     }
 
-    /** Next aired episodes for exact library matches, used by Relay's Home and Calendar views. */
+    /** Next aired episodes for high-confidence library matches, used by Relay's Home and Calendar views. */
     suspend fun upcomingEpisodes(items: List<MediaItem>): List<TmdbCalendarEntry> = withContext(Dispatchers.IO) {
-        if (apiKey.isBlank()) return@withContext emptyList()
-        val candidates = items.asSequence()
-            .filter { it.isTvSeries() }
-            .distinctBy { seriesDedupKey(it) }
-            .take(8)
-            .toList()
-        coroutineScope {
-            candidates.map { item ->
-                async {
-                    metadataRequestLimit.withPermit {
-                        try { upcomingEpisode(item) }
-                        catch (cancelled: CancellationException) { throw cancelled }
-                        catch (_: Exception) { null }
-                    }
+        upcomingEpisodesResult(items).getOrDefault(emptyList())
+    }
+
+    internal suspend fun upcomingEpisodesResult(items: List<MediaItem>): Result<List<TmdbCalendarEntry>> = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) return@withContext Result.failure(TmdbNotConfiguredException())
+        tmdbCall {
+            buildList {
+                for (item in upcomingEnrichmentItems(items)) {
+                    isolateTmdbItemFailure { upcomingEpisode(item) }?.let(::add)
                 }
-            }.awaitAll()
-        }.filterNotNull()
-            .distinctBy { "${it.date}:${it.item.providerContentId ?: normalize(it.item.title)}:${it.item.episodeInfo}" }
-            .sortedBy { it.date }
+            }
+                .distinctBy { "${it.date}:${it.item.providerContentId ?: TmdbTitleMatcher.normalize(it.item.title)}:${it.item.episodeInfo}" }
+                .sortedBy { it.date }
+        }
     }
 
     private suspend fun upcomingEpisode(item: MediaItem): TmdbCalendarEntry? {
-        val series = resolveTvSeries(item) ?: return null
-        val details = JSONObject(getCancellable("/tv/${series.getInt("id")}"))
+        val queryTitle = item.showTitle ?: item.title
+        val search = JSONObject(get("/search/tv", mapOf("query" to queryTitle)))
+        val series = findTmdbTitleMatch(search.optJSONArray("results") ?: JSONArray(), queryTitle, "name", "original_name")?.result
+            ?: return null
+        val seriesId = series.optInt("id", -1).takeIf { it > 0 } ?: return null
+        val details = JSONObject(get("/tv/$seriesId"))
         val episode = details.optJSONObject("next_episode_to_air") ?: return null
         val airDate = episode.optString("air_date").takeIf { it.isNotBlank() } ?: return null
-        val season = episode.optInt("season_number")
-        val number = episode.optInt("episode_number")
+        val season = episode.optInt("season_number").takeIf { it > 0 } ?: return null
+        val number = episode.optInt("episode_number").takeIf { it > 0 } ?: return null
         val episodeInfo = "S${season.toString().padStart(2, '0')} • E${number.toString().padStart(2, '0')}" +
             episode.optString("name").trim().takeIf { it.isNotBlank() }?.let { " • $it" }.orEmpty()
         val seriesArtwork = tmdbArtwork(details.optString("backdrop_path"), "w1280")
@@ -173,7 +393,7 @@ internal object TmdbApi {
         return TmdbCalendarEntry(
             LocalDate.parse(airDate),
             item.copy(
-                showTitle = series.optString("name"),
+                showTitle = series.firstText("name", "original_name"),
                 episodeInfo = episodeInfo,
                 description = episode.optString("overview").ifBlank { item.description },
                 releaseInfo = airDate,
@@ -183,52 +403,51 @@ internal object TmdbApi {
         )
     }
 
-    /** Supplies dated, exact-match TV metadata for Relay's calendar without changing provider progress. */
+    /** Supplies dated, high-confidence TV metadata without changing provider progress. */
     suspend fun calendarEntries(items: List<MediaItem>): List<TmdbCalendarEntry> = withContext(Dispatchers.IO) {
-        if (apiKey.isBlank()) return@withContext emptyList()
-        val candidates = items.asSequence()
-            .filter { it.isTvSeries() }
-            .distinctBy { seriesDedupKey(it) }
-            .take(16)
-            .toList()
-        coroutineScope {
-            candidates.map { item ->
-                async {
-                    metadataRequestLimit.withPermit {
-                        try { calendarEntry(item) }
-                        catch (cancelled: CancellationException) { throw cancelled }
-                        catch (_: Exception) { null }
-                    }
-                }
-            }.awaitAll()
-        }.filterNotNull()
+        calendarEntriesResult(items).getOrDefault(emptyList())
+    }
+
+    internal suspend fun calendarEntriesResult(items: List<MediaItem>): Result<List<TmdbCalendarEntry>> = withContext(Dispatchers.IO) {
+        if (apiKey.isBlank()) return@withContext Result.failure(TmdbNotConfiguredException())
+        tmdbCall {
+            buildList {
+                for (item in items) isolateTmdbItemFailure { calendarEntry(item) }?.let(::add)
+            }
+        }
     }
 
     private suspend fun calendarEntry(item: MediaItem): TmdbCalendarEntry? {
-        val series = resolveTvSeries(item) ?: return null
-        val seriesId = series.getInt("id")
-        val match = seasonEpisodePattern.find(item.episodeInfo.orEmpty())
+        val queryTitle = item.showTitle ?: item.title
+        val search = JSONObject(get("/search/tv", mapOf("query" to queryTitle)))
+        val series = findTmdbTitleMatch(search.optJSONArray("results") ?: JSONArray(), queryTitle, "name", "original_name")?.result
+            ?: return null
+        val seriesId = series.optInt("id", -1).takeIf { it > 0 } ?: return null
+        val match = Regex("(?i)S\\s*(\\d+)\\D{0,8}E\\s*(\\d+)").find(item.episodeInfo.orEmpty())
         if (match != null) {
-            val season = match.groupValues[1].toInt()
-            val episode = match.groupValues[2].toInt()
-            val details = JSONObject(getCancellable("/tv/$seriesId/season/$season/episode/$episode"))
+            val season = match.groupValues[1].toInt().takeIf { it > 0 } ?: return null
+            val episode = match.groupValues[2].toInt().takeIf { it > 0 } ?: return null
+            val details = JSONObject(get("/tv/$seriesId/season/$season/episode/$episode"))
             val airDate = details.optString("air_date").takeIf { it.isNotBlank() } ?: return null
             val episodeName = details.optString("name").trim()
             val currentEpisode = match.value + if (episodeName.isBlank()) "" else " • $episodeName"
-            return TmdbCalendarEntry(LocalDate.parse(airDate), item.copy(showTitle = series.optString("name"), episodeInfo = currentEpisode))
+            return TmdbCalendarEntry(LocalDate.parse(airDate), item.copy(showTitle = series.firstText("name", "original_name"), episodeInfo = currentEpisode))
         }
         val premiere = series.optString("first_air_date").takeIf { it.isNotBlank() } ?: return null
-        return TmdbCalendarEntry(LocalDate.parse(premiere), item.copy(showTitle = series.optString("name")))
+        return TmdbCalendarEntry(LocalDate.parse(premiere), item.copy(showTitle = series.firstText("name", "original_name")))
     }
 
-    /** Accurate season/episode choices for Relay's picker; never inferred from titles alone. */
+    /** Accurate season/episode choices for Relay's picker; never inferred without a confident title match. */
     suspend fun seasonEpisodes(item: MediaItem, season: Int): Result<TvSeason> = withContext(Dispatchers.IO) {
-        try {
-            check(apiKey.isNotBlank()) { "TMDB is not configured" }
-            val series = resolveTvSeries(item, contextSeason = season)
-                ?: error("No unambiguous matching TV series")
-            val seriesId = series.getInt("id")
-            val seriesDetails = JSONObject(getCancellable("/tv/$seriesId"))
+        if (apiKey.isBlank()) {
+            Result.failure(TmdbNotConfiguredException())
+        } else tmdbCall {
+            val queryTitle = item.showTitle ?: item.title
+            val search = JSONObject(get("/search/tv", mapOf("query" to queryTitle)))
+            val series = findTmdbTitleMatch(search.optJSONArray("results") ?: JSONArray(), queryTitle, "name", "original_name")?.result
+                ?: throw TmdbNoConfidentMatchException()
+            val seriesId = series.optInt("id", -1).takeIf { it > 0 } ?: error("TV series has no valid TMDB id")
+            val seriesDetails = JSONObject(get("/tv/$seriesId"))
             val seasons = (seriesDetails.optJSONArray("seasons") ?: JSONArray()).let { values ->
                 (0 until values.length()).mapNotNull { index ->
                     values.optJSONObject(index)?.optInt("season_number", -1)?.takeIf { it > 0 }
@@ -250,244 +469,159 @@ internal object TmdbApi {
         }
     }
 
-    private fun normalize(value: String): String = value.lowercase().replace(Regex("[^a-z0-9]"), "")
-
-    private val yearSuffix = Regex("\\s*(?:\\(((?:19|20)\\d{2})\\)|((?:19|20)\\d{2}))\\s*$")
-    private val seasonEpisodePattern = Regex("(?i)S\\s*(\\d+)\\s*[^\\w]{0,8}E\\s*(\\d+)")
-
-    private fun titleYear(title: String): String? = yearSuffix.find(title)?.let { it.groupValues[1].ifBlank { it.groupValues[2] } }
-
-    private fun cleanTitle(title: String): String = yearSuffix.replace(title, "").trim()
-
-    private fun tvResultMatchesTitle(result: JSONObject, title: String): Boolean {
-        val expected = normalize(cleanTitle(title))
-        if (expected.isBlank()) return false
-        return listOf(result.optString("name"), result.optString("original_name"))
-            .any { normalize(cleanTitle(it)) == expected }
-    }
-
-    private fun tvCandidates(results: JSONArray, title: String): List<JSONObject> =
-        (0 until results.length()).mapNotNull { results.optJSONObject(it) }
-            .filter { tvResultMatchesTitle(it, title) }
-
-    private fun tmdbTvId(item: MediaItem): Int? = item.providerContentId
-        ?.trim()
-        ?.let { Regex("(?i)^tmdb:(\\d+)$").matchEntire(it)?.groupValues?.get(1)?.toIntOrNull() }
-
-    private fun seriesDedupKey(item: MediaItem): String {
-        tmdbTvId(item)?.let { return "tmdb:$it" }
-        val title = item.showTitle?.takeIf { it.isNotBlank() } ?: item.title
-        return "${normalize(cleanTitle(title))}:${titleYear(title).orEmpty()}"
-    }
-
-    /**
-     * Resolve exact title matches conservatively. Duplicate names require an explicit year,
-     * TMDB ID, or season/episode evidence, so a popular but unrelated result is never attached.
-     */
-    private suspend fun resolveTvSeries(item: MediaItem, contextSeason: Int? = null): JSONObject? {
-        val itemTitle = item.showTitle?.takeIf { it.isNotBlank() } ?: item.title
-        tmdbTvId(item)?.let { id ->
-            val details = JSONObject(getCancellable("/tv/$id"))
-            return details.takeIf { it.optInt("id") == id && it.optString("name").isNotBlank() }
-        }
-        val response = JSONObject(getCancellable("/search/tv", mapOf("query" to cleanTitle(itemTitle))))
-        val matches = tvCandidates(response.optJSONArray("results") ?: JSONArray(), itemTitle)
-        if (matches.isEmpty()) return null
-        val explicitYear = titleYear(itemTitle)
-        val yearMatches = explicitYear?.let { year -> matches.filter { it.optString("first_air_date").startsWith(year) } }
-        if (explicitYear != null && yearMatches.isNullOrEmpty()) return null
-        val candidates = yearMatches ?: matches
-        if (candidates.size == 1) return candidates.single()
-        return disambiguateByEpisode(item, candidates, contextSeason)
-    }
-
-    private fun resolveTvSeriesBlocking(item: MediaItem, contextSeason: Int? = null): JSONObject? {
-        val itemTitle = item.showTitle?.takeIf { it.isNotBlank() } ?: item.title
-        tmdbTvId(item)?.let { id ->
-            val details = JSONObject(get("/tv/$id"))
-            return details.takeIf { it.optInt("id") == id && it.optString("name").isNotBlank() }
-        }
-        val response = JSONObject(get("/search/tv", mapOf("query" to cleanTitle(itemTitle))))
-        val matches = tvCandidates(response.optJSONArray("results") ?: JSONArray(), itemTitle)
-        if (matches.isEmpty()) return null
-        val explicitYear = titleYear(itemTitle)
-        val yearMatches = explicitYear?.let { year -> matches.filter { it.optString("first_air_date").startsWith(year) } }
-        if (explicitYear != null && yearMatches.isNullOrEmpty()) return null
-        val candidates = yearMatches ?: matches
-        if (candidates.size == 1) return candidates.single()
-        return disambiguateByEpisodeBlocking(item, candidates, contextSeason)
-    }
-
-    private fun episodeContext(item: MediaItem, contextSeason: Int?): Pair<Int, Int?>? {
-        val match = seasonEpisodePattern.find(item.episodeInfo.orEmpty())
-        val season = contextSeason ?: match?.groupValues?.get(1)?.toIntOrNull() ?: return null
-        return season to match?.groupValues?.get(2)?.toIntOrNull()
-    }
-
-    private suspend fun disambiguateByEpisode(
-        item: MediaItem,
-        candidates: List<JSONObject>,
-        contextSeason: Int?
-    ): JSONObject? {
-        val (season, episode) = episodeContext(item, contextSeason) ?: return null
-        val expectedDate = item.releaseInfo?.take(10)?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
-        val matches = candidates.take(8).filter { candidate ->
-            try {
-                val id = candidate.optInt("id")
-                if (id <= 0) return@filter false
-                val path = if (episode != null) "/tv/$id/season/$season/episode/$episode" else "/tv/$id/season/$season"
-                val context = JSONObject(getCancellable(path))
-                if (episode != null && context.optInt("episode_number", -1) != episode) return@filter false
-                if (expectedDate != null && context.optString("air_date") != expectedDate.toString()) return@filter false
-                true
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (_: Exception) {
-                false
-            }
-        }
-        return matches.singleOrNull()
-    }
-
-    private fun disambiguateByEpisodeBlocking(
-        item: MediaItem,
-        candidates: List<JSONObject>,
-        contextSeason: Int?
-    ): JSONObject? {
-        val (season, episode) = episodeContext(item, contextSeason) ?: return null
-        val expectedDate = item.releaseInfo?.take(10)?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
-        val matches = candidates.take(8).filter { candidate ->
-            try {
-                val id = candidate.optInt("id")
-                if (id <= 0) return@filter false
-                val path = if (episode != null) "/tv/$id/season/$season/episode/$episode" else "/tv/$id/season/$season"
-                val context = JSONObject(get(path))
-                if (episode != null && context.optInt("episode_number", -1) != episode) return@filter false
-                if (expectedDate != null && context.optString("air_date") != expectedDate.toString()) return@filter false
-                true
-            } catch (_: Exception) {
-                false
-            }
-        }
-        return matches.singleOrNull()
-    }
-
-    private fun MediaItem.isTvSeries(): Boolean =
-        contentType.lowercase() in setOf("tv", "show", "series", "episode") ||
-            Regex("(?i)S\\s*\\d+\\D{0,8}E\\s*\\d+").containsMatchIn(episodeInfo.orEmpty())
-
     private suspend fun enrichEpisode(item: MediaItem): MediaItem {
+        // Nuvio's sync payload does not include a TMDB series ID. Restrict enrichment to TV-like
+        // media and require a high-confidence title match before attaching episode metadata.
         if (item.contentType.lowercase() !in setOf("tv", "show", "series", "episode")) return item
-        val match = seasonEpisodePattern.find(item.episodeInfo ?: "") ?: return item
-        val season = match.groupValues[1].toInt()
-        val episode = match.groupValues[2].toInt()
-        val series = resolveTvSeries(item, contextSeason = season) ?: return item
-        val details = JSONObject(getCancellable("/tv/${series.getInt("id")}/season/$season/episode/$episode"))
-        return applyEpisodeDetails(item, series, details)
-    }
-
-    private fun enrichEpisodeBlocking(item: MediaItem): MediaItem {
-        if (item.contentType.lowercase() !in setOf("tv", "show", "series", "episode")) return item
-        val match = seasonEpisodePattern.find(item.episodeInfo ?: "") ?: return item
-        val season = match.groupValues[1].toInt()
-        val episode = match.groupValues[2].toInt()
-        val series = resolveTvSeriesBlocking(item, contextSeason = season) ?: return item
-        val details = JSONObject(get("/tv/${series.getInt("id")}/season/$season/episode/$episode"))
-        return applyEpisodeDetails(item, series, details)
-    }
-
-    private fun applyEpisodeDetails(item: MediaItem, series: JSONObject, details: JSONObject): MediaItem {
+        val match = Regex("(?i)S\\s*(\\d+)\\D{0,8}E\\s*(\\d+)").find(item.episodeInfo ?: "") ?: return item
+        val season = match.groupValues[1].toInt().takeIf { it > 0 } ?: return item
+        val episode = match.groupValues[2].toInt().takeIf { it > 0 } ?: return item
+        val search = JSONObject(get("/search/tv", mapOf("query" to (item.showTitle ?: item.title))))
+        val results = search.optJSONArray("results") ?: JSONArray()
+        val series = findTmdbTitleMatch(results, item.showTitle ?: item.title, "name", "original_name")?.result ?: return item
+        val seriesId = series.optInt("id", -1).takeIf { it > 0 } ?: return item
+        val details = JSONObject(get("/tv/$seriesId/season/$season/episode/$episode"))
         val episodeName = details.optString("name").trim()
         val image = tmdbArtwork(details.optString("still_path"), "w1280")
         return item.copy(
             title = episodeName.ifBlank { item.title },
-            showTitle = series.optString("name").ifBlank { item.showTitle },
-            description = details.optString("overview").ifBlank { item.description },
-            releaseInfo = details.optString("air_date").ifBlank { item.releaseInfo },
-            rating = details.optDouble("vote_average", 0.0).takeIf { it > 0 } ?: item.rating,
+            showTitle = series.firstText("name", "original_name") ?: item.showTitle,
+            description = details.firstText("overview") ?: item.description,
+            releaseInfo = details.firstText("air_date") ?: item.releaseInfo,
+            rating = details.tmdbRating() ?: item.rating,
             artworkUrl = image ?: item.artworkUrl
         )
     }
 
-    private fun cacheKey(path: String, query: Map<String, String>): String = path + "?" +
-        query.toSortedMap().entries.joinToString("&") {
-            "${URLEncoder.encode(it.key, "UTF-8")}=${URLEncoder.encode(it.value, "UTF-8")}"
-        }
+    private fun findTmdbTitleMatch(results: JSONArray, query: String, vararg titleKeys: String): TmdbTitleMatch? =
+        TmdbTitleMatcher.match(results, query, *titleKeys)
 
-    private fun cachedResponse(key: String): String? = synchronized(responseCache) {
-        val entry = responseCache[key] ?: return@synchronized null
-        if (System.currentTimeMillis() - entry.storedAtMs > metadataCacheTtlMs) {
-            responseCache.remove(key)
-            null
-        } else {
-            entry.value
-        }
-    }
+    internal fun upcomingEnrichmentItems(items: List<MediaItem>): List<MediaItem> =
+        items.take(MAX_UPCOMING_ENRICHMENT_ITEMS)
 
-    private fun cacheResponse(key: String, value: String) = synchronized(responseCache) {
-        responseCache[key] = CachedResponse(value, System.currentTimeMillis())
-        while (responseCache.size > metadataCacheMaxEntries) {
-            responseCache.remove(responseCache.keys.iterator().next())
-        }
-    }
+    private fun JSONObject.firstText(vararg keys: String): String? = keys
+        .asSequence()
+        .map { optString(it).trim() }
+        .firstOrNull { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
 
-    private fun get(path: String, query: Map<String, String> = emptyMap()): String =
-        getInternal(path, query, onConnection = {}, isCancelled = { false })
+    private fun JSONObject.tmdbRating(): Double? = optDouble("vote_average", Double.NaN)
+        .takeIf { it.isFinite() && it in 0.1..10.0 }
 
-    /** Disconnects an in-flight blocking HTTP request when its coroutine is cancelled. */
-    private suspend fun getCancellable(path: String, query: Map<String, String> = emptyMap()): String =
-        suspendCancellableCoroutine { continuation ->
-            val activeConnection = AtomicReference<HttpURLConnection?>()
-            continuation.invokeOnCancellation { activeConnection.getAndSet(null)?.disconnect() }
-            Dispatchers.IO.dispatch(continuation.context) {
-                if (!continuation.isActive) return@dispatch
-                try {
-                    val body = getInternal(
-                        path,
-                        query,
-                        onConnection = { connection ->
-                            activeConnection.set(connection)
-                            if (!continuation.isActive) connection?.disconnect()
-                        },
-                        isCancelled = { !continuation.isActive }
-                    )
-                    if (continuation.isActive) continuation.resume(body)
-                } catch (error: Throwable) {
-                    if (continuation.isActive) continuation.resumeWithException(error)
+    private fun JSONObject.genreNames(type: String): String? {
+        val names = (optJSONArray("genre_ids") ?: JSONArray())
+            .let { ids ->
+                (0 until ids.length()).mapNotNull { index ->
+                    val id = ids.optInt(index, -1)
+                    (if (type == "movie") movieGenres else tvGenres)[id]
                 }
             }
-        }
+        return names.distinct().takeIf { it.isNotEmpty() }?.joinToString(", ")
+    }
 
-    private fun getInternal(
-        path: String,
-        query: Map<String, String>,
-        onConnection: (HttpURLConnection?) -> Unit,
-        isCancelled: () -> Boolean
-    ): String {
-        val key = cacheKey(path, query)
-        cachedResponse(key)?.let { return it }
-        if (isCancelled()) throw CancellationException("TMDB request cancelled")
+    private val IMDb_ID_PATTERN = Regex("tt\\d{5,12}")
+
+    private suspend fun get(path: String, query: Map<String, String> = emptyMap()): String {
         val params = (query + ("api_key" to apiKey)).entries.joinToString("&") {
             "${URLEncoder.encode(it.key, "UTF-8")}=${URLEncoder.encode(it.value, "UTF-8")}"
         }
-        val connection = (URL("$baseUrl$path?$params").openConnection() as HttpURLConnection).apply {
-            requestMethod = "GET"
-            connectTimeout = 8_000
-            readTimeout = 8_000
-        }
-        onConnection(connection)
-        try {
-            if (isCancelled()) throw CancellationException("TMDB request cancelled")
-            val status = connection.responseCode
-            val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-            val body = stream?.bufferedReader(Charsets.UTF_8)?.use { it.readText() }.orEmpty()
-            check(status in 200..299) { "TMDB metadata lookup failed" }
-            if (!isCancelled()) cacheResponse(key, body)
-            if (isCancelled()) throw CancellationException("TMDB request cancelled")
-            return body
-        } finally {
-            onConnection(null)
-            connection.disconnect()
+        return requestWithRetry(path, request = {
+            val connection = (URL("$baseUrl$path?$params").openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"
+                connectTimeout = REQUEST_TIMEOUT_MS
+                readTimeout = REQUEST_TIMEOUT_MS
+            }
+            try {
+                val status = connection.responseCode
+                if (connection.contentLengthLong > MAX_HTTP_RESPONSE_BYTES) throw TmdbResponseTooLargeException()
+                val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+                val body = stream?.use {
+                    readResponseBodyAtMost(it, MAX_HTTP_RESPONSE_BYTES) { TmdbResponseTooLargeException() }
+                }.orEmpty()
+                TmdbHttpResponse(status, body)
+            } finally {
+                connection.disconnect()
+            }
+        })
+    }
+
+    private suspend fun requestWithRetry(
+        operation: String,
+        request: () -> TmdbHttpResponse,
+        sleeper: suspend (Long) -> Unit = { delay(it) }
+    ): String {
+        var attempt = 1
+        while (true) {
+            try {
+                val response = request()
+                if (response.statusCode in TRANSIENT_HTTP_STATUSES) {
+                    if (attempt >= MAX_REQUEST_ATTEMPTS) throw TmdbTransientException(operation, attempt, response.statusCode)
+                } else {
+                    if (response.statusCode !in 200..299) throw TmdbHttpException(response.statusCode)
+                    return response.body
+                }
+            } catch (known: TmdbApiException) {
+                throw known
+            } catch (network: IOException) {
+                if (!network.isTransientNetwork() || attempt >= MAX_REQUEST_ATTEMPTS) {
+                    if (network.isTransientNetwork()) throw TmdbTransientException(operation, attempt, cause = network)
+                    throw network
+                }
+            }
+            sleeper(retryDelayMs(attempt))
+            attempt += 1
         }
     }
+
+    /** The test seam exercises the same retry loop without making a real network request. */
+    internal suspend fun requestWithRetryForTesting(
+        request: () -> TmdbHttpResponse,
+        sleeper: suspend (Long) -> Unit
+    ): Result<String> = tmdbCall { requestWithRetry("test", request, sleeper) }
+
+    private suspend inline fun <T> tmdbCall(crossinline block: suspend () -> T): Result<T> = try {
+        Result.success(block())
+    } catch (cancelled: CancellationException) {
+        throw cancelled
+    } catch (known: TmdbApiException) {
+        Result.failure(known)
+    } catch (unexpected: Exception) {
+        Result.failure(TmdbApiException("TMDB returned an invalid metadata response.", unexpected))
+    }
+
+    private fun Throwable.isTransientNetwork(): Boolean = this is SocketTimeoutException ||
+        this is ConnectException ||
+        this is SocketException ||
+        this is UnknownHostException ||
+        this is NoRouteToHostException ||
+        this is InterruptedIOException
+
+    private fun retryDelayMs(attempt: Int): Long = RETRY_BASE_DELAY_MS * (1L shl (attempt - 1).coerceAtMost(4))
+
+    private val movieGenres = mapOf(
+        28 to "Action", 12 to "Adventure", 16 to "Animation", 35 to "Comedy", 80 to "Crime",
+        99 to "Documentary", 18 to "Drama", 10751 to "Family", 14 to "Fantasy", 36 to "History",
+        27 to "Horror", 10402 to "Music", 9648 to "Mystery", 10749 to "Romance", 878 to "Science Fiction",
+        10770 to "TV Movie", 53 to "Thriller", 10752 to "War", 37 to "Western"
+    )
+    private val tvGenres = mapOf(
+        10759 to "Action & Adventure", 16 to "Animation", 35 to "Comedy", 80 to "Crime", 99 to "Documentary",
+        18 to "Drama", 10751 to "Family", 10762 to "Kids", 9648 to "Mystery", 10763 to "News",
+        10764 to "Reality", 10765 to "Sci-Fi & Fantasy", 10766 to "Soap", 10767 to "Talk", 10768 to "War & Politics",
+        37 to "Western"
+    )
+}
+
+private const val REQUEST_TIMEOUT_MS = 8_000
+private const val MAX_REQUEST_ATTEMPTS = 3
+private const val RETRY_BASE_DELAY_MS = 300L
+// One Home/Calendar rail does not need the full sync page; this bounds serial TMDB fan-out.
+private const val MAX_UPCOMING_ENRICHMENT_ITEMS = 24
+private val TRANSIENT_HTTP_STATUSES = setOf(408, 425, 429, 500, 502, 503, 504)
+
+internal suspend inline fun <T> isolateTmdbItemFailure(crossinline block: suspend () -> T): T? = try {
+    block()
+} catch (cancelled: CancellationException) {
+    throw cancelled
+} catch (_: Exception) {
+    null
 }

@@ -2,10 +2,16 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="com.relaytube.stable.ACCESS_VIDEO_DATA" />
+    <uses-permission android:name="com.relaytube.beta.ACCESS_VIDEO_DATA" />
+    <uses-permission android:name="com.relaytube.fdroid.ACCESS_VIDEO_DATA" />
     <uses-feature android:name="android.software.leanback" android:required="false" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
 
     <queries>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.HOME" />
+        </intent>
         <intent>
             <action android:name="android.intent.action.MAIN" />
             <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
@@ -20,9 +26,12 @@
         <package android:name="com.nuvio.tv" />
         <package android:name="com.stremio.one" />
         <package android:name="com.relaytube.stable" />
+        <package android:name="com.relaytube.beta" />
+        <package android:name="com.relaytube.fdroid" />
         <package android:name="app.smarttube.stable" />
         <package android:name="org.smarttube.stable" />
         <package android:name="org.smarttube.beta" />
+        <package android:name="moe.shizuku.privileged.api" />
     </queries>
 
     <application
@@ -30,6 +39,7 @@
         android:banner="@drawable/tv_banner"
         android:icon="@mipmap/ic_launcher"
         android:label="Relay Home"
+        android:name=".RelayHomeApplication"
         android:supportsRtl="true"
         android:theme="@style/Theme.RelayHome">
         <provider
@@ -68,6 +78,28 @@
                 <action android:name="com.relaytube.action.PROFILES" />
             </intent-filter>
         </receiver>
+        <receiver
+            android:name=".RelayTubePlaybackReceiverBeta"
+            android:exported="true"
+            android:permission="com.relaytube.beta.ACCESS_VIDEO_DATA">
+            <intent-filter>
+                <action android:name="com.relaytube.action.PLAYBACK" />
+                <action android:name="com.relaytube.action.SUBSCRIPTIONS" />
+                <action android:name="com.relaytube.action.CONTINUE_WATCHING" />
+                <action android:name="com.relaytube.action.PROFILES" />
+            </intent-filter>
+        </receiver>
+        <receiver
+            android:name=".RelayTubePlaybackReceiverFdroid"
+            android:exported="true"
+            android:permission="com.relaytube.fdroid.ACCESS_VIDEO_DATA">
+            <intent-filter>
+                <action android:name="com.relaytube.action.PLAYBACK" />
+                <action android:name="com.relaytube.action.SUBSCRIPTIONS" />
+                <action android:name="com.relaytube.action.CONTINUE_WATCHING" />
+                <action android:name="com.relaytube.action.PROFILES" />
+            </intent-filter>
+        </receiver>
         <service
             android:name=".RelayAutoStartService"
             android:label="Relay Home auto-start"
@@ -88,7 +120,7 @@
             android:clearTaskOnLaunch="true"
             android:excludeFromRecents="true"
             android:resizeableActivity="true">
-            <intent-filter>
+            <intent-filter android:priority="3">
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.HOME" />
                 <category android:name="android.intent.category.DEFAULT" />

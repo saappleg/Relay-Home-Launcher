@@ -1,0 +1,258 @@
+#!/bin/sh
+
+set -eu
+
+# android-emulator-runner invokes its script input one line at a time. This
+# helper is intentionally called as a single line from the workflow so the
+# control flow below is parsed by a real shell as one complete script.
+serial="${ANDROID_SERIAL:-emulator-5554}"
+
+boot_started="$(date +%s)"
+boot_deadline=$((boot_started + 120))
+now="$(date +%s)"
+while [ "$now" -lt "$boot_deadline" ]; do
+  state="$(adb -s "$serial" get-state 2>/dev/null | tr -d '\r' || true)"
+  boot_completed="$(adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
+  boot_complete_prop="$(adb -s "$serial" shell getprop dev.bootcomplete 2>/dev/null | tr -d '\r' || true)"
+  printf 'Emulator readiness: state=%s sys.boot_completed=%s dev.bootcomplete=%s\n' \
+    "${state:-unavailable}" "${boot_completed:-unset}" "${boot_complete_prop:-unset}"
+  if [ "$state" = "device" ]; then
+    if [ "$boot_completed" = "1" ] || [ "$boot_complete_prop" = "1" ]; then
+      break
+    fi
+  fi
+  sleep 2
+  now="$(date +%s)"
+done
+
+state="$(adb -s "$serial" get-state 2>/dev/null | tr -d '\r' || true)"
+boot_completed="$(adb -s "$serial" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' || true)"
+boot_complete_prop="$(adb -s "$serial" shell getprop dev.bootcomplete 2>/dev/null | tr -d '\r' || true)"
+if [ "$state" != "device" ] || {
+  [ "$boot_completed" != "1" ] && [ "$boot_complete_prop" != "1" ];
+}; then
+  echo "Emulator did not reach a usable ADB state within 120 seconds." >&2
+  adb devices -l || true
+  adb -s "$serial" get-state || true
+  adb -s "$serial" shell getprop sys.boot_completed || true
+  adb -s "$serial" shell getprop dev.bootcomplete || true
+  exit 1
+fi
+
+# Pixel 2's default profile is portrait and exposes phone system bars. Keep
+# rotation locked at zero because the launch skin is already landscape, force
+# the logical display size/density, and apply the same immersive policy used by
+# a fullscreen TV surface. The instrumentation Compose activity comes from the
+# test harness (not the app theme), so the policy must be applied globally
+# before connectedCheck creates that activity.
+adb -s "$serial" shell settings put system accelerometer_rotation 0
+adb -s "$serial" shell settings put system user_rotation 0
+adb -s "$serial" shell cmd window user-rotation lock 0 >/dev/null 2>&1 || true
+adb -s "$serial" shell settings put secure immersive_mode_confirmations confirmed
+adb -s "$serial" shell settings put global policy_control 'immersive.full=*'
+adb -s "$serial" shell wm size 1920x1080
+adb -s "$serial" shell wm density 320
+geometry_started="$(date +%s)"
+geometry_deadline=$((geometry_started + 45))
+now="$(date +%s)"
+physical_size=""
+logical_size=""
+display_size=""
+wm_size=""
+wm_density=""
+physical_density=""
+override_density=""
+effective_density=""
+window_display_size=""
+non_decor_insets=""
+config_insets=""
+status_bars_visible=""
+navigation_bars_visible=""
+policy_control=""
+decor_line=""
+window_dump=""
+while [ "$now" -lt "$geometry_deadline" ]; do
+  wm_size="$(adb -s "$serial" shell wm size 2>/dev/null | tr -d '\r' || true)"
+  physical_size="$(printf '%s\n' "$wm_size" | sed -n 's/^[[:space:]]*Physical size:[[:space:]]*//p' | tail -1)"
+  logical_size="$(printf '%s\n' "$wm_size" | sed -n 's/^[[:space:]]*Override size:[[:space:]]*//p' | tail -1)"
+  if [ -z "$logical_size" ]; then
+    logical_size="$physical_size"
+  fi
+  wm_density="$(adb -s "$serial" shell wm density 2>/dev/null | tr -d '\r' || true)"
+  physical_density="$(printf '%s\n' "$wm_density" | sed -n 's/^[[:space:]]*Physical density:[[:space:]]*//p' | tail -1)"
+  override_density="$(printf '%s\n' "$wm_density" | sed -n 's/^[[:space:]]*Override density:[[:space:]]*//p' | tail -1)"
+  effective_density="$override_density"
+  if [ -z "$effective_density" ]; then
+    effective_density="$physical_density"
+  fi
+  display_dump="$(adb -s "$serial" shell dumpsys display 2>/dev/null | tr -d '\r' || true)"
+  display_size="$(printf '%s\n' "$display_dump" | sed -n \
+    -e 's/.*real \([0-9][0-9]*\) x \([0-9][0-9]*\).*/\1x\2/p' \
+    -e 's/.*DisplayDeviceInfo{[^,]*, \([0-9][0-9]*\) x \([0-9][0-9]*\),.*/\1x\2/p' | head -1)"
+  printf 'Emulator display geometry: physical=%s logical=%s display=%s density=%s (physical=%s override=%s)\n' \
+    "${physical_size:-unavailable}" "${logical_size:-unavailable}" "${display_size:-unavailable}" \
+    "${effective_density:-unavailable}" "${physical_density:-unavailable}" "${override_density:-none}"
+  if [ "$physical_size" = "1920x1080" ] && [ "$logical_size" = "1920x1080" ] \
+    && [ "$display_size" = "1920x1080" ] && [ "$effective_density" = "320" ]; then
+    break
+  fi
+  adb -s "$serial" shell wm size 1920x1080 || true
+  adb -s "$serial" shell wm density 320 || true
+  sleep 2
+  now="$(date +%s)"
+done
+
+printf 'Final emulator wm size:\n%s\n' "$wm_size"
+printf 'Final emulator wm density:\n%s\n' "$wm_density"
+if [ "$physical_size" != "1920x1080" ] || [ "$logical_size" != "1920x1080" ] \
+  || [ "$display_size" != "1920x1080" ] || [ "$effective_density" != "320" ]; then
+  echo "Expected a 1920x1080 physical/logical/display surface at effective density 320." >&2
+  adb devices -l || true
+  adb -s "$serial" shell wm size || true
+  adb -s "$serial" shell wm density || true
+  adb -s "$serial" shell dumpsys display | tail -120 || true
+  adb -s "$serial" shell dumpsys window displays | tail -80 || true
+  exit 1
+fi
+
+# Confirm that the system bars are actually hidden and that the window policy
+# gives the test activity the full display. A matching wm size alone is not
+# sufficient: a phone AVD can report 1920x1080 while reserving top/bottom
+# insets for status/navigation bars, which changes Compose focus and layout.
+fullscreen_started="$(date +%s)"
+fullscreen_deadline=$((fullscreen_started + 30))
+now="$(date +%s)"
+window_display_size=""
+non_decor_insets=""
+config_insets=""
+status_bars_visible=""
+navigation_bars_visible=""
+policy_control=""
+decor_line=""
+window_dump=""
+while [ "$now" -lt "$fullscreen_deadline" ]; do
+  policy_control="$(adb -s "$serial" shell settings get global policy_control 2>/dev/null | tr -d '\r' || true)"
+  window_dump="$(adb -s "$serial" shell dumpsys window displays 2>/dev/null | tr -d '\r' || true)"
+  window_display_size="$(printf '%s\n' "$window_dump" | sed -n \
+    's/.*mDisplayFrame=Rect(0, 0 - \([0-9][0-9]*\), \([0-9][0-9]*\)).*/\1x\2/p' | head -1)"
+  decor_line="$(printf '%s\n' "$window_dump" | grep -m 1 'ROTATION_0=' || true)"
+  non_decor_insets="$(printf '%s\n' "$decor_line" | sed -n \
+    's/.*nonDecorInsets=\(\[[^]]*\]\[[^]]*\]\).*/\1/p')"
+  config_insets="$(printf '%s\n' "$decor_line" | sed -n \
+    's/.*configInsets=\(\[[^]]*\]\[[^]]*\]\).*/\1/p')"
+  status_line="$(printf '%s\n' "$window_dump" | grep -m 1 'type=statusBars' || true)"
+  navigation_line="$(printf '%s\n' "$window_dump" | grep -m 1 'type=navigationBars' || true)"
+  if [ -n "$status_line" ]; then
+    status_bars_visible="$(printf '%s\n' "$status_line" | sed -n \
+      's/.*visible=\([^[:space:]]*\).*/\1/p')"
+  else
+    status_bars_visible="none"
+  fi
+  if [ -n "$navigation_line" ]; then
+    navigation_bars_visible="$(printf '%s\n' "$navigation_line" | sed -n \
+      's/.*visible=\([^[:space:]]*\).*/\1/p')"
+  else
+    navigation_bars_visible="none"
+  fi
+  printf 'Emulator fullscreen state: policy_control=%s displayFrame=%s nonDecorInsets=%s configInsets=%s statusBarsVisible=%s navigationBarsVisible=%s\n' \
+    "${policy_control:-unavailable}" "${window_display_size:-unavailable}" \
+    "${non_decor_insets:-unavailable}" "${config_insets:-unavailable}" \
+    "${status_bars_visible:-unavailable}" "${navigation_bars_visible:-unavailable}"
+  if [ "$policy_control" = "immersive.full=*" ] \
+    && [ "$window_display_size" = "1920x1080" ] \
+    && [ "$non_decor_insets" = "[0,0][0,0]" ] \
+    && [ "$config_insets" = "[0,0][0,0]" ] \
+    && { [ "$status_bars_visible" = "false" ] || [ "$status_bars_visible" = "none" ]; } \
+    && { [ "$navigation_bars_visible" = "false" ] || [ "$navigation_bars_visible" = "none" ]; }; then
+    break
+  fi
+  adb -s "$serial" shell settings put secure immersive_mode_confirmations confirmed
+  adb -s "$serial" shell settings put global policy_control 'immersive.full=*'
+  sleep 2
+  now="$(date +%s)"
+done
+
+if [ "$policy_control" != "immersive.full=*" ] \
+  || [ "$window_display_size" != "1920x1080" ] \
+  || [ "$non_decor_insets" != "[0,0][0,0]" ] \
+  || [ "$config_insets" != "[0,0][0,0]" ] \
+  || { [ "$status_bars_visible" != "false" ] && [ "$status_bars_visible" != "none" ]; } \
+  || { [ "$navigation_bars_visible" != "false" ] && [ "$navigation_bars_visible" != "none" ]; }; then
+  echo "Hosted emulator did not expose a fullscreen 1920x1080 test window." >&2
+  echo "Expected immersive.full=*, zero display-policy insets, and hidden/absent status/navigation bars." >&2
+  printf 'Observed policy_control=%s displayFrame=%s nonDecorInsets=%s configInsets=%s statusBarsVisible=%s navigationBarsVisible=%s\n' \
+    "${policy_control:-unavailable}" "${window_display_size:-unavailable}" \
+    "${non_decor_insets:-unavailable}" "${config_insets:-unavailable}" \
+    "${status_bars_visible:-unavailable}" "${navigation_bars_visible:-unavailable}" >&2
+  adb devices -l || true
+  adb -s "$serial" shell settings get global policy_control || true
+  adb -s "$serial" shell settings get secure immersive_mode_confirmations || true
+  adb -s "$serial" shell dumpsys window displays | grep -E \
+    'mDisplayFrame|mContent|mStable|ROTATION_0=|nonDecorInsets|configInsets|type=(statusBars|navigationBars)' | tail -120 || true
+  adb -s "$serial" shell dumpsys window policy | tail -160 || true
+  adb -s "$serial" shell dumpsys statusbar | tail -120 || true
+  exit 1
+fi
+
+printf 'Verified fullscreen emulator window: displayFrame=%s nonDecorInsets=%s configInsets=%s statusBarsVisible=%s navigationBarsVisible=%s\n' \
+  "$window_display_size" "$non_decor_insets" "$config_insets" "$status_bars_visible" "$navigation_bars_visible"
+
+# Keep a live record of the actual instrumentation window. The action stops
+# or loses the emulator before its following diagnostic step can inspect it,
+# so post-failure dumps alone cannot prove whether the test activity inherited
+# the TV fullscreen policy.
+monitor_window_state() {
+  last_signature=""
+  while kill -0 "$gradle_pid" 2>/dev/null; do
+    current_focus="$(adb -s "$serial" shell dumpsys window 2>/dev/null | grep -m 1 -E 'mCurrentFocus=|mFocusedApp=' | tr '\n' ' ' || true)"
+    current_dump="$(adb -s "$serial" shell dumpsys window displays 2>/dev/null | tr -d '\r' || true)"
+    current_display_size="$(printf '%s\n' "$current_dump" | sed -n \
+      's/.*mDisplayFrame=Rect(0, 0 - \([0-9][0-9]*\), \([0-9][0-9]*\)).*/\1x\2/p' | head -1)"
+    current_decor_line="$(printf '%s\n' "$current_dump" | grep -m 1 'ROTATION_0=' || true)"
+    current_non_decor="$(printf '%s\n' "$current_decor_line" | sed -n \
+      's/.*nonDecorInsets=\(\[[^]]*\]\[[^]]*\]\).*/\1/p')"
+    current_config="$(printf '%s\n' "$current_decor_line" | sed -n \
+      's/.*configInsets=\(\[[^]]*\]\[[^]]*\]\).*/\1/p')"
+    current_status_line="$(printf '%s\n' "$current_dump" | grep -m 1 'type=statusBars' || true)"
+    current_navigation_line="$(printf '%s\n' "$current_dump" | grep -m 1 'type=navigationBars' || true)"
+    if [ -n "$current_status_line" ]; then
+      current_status="$(printf '%s\n' "$current_status_line" | sed -n \
+        's/.*visible=\([^[:space:]]*\).*/\1/p')"
+    else
+      current_status="none"
+    fi
+    if [ -n "$current_navigation_line" ]; then
+      current_navigation="$(printf '%s\n' "$current_navigation_line" | sed -n \
+        's/.*visible=\([^[:space:]]*\).*/\1/p')"
+    else
+      current_navigation="none"
+    fi
+    current_signature="$current_focus|$current_display_size|$current_non_decor|$current_config|$current_status|$current_navigation"
+    if [ "$current_signature" != "$last_signature" ]; then
+      printf 'Runtime window state: focus=%s displayFrame=%s nonDecorInsets=%s configInsets=%s statusBarsVisible=%s navigationBarsVisible=%s\n' \
+        "${current_focus:-unavailable}" "${current_display_size:-unavailable}" \
+        "${current_non_decor:-unavailable}" "${current_config:-unavailable}" \
+        "${current_status:-unavailable}" "${current_navigation:-unavailable}"
+      printf '%s\n' "$current_dump" | grep -E \
+        'mDisplayFrame|ROTATION_0=|type=(statusBars|navigationBars)' | head -40 || true
+      last_signature="$current_signature"
+    fi
+    sleep 2
+  done
+}
+
+set +e
+./gradlew :app:connectedCheck --stacktrace --console=plain &
+gradle_pid=$!
+monitor_window_state &
+monitor_pid=$!
+wait "$gradle_pid"
+gradle_status=$?
+kill "$monitor_pid" 2>/dev/null || true
+wait "$monitor_pid" 2>/dev/null || true
+set -e
+
+if [ "$gradle_status" -ne 0 ]; then
+  echo "connectedCheck failed with status $gradle_status; preserving that failure." >&2
+fi
+exit "$gradle_status"

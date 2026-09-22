@@ -8,10 +8,11 @@ on:
         required: true
         type: choice
         options:
+          - alpha
           - beta
           - stable
       version_name:
-        description: Version name (for example 0.1.0-beta.2)
+        description: Version name (for example 0.1.0-alpha.1)
         required: true
         type: string
       version_code:
@@ -26,12 +27,28 @@ on:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     permissions:
       contents: write
 
     steps:
       - name: Check out Relay Home
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Verify checked out source and test revision
+        run: |
+          set -euo pipefail
+          checkout_sha="$(git rev-parse HEAD)"
+          test "$checkout_sha" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+          test -f app/src/androidTest/java/com/relayhome/launcher/ComposeTestSynchronization.kt
+          printf 'Release gate checkout: %s\n' "$checkout_sha"
+          git log -1 --oneline
+
+      - name: Validate Gradle Wrapper
+        uses: gradle/actions/wrapper-validation@v6
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -45,19 +62,188 @@ jobs:
         with:
           packages: platform-tools
 
+      - name: Enable KVM for hosted emulator
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          test -e /dev/kvm
+          stat -c 'KVM device: %n (%a)' /dev/kvm
+
       - name: Validate release inputs
         env:
           CHANNEL: ${{ inputs.channel }}
           VERSION_CODE: ${{ inputs.version_code }}
           VERSION_NAME: ${{ inputs.version_name }}
         run: |
-          test "$VERSION_CODE" -gt 2
-          case "$VERSION_NAME" in
-            *[!0-9A-Za-z._-]*) exit 1 ;;
+          set -euo pipefail
+          [[ "$VERSION_CODE" =~ ^[1-9][0-9]{0,9}$ ]]
+          (( VERSION_CODE <= 2100000000 ))
+          case "$CHANNEL" in
+            alpha)
+              [[ "$VERSION_NAME" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-alpha\.([1-9][0-9]*)$ ]]
+              ;;
+            beta)
+              [[ "$VERSION_NAME" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-beta\.([1-9][0-9]*)$ ]]
+              ;;
+            stable)
+              [[ "$VERSION_NAME" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+              ;;
+            *)
+              echo "Unsupported release channel: $CHANNEL" >&2
+              exit 1
+              ;;
           esac
-          if [ "$CHANNEL" = "beta" ]; then
-            case "$VERSION_NAME" in *-beta.*) ;; *) exit 1 ;; esac
-          fi
+
+      - name: Validate version code against published APKs
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION_CODE: ${{ inputs.version_code }}
+        run: |
+          set -euo pipefail
+          AAPT2="$(find "$ANDROID_HOME/build-tools" -name aapt2 -type f -perm -111 | sort -V | tail -1)"
+          test -x "$AAPT2"
+          URLS_FILE="$RUNNER_TEMP/relay-published-apk-urls.txt"
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+            --jq '.[] | select(.draft == false) | .assets[]? | select((.name // "" | ascii_downcase | endswith(".apk")) and ((.browser_download_url // "") | startswith("https://"))) | .browser_download_url' \
+            > "$URLS_FILE"
+          highest_code=0
+          while IFS= read -r asset_url; do
+            [[ -n "$asset_url" ]] || continue
+            case "$asset_url" in
+              "https://github.com/${GITHUB_REPOSITORY}/releases/download/"*) ;;
+              *)
+                echo "Previously published APK has an unexpected GitHub asset URL: $asset_url" >&2
+                exit 1
+                ;;
+            esac
+            asset_file="$RUNNER_TEMP/relay-published-$RANDOM.apk"
+            if ! effective_url="$(curl --fail --location --silent --show-error --connect-timeout 15 --max-time 120 \
+              --max-redirs 5 --proto '=https' --proto-redir '=https' --max-filesize 209715200 \
+              --write-out '%{url_effective}' --output "$asset_file" "$asset_url")"; then
+              echo "Could not inspect previously published APK $asset_url; refusing to prove version monotonicity." >&2
+              exit 1
+            fi
+            case "$effective_url" in
+              "https://github.com/${GITHUB_REPOSITORY}/releases/download/"*|\
+              https://objects.githubusercontent.com/*|https://*.githubusercontent.com/*) ;;
+              *)
+                echo "Previously published APK redirected to an unexpected host: $effective_url" >&2
+                exit 1
+                ;;
+            esac
+            asset_size="$(wc -c < "$asset_file")"
+            (( asset_size >= 262144 && asset_size <= 209715200 )) || {
+              echo "Previously published APK has an invalid size: $asset_url" >&2
+              exit 1
+            }
+            badging="$("$AAPT2" dump badging "$asset_file" 2>/dev/null || true)"
+            package_line="$(printf '%s\n' "$badging" | grep -F "package: name='com.relayhome.launcher' " || true)"
+            [[ -n "$package_line" ]] || {
+              echo "Previously published APK is not a valid Relay Home APK: $asset_url" >&2
+              exit 1
+            }
+            code="$(printf '%s\n' "$badging" | sed -n "s/.*versionCode=['\"]\\([0-9][0-9]*\\)['\"].*/\\1/p" | head -1)"
+            [[ "$code" =~ ^[0-9]+$ ]] || {
+              echo "Could not read versionCode from previously published APK: $asset_url" >&2
+              exit 1
+            }
+            if (( code > highest_code )); then highest_code="$code"; fi
+            rm -f "$asset_file"
+          done < "$URLS_FILE"
+          (( VERSION_CODE > highest_code )) || {
+            echo "Version code $VERSION_CODE must be greater than published APK version code $highest_code." >&2
+            exit 1
+          }
+
+      - name: Run emulator instrumentation suite
+        # Keep release validation on the same emulator path as the normal CI connected suite.
+        # app/build.gradle.kts refuses physical ADB targets, so this cannot clean up a real TV.
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          RELAY_VERSION_CODE: ${{ inputs.version_code }}
+          RELAY_VERSION_NAME: ${{ inputs.version_name }}
+        with:
+          # Match the local passing TV test surface. The API 34 phone/google_apis image retained
+          # a 48dp status-bar inset even after immersive.full=* (run 34040411183). The hosted
+          # SDK does not publish google-tv;x86_64 for API 34 (run 34041656417), so use the
+          # available Android TV x86 image instead of falling back to a phone profile.
+          api-level: 34
+          target: android-tv
+          arch: x86
+          profile: tv_1080p
+          cores: 4
+          ram-size: 4096M
+          heap-size: 1024M
+          # KVM is enabled above so x86_64 boots within the action's readiness window. Keep
+          # animations disabled for deterministic focus and semantics assertions.
+          disable-animations: true
+          disable-linux-hw-accel: false
+          # The runner creates the AVD before launching it. Configure its LCD as a TV-shaped
+          # fallback before launch; the explicit -skin option below makes the framebuffer size
+          # deterministic even when the hosted Pixel 2 profile supplies portrait skin values.
+          # The action splits this input at newlines and executes each result
+          # separately, so invoke the complete pre-launch helper on one line.
+          pre-emulator-launch-script: sh .github/workflows/prepare-emulator.sh
+          # Avoid the hosted runner's intermittent SwiftShader ColorBuffer loss during
+          # Compose semantics tests; the suite does not require a rendered GPU surface.
+          emulator-options: "-no-window -noaudio -no-boot-anim -gpu off -no-snapshot -skin 1920x1080"
+          # Leave enough time for image installation and first boot, but keep the action
+          # bounded well inside the job timeout so a broken hosted image fails diagnostically.
+          emulator-boot-timeout: 900
+          # Keep this as one command because the action splits multiline inputs;
+          # the helper contains the complete POSIX polling and test flow.
+          script: sh .github/workflows/validate-emulator.sh
+
+      - name: Capture emulator diagnostics
+        if: failure()
+        continue-on-error: true
+        run: |
+          set +e
+          DIAG_DIR="$RUNNER_TEMP/relay-emulator-diagnostics"
+          mkdir -p "$DIAG_DIR"
+
+          # Capture only device state, logcat, and test reports. Never dump the job environment
+          # or any GitHub secret into the workflow log or artifact.
+          adb devices -l > "$DIAG_DIR/adb-devices.txt" 2>&1
+          while read -r serial state _; do
+            [[ "$serial" == "List" || "$state" != "device" ]] && continue
+            safe_serial="${serial//[^A-Za-z0-9_.-]/_}"
+            adb -s "$serial" get-state > "$DIAG_DIR/state-$safe_serial.txt" 2>&1
+            adb -s "$serial" logcat -d -v threadtime > "$DIAG_DIR/logcat-$safe_serial.txt" 2>&1
+          done < <(adb devices)
+
+          for report_root in app/build/reports/androidTests app/build/test-results app/build/outputs/androidTest-results; do
+            if [[ -d "$report_root" ]]; then
+              report_name="$(basename "$report_root")"
+              mkdir -p "$DIAG_DIR/$report_name"
+              cp -R "$report_root"/. "$DIAG_DIR/$report_name/" 2>/dev/null
+            fi
+          done
+
+          # Remove common credential-shaped log lines before the artifact is uploaded. This is
+          # intentionally conservative and does not print the captured contents to the log.
+          while IFS= read -r -d '' file; do
+            case "$file" in
+              *.txt|*.log|*.xml|*.json|*.html)
+                sed -E \
+                  -e '/(api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret|authorization|bearer)/I s/^(.*(api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret|authorization|bearer)).*$/\1 [REDACTED]/I' \
+                  -e 's/(gh[pousr]_[A-Za-z0-9_=-]+|github_pat_[A-Za-z0-9_=-]+)/[REDACTED]/g' \
+                  "$file" > "$file.redacted" 2>/dev/null && mv "$file.redacted" "$file"
+                ;;
+            esac
+          done < <(find "$DIAG_DIR" -type f -print0)
+
+      - name: Upload emulator diagnostics
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: relay-emulator-diagnostics-${{ github.run_id }}
+          path: ${{ runner.temp }}/relay-emulator-diagnostics
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Configure release signing
         env:
@@ -67,33 +253,53 @@ jobs:
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
         run: |
+          set -euo pipefail
           test -n "$SIGNING_KEY"
           test -n "$STORE_PASSWORD"
           test -n "$KEY_ALIAS"
           test -n "$KEY_PASSWORD"
           test -n "$TMDB_API_KEY"
           printf '%s' "$SIGNING_KEY" | base64 --decode > "$GITHUB_WORKSPACE/relay-home-release.p12"
-          {
-            echo "sdk.dir=$ANDROID_HOME"
-            echo "relay.signing.storeFile=relay-home-release.p12"
-            echo "relay.signing.storePassword=$STORE_PASSWORD"
-            echo "relay.signing.keyAlias=$KEY_ALIAS"
-            echo "relay.signing.keyPassword=$KEY_PASSWORD"
-            echo "tmdb.apiKey=$TMDB_API_KEY"
-          } > local.properties
+          chmod 600 "$GITHUB_WORKSPACE/relay-home-release.p12"
+          test -s "$GITHUB_WORKSPACE/relay-home-release.p12"
+          keytool -list -noprompt -storetype PKCS12 \
+            -keystore "$GITHUB_WORKSPACE/relay-home-release.p12" \
+            -storepass "$STORE_PASSWORD" -alias "$KEY_ALIAS" >/dev/null
 
       - name: Build and verify signed APK
         env:
           RELAY_VERSION_CODE: ${{ inputs.version_code }}
           RELAY_VERSION_NAME: ${{ inputs.version_name }}
+          RELAY_SIGNING_STORE_FILE: ${{ github.workspace }}/relay-home-release.p12
+          RELAY_SIGNING_STORE_TYPE: PKCS12
+          RELAY_SIGNING_STORE_PASSWORD: ${{ secrets.KEY_STORE_PASSWORD }}
+          RELAY_SIGNING_KEY_ALIAS: ${{ secrets.ALIAS }}
+          RELAY_SIGNING_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          RELAY_TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}
         run: |
+          set -euo pipefail
           chmod +x gradlew
-          ./gradlew :app:lintRelease :app:testReleaseUnitTest :app:assembleRelease
+          ./gradlew :app:verifyRelayReleaseVersion :app:lintRelease :app:testReleaseUnitTest :app:assembleRelease
           mkdir -p release-assets
-          cp app/build/outputs/apk/release/app-release.apk "release-assets/relay-home-${RELAY_VERSION_NAME}.apk"
+          APK="app/build/outputs/apk/release/app-release.apk"
+          test -s "$APK"
+          cp "$APK" "release-assets/relay-home-${RELAY_VERSION_NAME}.apk"
           APKSIGNER="$(find "$ANDROID_HOME/build-tools" -name apksigner -type f | sort -V | tail -1)"
+          AAPT2="$(find "$ANDROID_HOME/build-tools" -name aapt2 -type f -perm -111 | sort -V | tail -1)"
           test -x "$APKSIGNER"
-          "$APKSIGNER" verify --verbose --print-certs "release-assets/relay-home-${RELAY_VERSION_NAME}.apk"
+          test -x "$AAPT2"
+          CERT_OUTPUT="$("$APKSIGNER" verify --verbose --print-certs "release-assets/relay-home-${RELAY_VERSION_NAME}.apk" 2>&1)"
+          printf '%s\n' "$CERT_OUTPUT"
+          ACTUAL_CERT="$(printf '%s\n' "$CERT_OUTPUT" | sed -n 's/.*certificate SHA-256 digest: //p' | head -1 | tr -d '[:space:]:' | tr '[:lower:]' '[:upper:]')"
+          EXPECTED_CERT="$(keytool -exportcert -noprompt -storetype PKCS12 \
+            -keystore "$RELAY_SIGNING_STORE_FILE" -storepass "$RELAY_SIGNING_STORE_PASSWORD" \
+            -alias "$RELAY_SIGNING_KEY_ALIAS" | sha256sum | awk '{print toupper($1)}')"
+          [[ -n "$ACTUAL_CERT" && "$ACTUAL_CERT" == "$EXPECTED_CERT" ]] || {
+            echo "APK signer does not match the configured release keystore." >&2
+            exit 1
+          }
+          badging="$("$AAPT2" dump badging "$APK" 2>/dev/null || true)"
+          printf '%s\n' "$badging" | grep -F "package: name='com.relayhome.launcher' versionCode='$RELAY_VERSION_CODE' versionName='$RELAY_VERSION_NAME'"
 
       - name: Publish GitHub release
         env:
@@ -102,8 +308,18 @@ jobs:
           VERSION_NAME: ${{ inputs.version_name }}
           RELEASE_NOTES: ${{ inputs.release_notes }}
         run: |
+          set -euo pipefail
+          [[ -n "${RELEASE_NOTES//[[:space:]]/}" ]]
           TAG_NAME="v${VERSION_NAME}"
-          if [ "$CHANNEL" = "beta" ]; then
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            echo "A GitHub release already exists for $TAG_NAME." >&2
+            exit 1
+          fi
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG_NAME}" >/dev/null 2>&1; then
+            echo "A Git tag already exists for $TAG_NAME." >&2
+            exit 1
+          fi
+          if [ "$CHANNEL" = "alpha" ] || [ "$CHANNEL" = "beta" ]; then
             gh release create "$TAG_NAME" release-assets/* \
               --target "$GITHUB_SHA" \
               --title "Relay Home ${VERSION_NAME}" \
@@ -117,3 +333,25 @@ jobs:
               --notes "$RELEASE_NOTES" \
               --latest
           fi
+
+      - name: Verify published release metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ inputs.channel }}
+          VERSION_NAME: ${{ inputs.version_name }}
+        run: |
+          set -euo pipefail
+          TAG_NAME="v${VERSION_NAME}"
+          release_json="$(gh release view "$TAG_NAME" --json tagName,isDraft,isPrerelease,assets)"
+          printf '%s' "$release_json" | jq -e --arg tag "$TAG_NAME" '.tagName == $tag' >/dev/null
+          printf '%s' "$release_json" | jq -e '.isDraft == false' >/dev/null
+          if [ "$CHANNEL" = "stable" ]; then
+            printf '%s' "$release_json" | jq -e '.isPrerelease == false' >/dev/null
+          else
+            printf '%s' "$release_json" | jq -e '.isPrerelease == true' >/dev/null
+          fi
+          printf '%s' "$release_json" | jq -e --arg asset "relay-home-${VERSION_NAME}.apk" '.assets | map(select(.name == $asset)) | length == 1' >/dev/null
+
+      - name: Remove release signing material
+        if: always()
+        run: rm -f "$GITHUB_WORKSPACE/relay-home-release.p12"

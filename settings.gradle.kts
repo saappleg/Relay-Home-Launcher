@@ -16,4 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "Relay Home"
 include(":app")
-
+include(":baselineprofile")

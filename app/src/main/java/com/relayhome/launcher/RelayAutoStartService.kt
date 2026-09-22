@@ -20,14 +20,64 @@ class RelayAutoStartService : AccessibilityService() {
         val now = SystemClock.elapsedRealtime()
         if (now - lastLaunchAt < 2_000L) return
         lastLaunchAt = now
-        startActivity(
-            Intent(this, MainActivity::class.java).apply {
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
-            }
+        val target = "${BuildConfig.APPLICATION_ID}/${MainActivity::class.java.name}"
+        recordEvent(
+            LauncherDiagnosticEvent(
+                timestampMs = System.currentTimeMillis(),
+                operation = "accessibility_auto_start",
+                strategy = LauncherOverrideStrategy.ACCESSIBILITY,
+                phase = "activity",
+                outcome = "started",
+                cause = "Stock launcher window became active.",
+                target = target,
+                observedHome = packageName
+            )
         )
+        try {
+            startActivity(
+                Intent(this, MainActivity::class.java).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_REORDER_TO_FRONT)
+                }
+            )
+            // startActivity() does not prove that Relay became the visible or resolved Home app.
+            // Keep this explicitly unverified so diagnostics never overstate auto-start success.
+            recordEvent(
+                LauncherDiagnosticEvent(
+                    timestampMs = System.currentTimeMillis(),
+                    operation = "accessibility_auto_start",
+                    strategy = LauncherOverrideStrategy.ACCESSIBILITY,
+                    phase = "activity",
+                    outcome = "unverified",
+                    cause = "Activity launch was accepted; visibility was not independently verified.",
+                    target = target,
+                    observedHome = packageName
+                )
+            )
+        } catch (error: Throwable) {
+            recordEvent(
+                LauncherDiagnosticEvent(
+                    timestampMs = System.currentTimeMillis(),
+                    operation = "accessibility_auto_start",
+                    strategy = LauncherOverrideStrategy.ACCESSIBILITY,
+                    phase = "activity",
+                    outcome = "failure",
+                    cause = error.message ?: error::class.java.simpleName,
+                    target = target,
+                    observedHome = packageName
+                )
+            )
+            // Accessibility is a compatibility fallback. A denied/temporarily unavailable
+            // activity launch must be recorded and ignored, not crash the service process that
+            // Android may use to keep the launcher alive.
+            return
+        }
     }
 
     override fun onInterrupt() = Unit
+
+    private fun recordEvent(event: LauncherDiagnosticEvent) {
+        runCatching { LauncherOverride.recordLocalEvent(this, event) }
+    }
 
     private companion object {
         val stockTvLaunchers = setOf(

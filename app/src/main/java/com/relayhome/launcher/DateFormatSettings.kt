@@ -1,6 +1,7 @@
 package com.relayhome.launcher
 
 import android.content.Context
+import com.relayhome.launcher.data.RelaySettingsRepository
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -12,19 +13,14 @@ internal enum class RelayDateFormat(val label: String) {
 }
 
 internal object DateFormatSettings {
-    private const val preferencesName = "relay_display_settings"
-    private const val dateFormatKey = "date_format"
-
     fun load(context: Context): RelayDateFormat = runCatching {
         RelayDateFormat.valueOf(
-            context.applicationContext.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
-                .getString(dateFormatKey, RelayDateFormat.LOCAL.name)!!
+            RelaySettingsRepository.loadDateFormat(context, RelayDateFormat.LOCAL.name)
         )
     }.getOrDefault(RelayDateFormat.LOCAL)
 
     fun save(context: Context, value: RelayDateFormat) {
-        context.applicationContext.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
-            .edit().putString(dateFormatKey, value.name).apply()
+        RelaySettingsRepository.saveDateFormat(context, value.name)
     }
 }
 
