@@ -508,6 +508,7 @@ internal fun SettingsScreen(
                     onWebProfileUrlChanged = { webProfileUrl = it; profileUrlError = null },
                     onProfileUrlError = { profileUrlError = it },
                     nuvioProfiles = nuvioProfiles,
+                    nuvioAccountId = nuvioAccountId,
                     relayTubeProfiles = relayTubeProfiles,
                     onProfileMappingChanged = onProfileMappingChanged
                 )
@@ -1101,6 +1102,7 @@ private fun ProvidersAccountsSettings(
     onWebProfileUrlChanged: (String) -> Unit,
     onProfileUrlError: (String?) -> Unit,
     nuvioProfiles: List<NuvioProfile>,
+    nuvioAccountId: String,
     relayTubeProfiles: List<RelayTubeProfile>,
     onProfileMappingChanged: (Int, String?) -> Unit
 ) {

@@ -204,10 +204,6 @@ internal object ProviderHandoff {
     }
 
     fun play(context: Context, item: MediaItem) {
-        item.providerSearchQuery?.takeIf { it.isNotBlank() }?.let { episodeQuery ->
-            search(context, item.provider, episodeQuery)
-            return
-        }
         // Search/recommendation cards carry TMDB metadata ids, not provider playback ids.
         // Passing those ids into native detail URIs produces dead links (or malformed YouTube
         // video ids), so hand off by title through the provider's own search instead.

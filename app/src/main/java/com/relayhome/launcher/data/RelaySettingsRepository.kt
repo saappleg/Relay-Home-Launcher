@@ -768,7 +768,7 @@ internal object RelaySettingsRepository {
             .digest(accountId.toByteArray())
             .take(12)
             .joinToString("") { byte -> "%02x".format(byte) }
-        return profileMappingKinds.map { kind -> "$profileMappingPrefix$kind$digest_" }
+        return profileMappingKinds.map { kind -> "$profileMappingPrefix$kind${digest}_" }
     }
 
     private fun String.startsWithAny(prefixes: List<String>): Boolean = prefixes.any(::startsWith)

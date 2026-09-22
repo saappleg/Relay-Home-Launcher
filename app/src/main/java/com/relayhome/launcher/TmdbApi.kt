@@ -448,9 +448,8 @@ internal object TmdbApi {
 
     /** Accurate season/episode choices for Relay's picker; never inferred without a confident title match. */
     suspend fun seasonEpisodes(item: MediaItem, season: Int): Result<TvSeason> = withContext(Dispatchers.IO) {
-        if (apiKey.isBlank()) {
-            Result.failure(TmdbNotConfiguredException())
-        } else tmdbCall {
+        if (apiKey.isBlank()) return@withContext Result.failure(TmdbNotConfiguredException())
+        tmdbCall {
             val queryTitle = item.showTitle ?: item.title
             val search = JSONObject(get("/search/tv", mapOf("query" to queryTitle)))
             val series = findTmdbTitleMatch(search.optJSONArray("results") ?: JSONArray(), queryTitle, "name", "original_name")?.result
@@ -470,11 +469,7 @@ internal object TmdbApi {
                     }
                 }
             }
-            Result.success(TvSeason(seasons, episodes))
-        } catch (cancelled: CancellationException) {
-            throw cancelled
-        } catch (error: Exception) {
-            Result.failure(error)
+            TvSeason(seasons, episodes)
         }
     }
 
