@@ -132,18 +132,6 @@ internal object HomeLayoutStore {
             .apply()
     }
 }
-        return favoritePackages
-    }
-
-    fun toggle(context: Context, packageName: String) {
-        val next = if (packageName in favoritePackages) favoritePackages - packageName else favoritePackages + packageName
-        favoritePackages = next
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit()
-            .putStringSet(KEY_PACKAGES, next)
-            .apply()
-    }
-}
 
 /** Reads only activities that advertise a normal Android or TV launcher entry. */
 internal object InstalledApps {

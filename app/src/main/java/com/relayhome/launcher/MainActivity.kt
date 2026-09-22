@@ -566,6 +566,7 @@ private fun RelayHomeApp() {
                     nuvioItems = nuvioLibrary,
                     nuvioContinueWatching = nuvioContinueWatching,
                     nuvioConnected = nuvioSession != null,
+                    nuvioAccountId = nuvioSession?.accountId.orEmpty(),
                     nuvioSyncing = nuvioSyncing,
                     nuvioSyncError = nuvioSyncError,
                     upcomingEpisodes = upcomingEpisodes,
@@ -752,6 +753,7 @@ private fun HomeScreen(
     nuvioItems: List<MediaItem>,
     nuvioContinueWatching: List<MediaItem>,
     nuvioConnected: Boolean,
+    nuvioAccountId: String,
     nuvioSyncing: Boolean,
     nuvioSyncError: String?,
     upcomingEpisodes: List<TmdbCalendarEntry>,
@@ -1063,7 +1065,7 @@ private fun HomeScreen(
                 palette = palette,
                 profiles = nuvioProfiles,
                 relayTubeProfiles = SmartTubePlaybackStore.profiles,
-                nuvioAccountId = nuvioSession?.accountId.orEmpty(),
+                nuvioAccountId = nuvioAccountId,
                 activeProfile = activeNuvioProfile,
                 profileImageUri = profileImageUri,
                 onSelect = {
@@ -1071,7 +1073,7 @@ private fun HomeScreen(
                     profilePickerVisible = false
                 },
                 onPairRelayTube = { nuvioIndex, relayTubeProfileId ->
-                    RelayProfileMappingStore.set(context, nuvioSession?.accountId.orEmpty(), nuvioIndex, relayTubeProfileId)
+                    RelayProfileMappingStore.set(context, nuvioAccountId, nuvioIndex, relayTubeProfileId)
                     if (nuvioIndex == activeNuvioProfile) RelayTubeProfileBridge.selectProfile(context, relayTubeProfileId)
                 },
                 onDismiss = { profilePickerVisible = false }
