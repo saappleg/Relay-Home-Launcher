@@ -432,6 +432,7 @@ class SettingsScreenTest {
                                 RelayTubeProfile("relay-b", "Bedroom", null, false)
                             ),
                             activeProfile = 1,
+                            nuvioAccountId = testNuvioAccountId,
                             profileImageUri = null,
                             onSelect = {
                                 selectedProfile.value = it

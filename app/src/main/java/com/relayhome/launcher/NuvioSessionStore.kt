@@ -57,6 +57,21 @@ internal object NuvioSessionStore {
         }
     }
 
+    /** Test-only seam for exercising upgrades from the original encrypted token-only format. */
+    internal fun saveLegacyTokenForTest(context: Context, accessToken: String) {
+        require(accessToken.isNotBlank())
+        val appContext = applicationContextSafely(context)
+        val prefs = preferences(appContext)
+        synchronized(storeLock) {
+            val generation = prefs.getLong(generationKey, 0L) + 1L
+            val saved = writeSharedPreferencesSafely(appContext, preferencesName) {
+                it.putLong(generationKey, generation)
+                    .putString(tokenKey, encryptPlaintext(accessToken))
+            }
+            check(saved) { "Legacy Nuvio token could not be saved for the migration test." }
+        }
+    }
+
     fun clear(context: Context) {
         val appContext = applicationContextSafely(context)
         synchronized(storeLock) {
@@ -117,9 +132,12 @@ internal object NuvioSessionStore {
             .put("expires_at", snapshot.expiresAtEpochSeconds)
             .put("account_id", snapshot.accountId)
             .toString()
-            .encodeToByteArray()
+        return encryptPlaintext(plaintext)
+    }
+
+    private fun encryptPlaintext(plaintext: String): String {
         val encryptor = cipher(Cipher.ENCRYPT_MODE)
-        val ciphertext = encryptor.doFinal(plaintext)
+        val ciphertext = encryptor.doFinal(plaintext.encodeToByteArray())
         return "${Base64.encodeToString(encryptor.iv, Base64.NO_WRAP)}:${Base64.encodeToString(ciphertext, Base64.NO_WRAP)}"
     }
 

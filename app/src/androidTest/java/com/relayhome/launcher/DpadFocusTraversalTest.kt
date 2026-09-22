@@ -263,6 +263,7 @@ class DpadFocusTraversalTest {
                 ),
                 relayTubeProfiles = emptyList(),
                 activeProfile = 2,
+                nuvioAccountId = "dpad-focus-test-account",
                 profileImageUri = null,
                 onSelect = {},
                 onDismiss = {}

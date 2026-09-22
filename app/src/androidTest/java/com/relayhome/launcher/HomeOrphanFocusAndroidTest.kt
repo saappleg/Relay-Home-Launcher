@@ -271,6 +271,7 @@ class HomeOrphanFocusAndroidTest {
                     ),
                     relayTubeProfiles = emptyList(),
                     activeProfile = 1,
+                    nuvioAccountId = "home-orphan-focus-test-account",
                     profileImageUri = null,
                     onSelect = {},
                     onDismiss = {}
