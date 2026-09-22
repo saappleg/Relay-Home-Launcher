@@ -12,6 +12,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.platform.LocalContext
+import com.relayhome.launcher.profileScope
 import com.relayhome.launcher.ui.apps.AppsScreen
 import com.relayhome.launcher.ui.calendar.CalendarScreen
 import com.relayhome.launcher.ui.details.DetailsScreen
@@ -109,6 +110,7 @@ internal fun RelayHomeApp(
                     favoriteApps = state.favoriteApps,
                     nuvioProfiles = state.nuvioProfiles,
                     activeNuvioProfile = state.activeNuvioProfile,
+                    nuvioAccountId = state.nuvioSession?.accountId.orEmpty(),
                     profileImageUri = state.profileImageUri,
                     wallpaperImageUri = state.wallpaperImageUri,
                     onWallpaperInvalid = { stateHolder.setWallpaperImage(null) },
@@ -161,6 +163,7 @@ internal fun RelayHomeApp(
                     hiddenSmartTubeChannels = state.hiddenSmartTubeChannels,
                     onSmartTubeChannelVisible = stateHolder::setSmartTubeChannelVisible,
                     nuvioConnected = state.nuvioSession != null,
+                    nuvioAccountId = state.nuvioSession?.accountId.orEmpty(),
                     nuvioSyncing = state.nuvioSyncing,
                     nuvioItemCount = state.nuvioMedia.size,
                     nuvioSyncError = state.nuvioSyncError,
@@ -217,6 +220,7 @@ internal fun RelayHomeApp(
                 Destination.SEARCH -> SearchScreen(
                     palette = palette,
                     providers = state.enabledProviders,
+                    profileScope = state.nuvioSession?.profileScope(state.activeNuvioProfile) ?: "local",
                     onBackHome = stateHolder::returnHome,
                     onItemSelected = stateHolder::openMediaDetails
                 )

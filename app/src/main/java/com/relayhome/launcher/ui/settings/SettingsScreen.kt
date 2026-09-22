@@ -295,6 +295,7 @@ internal fun SettingsScreen(
     stockLauncherOverride: StockLauncherOverride?,
     onLauncherChanged: () -> Unit,
     nuvioProfiles: List<NuvioProfile> = emptyList(),
+    nuvioAccountId: String = "",
     relayTubeProfiles: List<RelayTubeProfile> = emptyList(),
     onProfileMappingChanged: (Int, String?) -> Unit = { _, _ -> },
     operationErrors: List<RelayOperationError> = emptyList()
@@ -1122,11 +1123,11 @@ private fun ProvidersAccountsSettings(
     }
     Spacer(Modifier.height(12.dp))
     StatusCard(
-        title = "SmartTube",
+        title = Provider.SMARTTUBE.label,
         detail = when {
             !smartTubeInstalled -> "App not installed"
             smartTubeSubscriptions.isNotEmpty() -> "Connected · ${smartTubeSubscriptions.size} subscription video${if (smartTubeSubscriptions.size == 1) "" else "s"} received"
-            else -> "Installed · waiting for RelayTube/SmartTube shared data"
+            else -> "Installed · waiting for ${Provider.SMARTTUBE.label} shared data"
         },
         healthy = smartTubeInstalled && smartTubeSubscriptions.isNotEmpty(),
         palette = palette.copy(accent = Provider.SMARTTUBE.accent)
@@ -1189,6 +1190,7 @@ private fun ProvidersAccountsSettings(
         ProfileMappingSettings(
             palette = palette,
             nuvioProfiles = nuvioProfiles,
+            nuvioAccountId = nuvioAccountId,
             relayTubeProfiles = relayTubeProfiles,
             firstFocusRequester = firstFocusRequester,
             backFocusRequester = backFocusRequester,
@@ -1224,6 +1226,7 @@ private fun ProvidersAccountsSettings(
 private fun ProfileMappingSettings(
     palette: RelayPalette,
     nuvioProfiles: List<NuvioProfile>,
+    nuvioAccountId: String,
     relayTubeProfiles: List<RelayTubeProfile>,
     firstFocusRequester: FocusRequester,
     backFocusRequester: FocusRequester,
@@ -1233,10 +1236,10 @@ private fun ProfileMappingSettings(
     val availableProfiles = remember(relayTubeProfiles) {
         relayTubeProfiles.filter { it.id.isNotBlank() }.distinctBy { it.id }
     }
-    var selectedMappings by remember(nuvioProfiles, availableProfiles) {
+    var selectedMappings by remember(nuvioProfiles, availableProfiles, nuvioAccountId) {
         mutableStateOf(
             nuvioProfiles.associate { profile ->
-                profile.index to RelayProfileMappingStore.get(context, profile.index)
+                profile.index to RelayProfileMappingStore.get(context, nuvioAccountId, profile.index)
             }
         )
     }
@@ -1247,11 +1250,11 @@ private fun ProfileMappingSettings(
 
     SettingsSectionTitle(
         "Profile pairing",
-        "Choose which RelayTube profile receives each Nuvio profile's Continue Watching data."
+        "Choose which ${Provider.SMARTTUBE.label} profile receives each Nuvio profile's Continue Watching data."
     )
     Spacer(Modifier.height(14.dp))
     Text(
-        "Automatic name matching is used until you choose a pairing. Open a profile button to select a RelayTube profile or clear the pairing.",
+        "Automatic name matching is used until you choose a pairing. Open a profile button to select a ${Provider.SMARTTUBE.label} profile or clear the pairing.",
         color = muted,
         fontSize = 14.sp,
         lineHeight = 20.sp
@@ -1302,7 +1305,7 @@ private fun ProfileMappingSettings(
                             DropdownMenuItem(
                                 text = {
                                     Text(
-                                        if (id == null) name else "RelayTube · $name",
+                                        if (id == null) name else "${Provider.SMARTTUBE.label} · $name",
                                         modifier = Modifier.testTag("profile-mapping-option-${nuvioProfile.index}-${id ?: "automatic"}")
                                     )
                                 },
@@ -1447,10 +1450,10 @@ private fun SubscriptionSettings(
         }
     } else {
         Spacer(Modifier.height(20.dp))
-        Text("No RelayTube subscriptions found yet. Subscriptions from RelayTube will appear here automatically.", color = muted, fontSize = 15.sp, lineHeight = 22.sp)
+        Text("No ${Provider.SMARTTUBE.label} subscriptions found yet. Subscriptions from ${Provider.SMARTTUBE.label} will appear here automatically.", color = muted, fontSize = 15.sp, lineHeight = 22.sp)
         Spacer(Modifier.height(16.dp))
         ActionButton(
-            "Open RelayTube settings",
+            "Open ${Provider.SMARTTUBE.label} settings",
             palette.copy(accent = Provider.SMARTTUBE.accent),
             primary = false,
             focusRequester = firstFocusRequester,

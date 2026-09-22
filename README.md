@@ -9,14 +9,14 @@ and playback.
 
 ## Current beta
 
-The latest published build is [v0.1.0-beta.7](https://github.com/saappleg/Relay-Home-Launcher/releases/tag/v0.1.0-beta.7), a GitHub prerelease with version code 30 and the signed APK `relay-home-0.1.0-beta.7.apk`. Its published SHA-256 digest is
-`116bf035affa2870d66786dccb24ce5fc51a78f93f0e7261e1163b8c95eafbcb`.
+The latest published build is [v0.1.0-beta.10](https://github.com/saappleg/Relay-Home-Launcher/releases/tag/v0.1.0-beta.10), a GitHub prerelease with version code 33 and the signed APK `relay-home-0.1.0-beta.10.apk`. Its published SHA-256 digest is
+`c887c334b93756422010aa3514e8d749cafc9b18f59479984c67cda00bde3094`.
 
-Beta.7 packages the signed navigation, focus, accessibility, baseline-profile,
-and Android TV interception hardening described in
-[the release checklist](docs/RELEASES.md). The `feature/focus-info-preview`
-branch is currently ahead of the beta.7 tag with follow-up fixes; those branch
-changes are not a published release until a later signed APK is created.
+Beta.10 includes the previous round of TV-first, provider, cache, focus, and
+launcher-safety updates. This source also reconciles the newer Home/App Peek
+focus work from `feature/focus-info-preview` with beta.10's account/session and
+provider fixes; these follow-ups are not part of the published APK until the
+next signed release passes its release gate. See [the release checklist](docs/RELEASES.md).
 
 ## Features
 
@@ -26,6 +26,8 @@ changes are not a published release until a later signed APK is created.
 - D-pad navigation across Home, details, Search, All Apps, provider hubs,
   Calendar, and paginated Settings. Root transitions reject stale focus and
   scroll callbacks.
+- Search keeps recent queries per active Nuvio profile, with D-pad-accessible
+  history shortcuts and a clear-history action.
 - Opt-in provider tabs that persist between launches. Available providers are
   Nuvio, RelayTube, and Stremio; only enabled providers appear in Home
   navigation and hero candidates.
@@ -149,8 +151,8 @@ packaging does: configure the five `relay.signing.*` values shown in
 variables. Then set an explicit release identity and run:
 
 ```bash
-export RELAY_VERSION_NAME=0.1.0-beta.8
-export RELAY_VERSION_CODE=31
+export RELAY_VERSION_NAME=0.1.0-beta.11
+export RELAY_VERSION_CODE=34
 ./gradlew :app:verifyRelayReleaseVersion :app:lintRelease \
   :app:testReleaseUnitTest :app:assembleRelease
 ```

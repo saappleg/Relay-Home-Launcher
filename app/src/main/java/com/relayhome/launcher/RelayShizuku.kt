@@ -67,8 +67,9 @@ internal object RelayShizuku {
         context: Context,
         stock: StockLauncherOverride?,
         disableStockLauncher: Boolean,
+        onStillRunning: (() -> Unit)? = null,
         onResult: (Result<String>) -> Unit
-    ) = runUserService(context, "set_relay_home", onResult) { shell ->
+    ) = runUserService(context, "set_relay_home", onStillRunning, onResult) { shell ->
         shell.setRelayHome(
             stock?.packageName,
             stock?.activityName,
@@ -79,14 +80,16 @@ internal object RelayShizuku {
     fun restoreStockLauncher(
         context: Context,
         stock: StockLauncherOverride,
+        onStillRunning: (() -> Unit)? = null,
         onResult: (Result<String>) -> Unit
-    ) = runUserService(context, "restore_stock_launcher", onResult) { shell ->
+    ) = runUserService(context, "restore_stock_launcher", onStillRunning, onResult) { shell ->
         shell.restoreStockLauncher(stock.packageName, stock.activityName)
     }
 
     private fun runUserService(
         context: Context,
         operationName: String,
+        onStillRunning: (() -> Unit)?,
         onResult: (Result<String>) -> Unit,
         operation: (IRelayHomeShell) -> String
     ) {
@@ -97,7 +100,14 @@ internal object RelayShizuku {
                 outcome = "failure",
                 cause = "Shizuku permission or binder is not available."
             )
-            runCatching { onResult(Result.failure(IllegalStateException("Shizuku permission is not available."))) }
+            deliverOnMain(onResult, Result.failure(IllegalStateException("Shizuku permission is not available.")))
+            return
+        }
+        if (!launcherOperationInFlight.compareAndSet(false, true)) {
+            deliverOnMain(
+                onResult,
+                Result.failure(IllegalStateException("A launcher update is still running. Wait for it to finish before trying again."))
+            )
             return
         }
         val args = Shizuku.UserServiceArgs(
@@ -109,30 +119,43 @@ internal object RelayShizuku {
             // the APK so launcher-service changes cannot leave an older implementation running.
             .version(BuildConfig.VERSION_CODE)
             .daemon(false)
-        val finished = AtomicBoolean(false)
+        val operationFinished = AtomicBoolean(false)
+        val callbackDelivered = AtomicBoolean(false)
+        val unbound = AtomicBoolean(false)
+        val operationStarted = AtomicBoolean(false)
         lateinit var connection: ServiceConnection
         lateinit var timeout: Runnable
+        lateinit var operationTimeout: Runnable
+
+        fun unbindOnce() {
+            if (unbound.compareAndSet(false, true)) {
+                // bindUserService can partially bind before throwing, so clean up on every
+                // terminal path, including startup timeout and bind failure.
+                runCatching { Shizuku.unbindUserService(args, connection, true) }
+            }
+        }
 
         fun finish(result: Result<String>) {
-            if (!finished.compareAndSet(false, true)) return
-            mainHandler.removeCallbacks(timeout)
-            // The service is one-shot. Detach this callback immediately; daemon(false) also
-            // prevents it from surviving the Relay process after an unexpected app exit.
-            runCatching { Shizuku.unbindUserService(args, connection, false) }
-            val surfacedResult = result.fold(
-                onSuccess = { raw ->
-                    val message = LauncherOverride.recordServiceResult(context, raw)
-                    if (message != null) Result.success(message) else Result.success(raw)
-                },
-                onFailure = { error ->
-                    val message = LauncherOverride.recordServiceFailure(context, error.message)
-                    if (message != null) Result.failure(IllegalStateException(message, error))
-                    else Result.failure(error)
-                }
-            )
-            // The UI callback is supplied by Compose state. A late binder callback must not
-            // crash the main thread if that destination has already been disposed.
-            runCatching { onResult(surfacedResult) }
+            if (!operationFinished.compareAndSet(false, true)) return
+            runOnMain {
+                mainHandler.removeCallbacks(timeout)
+                mainHandler.removeCallbacks(operationTimeout)
+                unbindOnce()
+                launcherOperationInFlight.set(false)
+                val surfacedResult = result.fold(
+                    onSuccess = { raw ->
+                        val message = LauncherOverride.recordServiceResult(context, raw)
+                        if (message != null) Result.success(message) else Result.success(raw)
+                    },
+                    onFailure = { error ->
+                        val message = LauncherOverride.recordServiceFailure(context, error.message)
+                        if (message != null) Result.failure(IllegalStateException(message, error))
+                        else Result.failure(error)
+                    }
+                )
+                // A late binder callback must not crash the UI if Settings has been disposed.
+                if (callbackDelivered.compareAndSet(false, true)) runCatching { onResult(surfacedResult) }
+            }
         }
 
         timeout = Runnable {
@@ -151,21 +174,34 @@ internal object RelayShizuku {
                 )
             )
         }
+        operationTimeout = Runnable {
+            if (!operationFinished.get()) runCatching { onStillRunning?.invoke() }
+        }
         connection = object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName, service: IBinder) {
-                mainHandler.removeCallbacks(timeout)
-                if (finished.get()) return
-                context.recordShizukuEvent(
-                    operation = operationName,
-                    phase = "service",
-                    outcome = "success",
-                    cause = "Shizuku user service connected."
-                )
-                val shell = IRelayHomeShell.Stub.asInterface(service)
-                Thread {
-                    val result = runCatching { operation(shell) }
-                    mainHandler.post { finish(result) }
-                }.start()
+                runOnMain {
+                    // A binder can arrive after timeout. Do not let that stale callback apply
+                    // the launcher change once the operation has been reported as failed.
+                    if (operationFinished.get()) {
+                        unbindOnce()
+                        return@runOnMain
+                    }
+                    mainHandler.removeCallbacks(timeout)
+                    if (!operationStarted.compareAndSet(false, true)) return@runOnMain
+                    mainHandler.postDelayed(operationTimeout, 12_000)
+                    context.recordShizukuEvent(
+                        operation = operationName,
+                        phase = "service",
+                        outcome = "success",
+                        cause = "Shizuku user service connected."
+                    )
+                    runCatching {
+                        val shell = IRelayHomeShell.Stub.asInterface(service)
+                        Thread({
+                            finish(runCatching { operation(shell) })
+                        }, "relay-shizuku-$operationName").start()
+                    }.onFailure { finish(Result.failure(it)) }
+                }
             }
 
             override fun onServiceDisconnected(name: ComponentName) {
@@ -177,67 +213,39 @@ internal object RelayShizuku {
                 )
                 finish(Result.failure(IllegalStateException("Shizuku disconnected before Relay could apply the launcher change.")))
             }
-        }
-
-        connection = object : ServiceConnection {
-            override fun onServiceConnected(name: ComponentName, service: IBinder) {
-                runOnMain {
-                    // A connection can arrive after the startup timeout. Never let that late
-                    // callback perform the requested launcher operation.
-                    if (operationFinished.get()) {
-                        unbindOnce()
-                        return@runOnMain
-                    }
-                    mainHandler.removeCallbacks(timeout)
-                    if (!operationStarted.compareAndSet(false, true)) return@runOnMain
-                    mainHandler.postDelayed(operationTimeout, 12_000)
-
-                    runCatching {
-                        val shell = IRelayHomeShell.Stub.asInterface(service)
-                        Thread {
-                            finish(
-                                runCatching {
-                                    shell.setLauncherEnabled(override.packageName, override.activityName, enabled)
-                                }
-                            )
-                        }.start()
-                    }.onFailure { finish(Result.failure(it)) }
-                }
-            }
-
-            override fun onServiceDisconnected(name: ComponentName) {
-                finish(
-                    Result.failure(
-                        IllegalStateException("Shizuku disconnected before Relay could apply the launcher override.")
-                    )
-                )
-            }
 
             override fun onBindingDied(name: ComponentName) {
-                finish(
-                    Result.failure(
-                        IllegalStateException("Shizuku ended Relay's service binding before applying the launcher override.")
-                    )
-                )
+                finish(Result.failure(IllegalStateException("Shizuku ended Relay's service binding before the operation completed.")))
             }
 
             override fun onNullBinding(name: ComponentName) {
-                finish(
-                    Result.failure(
-                        IllegalStateException("Shizuku returned no service for the launcher override.")
-                    )
-                )
+                finish(Result.failure(IllegalStateException("Shizuku returned no service for the launcher override.")))
             }
         }
-            .onFailure {
-                context.recordShizukuEvent(
-                    operation = operationName,
-                    phase = "service",
-                    outcome = "failure",
-                    cause = failureMessage(it)
-                )
-                finish(Result.failure(it))
-            }
+
+        runOnMain {
+            if (operationFinished.get()) return@runOnMain
+            // Schedule before binding so even a synchronous connection cannot beat timeout setup.
+            mainHandler.postDelayed(timeout, 8_000)
+            runCatching { Shizuku.bindUserService(args, connection) }
+                .onFailure {
+                    context.recordShizukuEvent(
+                        operation = operationName,
+                        phase = "service",
+                        outcome = "failure",
+                        cause = failureMessage(it)
+                    )
+                    finish(Result.failure(it))
+                }
+        }
+    }
+
+    private fun runOnMain(action: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) action() else mainHandler.post(action)
+    }
+
+    private fun deliverOnMain(callback: (Result<String>) -> Unit, result: Result<String>) {
+        runOnMain { runCatching { callback(result) } }
     }
 
     private fun Context.recordShizukuEvent(

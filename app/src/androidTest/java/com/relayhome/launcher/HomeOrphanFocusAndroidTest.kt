@@ -89,7 +89,7 @@ class HomeOrphanFocusAndroidTest {
         val tags = listOf(
             "home-top-destination-home",
             "home-top-destination-nuvio",
-            "home-top-destination-relaytube",
+            "home-top-destination-${Provider.SMARTTUBE.label.lowercase()}",
             "home-top-destination-calendar",
             "home-top-destination-apps",
             "home-profile-avatar",

@@ -587,24 +587,45 @@ internal object RelayTubeProfileBridge {
 internal object SmartTubeChannelFilter {
     var hiddenChannelIds by mutableStateOf(emptySet<String>())
     private val preferencesLock = Any()
+    private var activePreferenceKey: String? = null
 
-    fun load(context: Context) {
-        readSharedPreferencesResult(
-            context,
-            RELAY_TUBE_CACHE_PREFS,
-        ) { it.getStringSet(RELAY_TUBE_HIDDEN_CHANNELS, emptySet()).orEmpty().toSet() }
-            .onSuccess { hiddenChannelIds = it }
+    fun load(context: Context, profileScope: String = "local") {
+        val scopedKey = scopedPreferenceKey(profileScope)
+        val hidden = synchronized(preferencesLock) {
+            readSharedPreferencesSafely(context, RELAY_TUBE_CACHE_PREFS, emptySet<String>()) { prefs ->
+                if (prefs.contains(scopedKey)) {
+                    prefs.getStringSet(scopedKey, emptySet()).orEmpty().toSet()
+                } else {
+                    val alreadyScoped = prefs.all.keys.any { it.startsWith("${RELAY_TUBE_HIDDEN_CHANNELS}_") }
+                    val legacy = if (!alreadyScoped) prefs.getStringSet(RELAY_TUBE_HIDDEN_CHANNELS, emptySet()).orEmpty().toSet() else emptySet()
+                    if (!alreadyScoped && prefs.contains(RELAY_TUBE_HIDDEN_CHANNELS)) {
+                        prefs.edit().putStringSet(scopedKey, legacy).remove(RELAY_TUBE_HIDDEN_CHANNELS).apply()
+                    }
+                    legacy
+                }
+            }
+        }
+        activePreferenceKey = scopedKey
+        hiddenChannelIds = hidden
     }
 
-    fun setVisible(context: Context, channelId: String, visible: Boolean) {
-        val next = if (visible) hiddenChannelIds - channelId else hiddenChannelIds + channelId
-        if (writeSharedPreferencesSafely(context, RELAY_TUBE_CACHE_PREFS) {
-                it.putStringSet(RELAY_TUBE_HIDDEN_CHANNELS, next)
+    fun setVisible(context: Context, channelId: String, visible: Boolean, profileScope: String = "local") {
+        val scopedKey = scopedPreferenceKey(profileScope)
+        synchronized(preferencesLock) {
+            val current = readSharedPreferencesSafely(context, RELAY_TUBE_CACHE_PREFS, emptySet<String>()) {
+                it.getStringSet(scopedKey, emptySet()).orEmpty().toSet()
             }
-        ) hiddenChannelIds = next
+            val next = if (visible) current - channelId else current + channelId
+            if (writeSharedPreferencesSafely(context, RELAY_TUBE_CACHE_PREFS) { it.putStringSet(scopedKey, next) } &&
+                activePreferenceKey == scopedKey
+            ) hiddenChannelIds = next
+        }
     }
 
     private fun String.preferenceKey(): String = replace(Regex("[^A-Za-z0-9_.-]"), "_")
+
+    private fun scopedPreferenceKey(profileScope: String): String =
+        "${RELAY_TUBE_HIDDEN_CHANNELS}_${profileScope.preferenceKey().ifBlank { "local" }}"
 }
 private const val RELAY_TUBE_HIDDEN_CHANNELS = "hidden_channel_ids"
 

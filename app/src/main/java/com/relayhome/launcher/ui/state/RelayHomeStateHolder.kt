@@ -14,6 +14,7 @@ import com.relayhome.launcher.NuvioApi
 import com.relayhome.launcher.NuvioProfile
 import com.relayhome.launcher.NuvioSession
 import com.relayhome.launcher.NuvioSessionStore
+import com.relayhome.launcher.profileScope
 import com.relayhome.launcher.OmdbApi
 import com.relayhome.launcher.MediaScores
 import com.relayhome.launcher.ProviderHandoff
@@ -26,6 +27,7 @@ import com.relayhome.launcher.SmartTubeChannelFilter
 import com.relayhome.launcher.SmartTubeNowPlaying
 import com.relayhome.launcher.SmartTubePlaybackStore
 import com.relayhome.launcher.SmartTubeSubscriptionVideo
+import com.relayhome.launcher.ui.shared.MediaProviderBranding
 import com.relayhome.launcher.TmdbApi
 import com.relayhome.launcher.WeatherApi
 import com.relayhome.launcher.WeatherCitySettings
@@ -138,6 +140,7 @@ internal data class RelayHomeUiState(
     val focusedArtworkKey: String? = null,
     val focusedArtworkPalette: RelayPalette? = null,
     val smartTubeInstalled: Boolean = false,
+    val mediaAppDisplayName: String = "SmartTube",
     val continueWatchingLimits: Map<Provider, Int> = emptyMap(),
     val enabledProviders: Set<Provider> = emptySet(),
     val lastOperationError: RelayOperationError? = null,
@@ -278,7 +281,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
     private var detailEnrichmentJob: Job? = null
     private var omdbJob: Job? = null
     private var heroRotationJob: Job? = null
-    private var lastProfilePairingSignature: Pair<Int, List<String>>? = null
+    private var lastProfilePairingSignature: Triple<String, Int, List<String>>? = null
 
     private fun launchTracked(
         operation: String,
@@ -355,6 +358,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 NuvioSessionStore.load(appContext) to NuvioSessionStore.loadProfile(appContext)
             }
             _state.update { it.copy(nuvioSession = initial.first, activeNuvioProfile = initial.second) }
+            loadProfileScopedChannelFilter()
             runTracked("settings.reload") { reloadSettings() }
             initial.first?.let(::startNuvioSync)
         }
@@ -375,8 +379,11 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
     fun onResume() {
         refreshLauncherState()
         launchTracked("resume.provider-presence-and-hero", Dispatchers.IO) {
+            ProviderHandoff.refreshRelayTubeInstallation(appContext)
             val installed = ProviderHandoff.isSmartTubeInstalled(appContext)
-            _state.update { it.copy(smartTubeInstalled = installed) }
+            val mediaName = ProviderHandoff.mediaAppDisplayName(appContext)
+            MediaProviderBranding.update(mediaName == "RelayTube")
+            _state.update { it.copy(smartTubeInstalled = installed, mediaAppDisplayName = mediaName) }
             refreshHeroCandidates()
         }
         if (resetHomeOnNextResume) {
@@ -562,12 +569,14 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         }
         launchTracked("nuvio.profile-selection-persist", Dispatchers.IO) {
             NuvioSessionStore.saveProfile(appContext, profileIndex)
+            SmartTubeChannelFilter.load(appContext, profileScope(current.nuvioSession, profileIndex))
         }
         selectRelayTubeProfile(profileIndex, allowSelectedFallback = false, force = true)
         startNuvioMediaSync()
     }
 
     fun onNuvioConnected(session: NuvioSession) {
+        lastProfilePairingSignature = null
         val enabled = _state.value.enabledProviders + Provider.NUVIO
         _state.update {
             it.afterDestinationTransition(Destination.PROVIDER).copy(
@@ -724,7 +733,8 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
     }
 
     fun setManualProfileMapping(nuvioProfile: Int, relayTubeProfileId: String?) {
-        runCatching { RelayProfileMappingStore.setManual(appContext, nuvioProfile, relayTubeProfileId) }
+        val accountId = _state.value.nuvioSession?.accountId.orEmpty()
+        runCatching { RelayProfileMappingStore.setManual(appContext, accountId, nuvioProfile, relayTubeProfileId) }
             .onFailure {
                 recordOperationFailure("relaytube.profile-mapping.persist", it)
                 return
@@ -808,7 +818,13 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         else _state.value.hiddenSmartTubeChannels + channelId
         _state.update { it.copy(hiddenSmartTubeChannels = hidden) }
         launchTracked("smarttube.channel-filter.persist", Dispatchers.IO) {
-            SmartTubeChannelFilter.setVisible(appContext, channelId, visible)
+            val current = _state.value
+            SmartTubeChannelFilter.setVisible(
+                appContext,
+                channelId,
+                visible,
+                profileScope(current.nuvioSession, current.activeNuvioProfile)
+            )
         }
     }
 
@@ -831,8 +847,22 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         }
     }
 
+    private fun profileScope(session: NuvioSession?, profileIndex: Int): String =
+        session?.profileScope(profileIndex) ?: "local"
+
+    private fun loadProfileScopedChannelFilter() {
+        val current = _state.value
+        SmartTubeChannelFilter.load(
+            appContext,
+            profileScope(current.nuvioSession, current.activeNuvioProfile)
+        )
+    }
+
     private suspend fun reloadSettings() {
         val loaded = withContext(Dispatchers.IO) {
+            ProviderHandoff.refreshRelayTubeInstallation(appContext)
+            val mediaAppName = ProviderHandoff.mediaAppDisplayName(appContext)
+            MediaProviderBranding.update(mediaAppName == "RelayTube")
             val session = _state.value.nuvioSession
             val defaults = buildSet {
                 if (session != null) add(Provider.NUVIO)
@@ -860,6 +890,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 appSortOrder = RelaySettingsRepository.loadAppSortOrder(appContext),
                 appIconShape = RelaySettingsRepository.loadAppIconShape(appContext),
                 smartTubeInstalled = ProviderHandoff.isSmartTubeInstalled(appContext),
+                mediaAppDisplayName = mediaAppName,
                 continueWatchingLimits = ContinueWatchingLimits.load(appContext),
                 enabledProviders = com.relayhome.launcher.ProviderSettingsStore.load(appContext, defaults)
             )
@@ -887,6 +918,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 appSortOrder = loaded.appSortOrder,
                 appIconShape = loaded.appIconShape,
                 smartTubeInstalled = loaded.smartTubeInstalled,
+                mediaAppDisplayName = loaded.mediaAppDisplayName,
                 continueWatchingLimits = loaded.continueWatchingLimits,
                 enabledProviders = loaded.enabledProviders
             )
@@ -916,6 +948,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         val appSortOrder: AppSortOrder,
         val appIconShape: AppIconShape,
         val smartTubeInstalled: Boolean,
+        val mediaAppDisplayName: String,
         val continueWatchingLimits: Map<Provider, Int>,
         val enabledProviders: Set<Provider>
     )
@@ -926,13 +959,16 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 SmartTubeSnapshot(
                     nowPlaying = SmartTubePlaybackStore.nowPlaying,
                     profiles = SmartTubePlaybackStore.profiles,
+                    activeProfileId = SmartTubePlaybackStore.activeProfileId,
                     subscriptions = SmartTubePlaybackStore.subscriptionVideos,
                     continueWatching = SmartTubePlaybackStore.continueWatchingVideos,
                     hiddenChannels = SmartTubeChannelFilter.hiddenChannelIds
                 )
             }.collect { snapshot ->
                 _state.update {
-                    val liveItem = snapshot.nowPlaying?.toRelayMediaItem()
+                    val feedsAllowed = relayTubeProfileDataAllowed(it, snapshot.activeProfileId)
+                    val visibleNowPlaying = snapshot.nowPlaying.takeIf { feedsAllowed }
+                    val liveItem = visibleNowPlaying?.toRelayMediaItem()
                     val nextHero = if (liveItem != null && it.hero.item?.contentKey() == liveItem.contentKey()) {
                         it.hero.copy(
                             title = liveItem.showTitle ?: liveItem.title,
@@ -942,10 +978,10 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                         )
                     } else it.hero
                     it.copy(
-                        smartTubeNowPlaying = snapshot.nowPlaying,
+                        smartTubeNowPlaying = visibleNowPlaying,
                         relayTubeProfiles = snapshot.profiles,
-                        smartTubeSubscriptions = snapshot.subscriptions,
-                        smartTubeContinueWatching = snapshot.continueWatching,
+                        smartTubeSubscriptions = snapshot.subscriptions.takeIf { feedsAllowed }.orEmpty(),
+                        smartTubeContinueWatching = snapshot.continueWatching.takeIf { feedsAllowed }.orEmpty(),
                         hiddenSmartTubeChannels = snapshot.hiddenChannels,
                         hero = nextHero
                     )
@@ -956,7 +992,12 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         }
         launchTracked("smarttube.bootstrap") {
             val hasCachedData = withContext(Dispatchers.IO) {
-                SmartTubeChannelFilter.load(appContext)
+                val current = _state.value
+                ProviderHandoff.refreshRelayTubeInstallation(appContext)
+                val mediaName = ProviderHandoff.mediaAppDisplayName(appContext)
+                MediaProviderBranding.update(mediaName == "RelayTube")
+                _state.update { it.copy(smartTubeInstalled = ProviderHandoff.isSmartTubeInstalled(appContext), mediaAppDisplayName = mediaName) }
+                SmartTubeChannelFilter.load(appContext, profileScope(current.nuvioSession, current.activeNuvioProfile))
                 SmartTubePlaybackStore.initialize(appContext)
                 SmartTubePlaybackStore.nowPlaying != null ||
                     SmartTubePlaybackStore.subscriptionVideos.isNotEmpty() ||
@@ -972,10 +1013,20 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
     private data class SmartTubeSnapshot(
         val nowPlaying: SmartTubeNowPlaying?,
         val profiles: List<RelayTubeProfile>,
+        val activeProfileId: String?,
         val subscriptions: List<SmartTubeSubscriptionVideo>,
         val continueWatching: List<SmartTubeSubscriptionVideo>,
         val hiddenChannels: Set<String>
     )
+
+    private fun relayTubeProfileDataAllowed(state: RelayHomeUiState, activeRelayTubeProfileId: String?): Boolean {
+        if (state.mediaAppDisplayName != "RelayTube" || state.nuvioSession == null) return true
+        val accountId = state.nuvioSession.accountId
+        if (accountId.isBlank()) return false
+        val mappedProfileId = RelayProfileMappingStore.get(appContext, accountId, state.activeNuvioProfile)
+            ?: return false
+        return mappedProfileId == activeRelayTubeProfileId
+    }
 
     private fun startNuvioSync(session: NuvioSession? = _state.value.nuvioSession) {
         val activeSession = session ?: return
@@ -1069,13 +1120,15 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
 
     private fun selectRelayTubeProfile(
         profileIndex: Int = _state.value.activeNuvioProfile,
-        allowSelectedFallback: Boolean = true,
+        @Suppress("UNUSED_PARAMETER") allowSelectedFallback: Boolean = true,
         force: Boolean = false
     ) {
         val current = _state.value
         val nuvioProfile = current.nuvioProfiles.firstOrNull { it.index == profileIndex } ?: return
         if (current.relayTubeProfiles.isEmpty()) return
-        val signature = profileIndex to current.relayTubeProfiles.map(RelayTubeProfile::id)
+        val accountId = current.nuvioSession?.accountId.orEmpty()
+        if (accountId.isBlank()) return
+        val signature = Triple(accountId, profileIndex, current.relayTubeProfiles.map(RelayTubeProfile::id))
         if (!force && signature == lastProfilePairingSignature) return
         lastProfilePairingSignature = signature
         launchTracked(
@@ -1085,9 +1138,9 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         ) {
             val pairedId = RelayProfileMappingStore.resolve(
                 appContext,
+                accountId,
                 nuvioProfile,
-                current.relayTubeProfiles,
-                allowSelectedFallback = allowSelectedFallback
+                current.relayTubeProfiles
             ) ?: return@launchTracked
             if (pairedId != SmartTubePlaybackStore.activeProfileId) {
                 RelayTubeProfileBridge.selectProfile(appContext, pairedId)

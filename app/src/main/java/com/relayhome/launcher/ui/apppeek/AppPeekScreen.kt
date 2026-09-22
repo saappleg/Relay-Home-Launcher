@@ -316,7 +316,7 @@ internal fun AppPeekPanel(
         )
         Column(Modifier.padding(start = 78.dp, top = 124.dp, end = 78.dp, bottom = 24.dp).width(620.dp)) {
             Text(
-                if (provider == Provider.SMARTTUBE) "RELAYTUBE LIVE" else "${provider.label.uppercase()} PEEK",
+                if (provider == Provider.SMARTTUBE) "${provider.label.uppercase()} LIVE" else "${provider.label.uppercase()} PEEK",
                 color = provider.accent,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
@@ -339,6 +339,13 @@ internal fun AppPeekPanel(
                     val source = remember { MutableInteractionSource() }
                     val focused by source.collectIsFocusedAsState()
                     val selected = item.contentKey() == selectedKey || (selectedKey == null && index == 0)
+                    val tileImageRequest = remember(item.artworkUrl) {
+                        ImageRequest.Builder(context)
+                            .data(item.artworkUrl)
+                            .size(360, 240)
+                            .crossfade(false)
+                            .build()
+                    }
                     Box(
                         modifier = (if (index == 0) Modifier.focusRequester(focusRequester) else Modifier)
                             .size(126.dp, 82.dp)
@@ -366,7 +373,7 @@ internal fun AppPeekPanel(
                             }
                     ) {
                         AsyncImage(
-                            model = ImageRequest.Builder(context).data(item.artworkUrl).size(360, 240).crossfade(false).build(),
+                            model = tileImageRequest,
                             contentDescription = item.title,
                             contentScale = ContentScale.Crop,
                             modifier = Modifier.fillMaxSize()
@@ -392,8 +399,8 @@ internal fun AppPeekPanel(
             if (usableItems.isEmpty()) {
                 Text(
                     when {
-                        provider == Provider.SMARTTUBE && loading -> "Connecting to RelayTube…"
-                        provider == Provider.SMARTTUBE -> "No live RelayTube video yet"
+                        provider == Provider.SMARTTUBE && loading -> "Connecting to ${provider.label}…"
+                        provider == Provider.SMARTTUBE -> "No live ${provider.label} video yet"
                         provider == Provider.STREMIO -> "Stremio catalog unavailable"
                         else -> "No recent ${provider.label} media"
                     },
@@ -404,9 +411,9 @@ internal fun AppPeekPanel(
                 Spacer(Modifier.height(7.dp))
                 Text(
                     if (provider == Provider.SMARTTUBE && loading) {
-                        "Waiting for RelayTube to share playback and feed metadata."
+                        "Waiting for ${provider.label} to share playback and feed metadata."
                     } else if (provider == Provider.SMARTTUBE) {
-                        "Start a video in RelayTube and its title, channel, artwork, and playback state will appear here."
+                        "Start a video in ${provider.label} and its title, channel, artwork, and playback state will appear here."
                     } else if (provider == Provider.STREMIO) {
                         "Relay does not receive Stremio's live catalog or Continue Watching data. Use the Stremio tab to browse."
                     } else {
@@ -421,8 +428,8 @@ internal fun AppPeekPanel(
                 Spacer(Modifier.height(12.dp))
                 ActionButton(
                     when {
-                        provider == Provider.SMARTTUBE && loading -> "Loading RelayTube…"
-                        provider == Provider.SMARTTUBE -> "Open RelayTube"
+                        provider == Provider.SMARTTUBE && loading -> "Loading ${provider.label}…"
+                        provider == Provider.SMARTTUBE -> "Open ${provider.label}"
                         provider == Provider.STREMIO -> "Stremio is handoff-only"
                         else -> "Waiting for ${provider.label} media"
                     },

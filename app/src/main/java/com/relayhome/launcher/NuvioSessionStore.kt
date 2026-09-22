@@ -11,9 +11,8 @@ import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
-import org.json.JSONObject
 
-/** Keeps the full Nuvio session encrypted with an Android Keystore key. */
+/** Keeps the complete Nuvio session encrypted with an Android Keystore key. */
 internal object NuvioSessionStore {
     private const val preferencesName = "relay_nuvio_session"
     private const val tokenKey = "encrypted_access_token"
@@ -21,9 +20,10 @@ internal object NuvioSessionStore {
     private const val generationKey = "session_generation"
     private const val keyAlias = "relay_nuvio_session_key"
     private const val gcmIvBytes = 12
+    private val storeLock = Any()
 
     fun load(context: Context): NuvioSession? = runCatching {
-        val appContext = context.applicationContext
+        val appContext = applicationContextSafely(context)
         val prefs = preferences(appContext)
         val payload = prefs.getString(tokenKey, null) ?: return null
         val parts = payload.split(':', limit = 2)
@@ -32,64 +32,45 @@ internal object NuvioSessionStore {
         require(iv.size == gcmIvBytes)
         val ciphertext = Base64.decode(parts[1], Base64.NO_WRAP)
         require(ciphertext.isNotEmpty())
-        val plaintext = cipher(Cipher.DECRYPT_MODE, iv).doFinal(ciphertext)
-        val stored = plaintext.decodeToString().trim()
-        require(stored.isNotBlank())
-        val session = if (stored.startsWith("{")) {
-            val session = JSONObject(stored)
-            NuvioSession(
-                accessToken = session.getString("access_token"),
-                refreshToken = session.optString("refresh_token").takeUnless { it.isBlank() || it == "null" },
-                expiresAtEpochSeconds = session.optLong("expires_at", 0L).takeIf { it > 0L }
-            )
-        } else {
-            // Migrate the original token-only payload without treating it as an expired session.
-            NuvioSession(stored)
-        }
+        val plaintext = cipher(Cipher.DECRYPT_MODE, iv).doFinal(ciphertext).decodeToString()
+        val session = decodeSession(plaintext)
         require(session.accessToken.isNotBlank())
+        bindPersistence(appContext, session, prefs.getLong(generationKey, 0L))
         session
     }.getOrElse {
-        // A corrupt/undecryptable token must not reset the nonsecret profile selection.
-        writeSharedPreferencesSafely(context, preferencesName) { it.remove(tokenKey) }
+        clear(context)
         null
     }
 
     fun save(context: Context, session: NuvioSession) {
         require(session.accessToken.isNotBlank()) { "Nuvio session token cannot be blank." }
-        runCatching {
-            saveEncrypted(context, JSONObject()
-                .put("access_token", session.accessToken)
-                .put("refresh_token", session.refreshToken)
-                .put("expires_at", session.expiresAtEpochSeconds)
-                .toString())
-        }
-    }
-
-    /** Test-only seam for exercising upgrades from the original encrypted token-only format. */
-    internal fun saveLegacyTokenForTest(context: Context, accessToken: String) {
-        require(accessToken.isNotBlank())
-        saveEncrypted(context, accessToken)
-    }
-
-    private fun saveEncrypted(context: Context, plaintext: String) {
-        val encryptor = cipher(Cipher.ENCRYPT_MODE)
-        val ciphertext = encryptor.doFinal(plaintext.encodeToByteArray())
-        val payload = "${Base64.encodeToString(encryptor.iv, Base64.NO_WRAP)}:${Base64.encodeToString(ciphertext, Base64.NO_WRAP)}"
-        check(writeSharedPreferencesSafely(context, preferencesName) { it.putString(tokenKey, payload) }) {
-            "Nuvio session could not be saved."
+        val appContext = applicationContextSafely(context)
+        val prefs = preferences(appContext)
+        synchronized(storeLock) {
+            val generation = prefs.getLong(generationKey, 0L) + 1L
+            val saved = writeSharedPreferencesSafely(appContext, preferencesName) {
+                it.putLong(generationKey, generation)
+                    .putString(tokenKey, encrypt(session.tokenSnapshot()))
+            }
+            check(saved) { "Nuvio session could not be saved." }
+            bindPersistence(appContext, session, generation)
         }
     }
 
     fun clear(context: Context) {
-        writeSharedPreferencesSafely(context, preferencesName) {
-            it.remove(tokenKey).remove(profileKey)
+        val appContext = applicationContextSafely(context)
+        synchronized(storeLock) {
+            val prefs = preferences(appContext)
+            writeSharedPreferencesSafely(appContext, preferencesName) {
+                it.putLong(generationKey, prefs.getLong(generationKey, 0L) + 1L)
+                    .remove(tokenKey)
+                    .remove(profileKey)
+            }
         }
     }
 
     fun loadProfile(context: Context): Int = readSharedPreferencesSafely(
-        context,
-        preferencesName,
-        1
+        context, preferencesName, 1
     ) { it.getInt(profileKey, 1).coerceAtLeast(1) }
 
     fun saveProfile(context: Context, profileIndex: Int) {
@@ -100,12 +81,14 @@ internal object NuvioSessionStore {
 
     private fun bindPersistence(context: Context, session: NuvioSession, generation: Long) {
         session.persistTokens = { snapshot ->
-            // A delayed response from a signed-out/previous session must not restore its token.
+            // A late refresh from a signed-out or replaced session must not restore its token.
             runCatching {
                 synchronized(storeLock) {
                     val prefs = preferences(context)
                     if (prefs.getLong(generationKey, 0L) == generation) {
-                        prefs.edit().putString(tokenKey, encrypt(snapshot)).apply()
+                        writeSharedPreferencesSafely(context, preferencesName) {
+                            it.putString(tokenKey, encrypt(snapshot))
+                        }
                     }
                 }
             }
@@ -115,17 +98,16 @@ internal object NuvioSessionStore {
     private fun decodeSession(plaintext: String): NuvioSession {
         val jsonSession = runCatching {
             val json = JSONObject(plaintext)
-            val accessToken = json.optString("access_token").takeIf { it.isNotBlank() } ?: return@runCatching null
+            val token = json.optString("access_token").takeIf { it.isNotBlank() } ?: return@runCatching null
             NuvioSession(
-                accessToken = accessToken,
-                refreshToken = json.optString("refresh_token"),
-                expiresAtEpochSeconds = json.optLong("expires_at", 0L),
+                accessToken = token,
+                refreshToken = json.optString("refresh_token").takeIf { it.isNotBlank() && it != "null" },
+                expiresAtEpochSeconds = json.optLong("expires_at", 0L).takeIf { it > 0L },
                 accountId = json.optString("account_id")
             )
         }.getOrNull()
-        // Older app versions encrypted only the access token. Keep those sessions readable; if
-        // they have expired, NuvioApi will return its typed reauthentication-needed error.
-        return jsonSession ?: NuvioSession(accessToken = plaintext)
+        // Older releases encrypted only the access token; continue accepting that payload.
+        return jsonSession ?: NuvioSession(accessToken = plaintext.trim())
     }
 
     private fun encrypt(snapshot: NuvioTokenSnapshot): String {
@@ -141,13 +123,12 @@ internal object NuvioSessionStore {
         return "${Base64.encodeToString(encryptor.iv, Base64.NO_WRAP)}:${Base64.encodeToString(ciphertext, Base64.NO_WRAP)}"
     }
 
-    private fun preferences(context: Context) = context.applicationContext.getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
+    private fun preferences(context: Context) =
+        applicationContextSafely(context).getSharedPreferences(preferencesName, Context.MODE_PRIVATE)
 
-    private fun cipher(mode: Int, iv: ByteArray? = null): Cipher {
-        val instance = Cipher.getInstance("AES/GCM/NoPadding")
-        if (mode == Cipher.ENCRYPT_MODE) instance.init(mode, key())
-        else instance.init(mode, key(), GCMParameterSpec(128, requireNotNull(iv)))
-        return instance
+    private fun cipher(mode: Int, iv: ByteArray? = null): Cipher = Cipher.getInstance("AES/GCM/NoPadding").apply {
+        if (mode == Cipher.ENCRYPT_MODE) init(mode, key())
+        else init(mode, key(), GCMParameterSpec(128, requireNotNull(iv)))
     }
 
     private fun key(): SecretKey {

@@ -137,10 +137,10 @@ class DetailsTextAndroidTest {
                     rating = null,
                     durationMs = 0L
                 ),
-                expectedSource = "RELAYTUBE",
+                expectedSource = Provider.SMARTTUBE.label.uppercase(),
                 expectedMetadata = listOf("S02 • E03"),
                 expectedAction = "▶  Play",
-                expectedDescription = "Details are available in RelayTube."
+                expectedDescription = "Details are available in ${Provider.SMARTTUBE.label}."
             ),
             DetailsFixture(
                 name = "missing title and sparse stremio metadata",

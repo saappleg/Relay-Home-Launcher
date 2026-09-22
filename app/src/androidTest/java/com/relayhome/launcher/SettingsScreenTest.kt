@@ -48,6 +48,8 @@ class SettingsScreenTest {
     @get:Rule
     val composeRule = createComposeRule()
 
+    private val testNuvioAccountId = "settings-test-account"
+
     @Test
     fun rootRendersCategoriesOnly_withoutInlineSettingsControls() {
         setSettings()
@@ -354,7 +356,7 @@ class SettingsScreenTest {
     fun profileMappings_useAnchoredDropdown_andReturnFocusAfterSelection() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         runBlocking {
-            RelaySettingsRepository.clearProfileMapping(context, 91)
+            RelaySettingsRepository.clearProfileMapping(context, testNuvioAccountId, 91)
             RelaySettingsRepository.awaitIdleForTesting(context)
         }
         var selectedPairing: Pair<Int, String?>? = null
@@ -364,6 +366,7 @@ class SettingsScreenTest {
                 RelayTubeProfile("relay-a", "Living Room", null, false),
                 RelayTubeProfile("relay-b", "Bedroom", null, false)
             ),
+            nuvioAccountId = testNuvioAccountId,
             onProfileMappingChanged = { profile, relayId -> selectedPairing = profile to relayId }
         )
 
@@ -376,7 +379,7 @@ class SettingsScreenTest {
         composeRule.waitForIdle()
         // DropdownMenu is rendered in a separate popup window; assert its visible option rather
         // than relying on the popup container's semantics crossing that window boundary.
-        val relayA = composeRule.onNodeWithText("RelayTube · Living Room")
+        val relayA = composeRule.onNodeWithText("${Provider.SMARTTUBE.label} · Living Room")
         relayA.performSemanticsAction(SemanticsActions.RequestFocus)
         composeRule.awaitFocused(relayA)
         relayA.performClick()
@@ -389,14 +392,14 @@ class SettingsScreenTest {
             pressKey(Key.DirectionDown)
             pressKey(Key.DirectionDown)
         }
-        val relayB = composeRule.onNodeWithText("RelayTube · Bedroom")
+        val relayB = composeRule.onNodeWithText("${Provider.SMARTTUBE.label} · Bedroom")
         composeRule.awaitFocused(relayB)
         relayB.performClick()
         assertEquals(91 to "relay-b", selectedPairing)
         composeRule.waitForIdle()
         composeRule.awaitFocused(trigger)
         runBlocking {
-            RelaySettingsRepository.clearProfileMapping(context, 91)
+            RelaySettingsRepository.clearProfileMapping(context, testNuvioAccountId, 91)
             RelaySettingsRepository.awaitIdleForTesting(context)
         }
     }
@@ -477,6 +480,7 @@ class SettingsScreenTest {
         relayIsDefault: Boolean = false,
         nuvioProfiles: List<NuvioProfile> = emptyList(),
         relayTubeProfiles: List<RelayTubeProfile> = emptyList(),
+        nuvioAccountId: String = "",
         onProfileMappingChanged: (Int, String?) -> Unit = { _, _ -> }
     ) {
         composeRule.setContent {
@@ -526,6 +530,7 @@ class SettingsScreenTest {
                     onShowHomeClockChanged = onShowHomeClockChanged,
                     profileImageUri = null,
                     onProfileImageChanged = {},
+                    nuvioAccountId = nuvioAccountId,
                     nuvioProfiles = nuvioProfiles,
                     relayTubeProfiles = relayTubeProfiles,
                     onProfileMappingChanged = onProfileMappingChanged,

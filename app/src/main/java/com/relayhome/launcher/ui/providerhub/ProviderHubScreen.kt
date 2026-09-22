@@ -174,7 +174,7 @@ internal fun ProviderHubScreen(
         Text(
             when (provider) {
                 Provider.STREMIO -> "Stremio handoff is ready. Relay can open Stremio's board, search, and supported detail links. Relay does not read Stremio's catalog or Continue Watching data; browse those in Stremio."
-                Provider.SMARTTUBE -> "SmartTube is ready as a focused video destination. Relay launches the installed stable or beta app directly, while SmartTube keeps its own subscriptions and playback experience."
+                Provider.SMARTTUBE -> "${provider.label} is ready as a focused video destination. Relay launches the installed app directly, while ${provider.label} keeps its own subscriptions and playback experience."
                 Provider.NUVIO -> if (nuvioConnected) {
                     when {
                         nuvioSyncing -> "Nuvio is connected. Syncing your profile and Continue Watching…"
@@ -196,7 +196,7 @@ internal fun ProviderHubScreen(
             Spacer(Modifier.height(12.dp))
         }
         if (provider == Provider.SMARTTUBE) {
-            ActionButton("Open SmartTube", palette.copy(accent = provider.accent), primary = true, focusRequester = firstActionFocusRequester) {
+            ActionButton("Open ${provider.label}", palette.copy(accent = provider.accent), primary = true, focusRequester = firstActionFocusRequester) {
                 onOpenRelayTube()
             }
             Spacer(Modifier.height(12.dp))

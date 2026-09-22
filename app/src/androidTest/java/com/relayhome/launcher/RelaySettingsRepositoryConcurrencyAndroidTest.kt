@@ -17,6 +17,7 @@ import org.junit.runner.RunWith
 @RunWith(AndroidJUnit4::class)
 class RelaySettingsRepositoryConcurrencyAndroidTest {
     private val context: Context = ApplicationProvider.getApplicationContext()
+    private val accountId = "concurrency-test-account"
 
     @Before
     fun clearStore() {
@@ -43,6 +44,7 @@ class RelaySettingsRepositoryConcurrencyAndroidTest {
                     assert(start.await(5, TimeUnit.SECONDS))
                     RelaySettingsRepository.saveResolvedProfileMapping(
                         context,
+                        accountId,
                         profile,
                         "relay-profile-$profile"
                     )
@@ -57,7 +59,10 @@ class RelaySettingsRepositoryConcurrencyAndroidTest {
 
         runBlocking { RelaySettingsRepository.awaitIdleForTesting(context) }
         repeat(workers) { profile ->
-            assertEquals("relay-profile-$profile", RelaySettingsRepository.getResolvedProfileMapping(context, profile))
+            assertEquals(
+                "relay-profile-$profile",
+                RelaySettingsRepository.getResolvedProfileMapping(context, accountId, profile)
+            )
         }
     }
 }

@@ -20,6 +20,8 @@ jobs:
           java-version: '17'
           cache: gradle
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
       - name: Run JVM unit tests
         run: ./gradlew test
 
@@ -94,6 +96,8 @@ jobs:
           java-version: '17'
           cache: gradle
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools
       - name: Run connected Android tests on an emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:

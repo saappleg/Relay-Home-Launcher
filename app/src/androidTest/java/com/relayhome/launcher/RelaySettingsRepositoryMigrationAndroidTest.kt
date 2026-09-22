@@ -9,6 +9,7 @@ import com.relayhome.launcher.ui.shared.Provider
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -85,7 +86,9 @@ class RelaySettingsRepositoryMigrationAndroidTest {
         assertEquals(13, limits.getValue(Provider.STREMIO))
         assertEquals(17, limits.getValue(Provider.NUVIO))
         assertEquals(ContinueWatchingLimits.defaultLimit, limits.getValue(Provider.SMARTTUBE))
-        assertEquals("relay-profile-2", RelayProfileMappingStore.get(context, 2))
+        // Older builds did not record the owning Nuvio account. Keep the value in the migrated
+        // legacy key, but do not expose it as a mapping for an arbitrary account.
+        assertNull(RelayProfileMappingStore.get(context, "migration-test-account", 2))
         assertEquals(setOf(HomeRow.SUBSCRIPTIONS), RelaySettingsRepository.loadHiddenHomeRows(context))
 
         val destinationKeys = runBlocking {

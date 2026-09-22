@@ -23,9 +23,9 @@ removes orphaned profile and invisible favorite-app targets, keeps recycled-card
 requesters tied to mounted content, and covers Details-to-Home, nested Settings
 Back, hero/rail handoffs, and rapid D-pad traversal.
 
-## Beta.7 release notes
+## Beta.7 release notes (historical)
 
-Beta.7 is the current published signed prerelease and packages the next-phase
+Beta.7 was a published signed prerelease and packages the next-phase
 hardening work that was complete at its tag:
 
 - root navigation transitions use generation-aware focus restoration, preventing
@@ -57,12 +57,13 @@ Published beta.7 verification:
 The GitHub release is non-draft and marked as a prerelease. The APK was
 downloaded from that release and independently checked before TV installation.
 
-The `feature/focus-info-preview` branch is ahead of the beta.7 tag. Its
-post-beta.7 follow-ups include clearer debug-versus-production updater guidance,
-an additional Home route-restoration focus acknowledgement, Settings tile
-accessibility semantics, and bounded Continue Watching adaptation. These branch
-changes are not part of the published beta.7 APK; validate and release them
-under a new version after the normal release gate passes.
+Beta.8 and beta.9 added later follow-ups. Beta.10 is the latest published
+prerelease; its signed APK uses version code 33 and has SHA-256
+`c887c334b93756422010aa3514e8d749cafc9b18f59479984c67cda00bde3094`. Its tag
+points to `11be5a7bccd2dc913d437e933c19e3053c69b5d9`. This source reconciles the
+newer `feature/focus-info-preview` Home/App Peek implementation with beta.10's
+Nuvio session, RelayTube naming, TMDB, and Shizuku fixes. The follow-up release
+must pass the normal gate before it is considered published.
 
 ## Beta.8 release notes
 
@@ -102,8 +103,8 @@ isolated Android TV emulator suite passed before signing and publication.
 
 ## Version and signing rules
 
-Use a version code larger than every published APK. Beta.7 is code 30, so the
-next beta must use at least code 31. Never replace the production signing key
+Use a version code larger than every published APK. Beta.10 is code 33, so the
+next beta must use at least code 34. Never replace the production signing key
 after the first signed beta; Android updates require certificate continuity.
 
 The publish workflow requires these repository secrets:
@@ -118,8 +119,8 @@ The checked-in signing example uses the corresponding five
 `relay.signing.*` values: store file, store type, store password, key alias,
 and key password. A JKS keystore is not accepted by the publish workflow.
 
-Non-release local builds use the development identity `0.1.0-beta.5` / code 28.
-This fallback is useful for debug and test APKs but is not the published beta.7
+Non-release local builds use the development identity `0.1.0-beta.11` / code 34.
+This fallback is useful for debug and test APKs but is not the published beta.10
 build and must never be used as release evidence. Release packaging fails closed
 unless `RELAY_VERSION_NAME`, `RELAY_VERSION_CODE`, and the signing values are
 explicitly provided. The local release keystore may be configured in ignored
@@ -130,8 +131,8 @@ explicitly provided. The local release keystore may be configured in ignored
 Use JDK 17. With a permanent PKCS12 keystore configured, run:
 
 ```bash
-export RELAY_VERSION_NAME=0.1.0-beta.8
-export RELAY_VERSION_CODE=31
+export RELAY_VERSION_NAME=0.1.0-beta.11
+export RELAY_VERSION_CODE=34
 ./gradlew :app:verifyRelayReleaseVersion :app:lintRelease \
   :app:testReleaseUnitTest :app:assembleRelease
 ```
@@ -151,11 +152,11 @@ is:
 ```bash
 gh workflow run publish-release.yml \
   --repo saappleg/Relay-Home-Launcher \
-  --ref feature/focus-info-preview \
+  --ref main \
   -f channel=beta \
-  -f version_name=0.1.0-beta.8 \
-  -f version_code=31 \
-  -f release_notes='Short, factual release notes.'
+  -f version_name=0.1.0-beta.11 \
+  -f version_code=34 \
+  -f release_notes='Faster Home focus previews and reliable App Peek return focus; account-safe Nuvio and RelayTube profiles; RelayTube-aware labels; safer cached metadata and launcher handoff.'
 ```
 
 The workflow checks out exactly the requested revision, validates the channel
@@ -179,12 +180,12 @@ workflow's display alone:
 
 ```bash
 gh run list --repo saappleg/Relay-Home-Launcher --workflow publish-release.yml --limit 5
-gh release view v0.1.0-beta.8 --repo saappleg/Relay-Home-Launcher \
+gh release view v0.1.0-beta.11 --repo saappleg/Relay-Home-Launcher \
   --json tagName,isDraft,isPrerelease,targetCommitish,assets
 ```
 
 Confirm the release is not a draft, has the expected prerelease flag, contains
-exactly `relay-home-0.1.0-beta.8.apk`, and that its tag points to the tested
+exactly `relay-home-0.1.0-beta.11.apk`, and that its tag points to the tested
 revision. Install the published asset on a clean TV, then update from the
 signed beta baseline and verify that app data remains intact.
 
@@ -225,6 +226,9 @@ updates preserve app data normally.
 - `v0.1.0-beta.8` (code 31) contains the post-beta.7 focus-restoration,
   accessibility, bounded Continue Watching, updater-diagnostics, and release
   documentation follow-ups described above.
+- `v0.1.0-beta.10` (code 33) contains configurable Home rows, ordered favorites,
+  profile-safe Nuvio syncing and automatic refresh, TMDB caching, RelayTube-aware
+  handoff, and safer Shizuku launcher switching.
 
 The baseline-profile module is wired but generation is explicit and is not a
 release-workflow step. It currently covers startup and a short Home D-pad

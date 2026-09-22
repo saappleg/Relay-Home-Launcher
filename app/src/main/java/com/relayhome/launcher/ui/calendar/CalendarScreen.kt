@@ -273,7 +273,7 @@ internal fun CalendarScreen(
         Text(if (weekView) "This week" else "This month", color = ivory, fontSize = 19.sp, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(10.dp))
         if (visibleEntries.isEmpty()) {
-            Text(if (scheduleLoading) "Looking up exact premiere and episode dates…" else "No scheduled events for this month. Nuvio library titles are supplemented with exact TMDB dates; Stremio and SmartTube will join as their schedule data becomes available.", color = muted, fontSize = 15.sp, lineHeight = 22.sp)
+            Text(if (scheduleLoading) "Looking up exact premiere and episode dates…" else "No scheduled events for this month. Nuvio library titles are supplemented with exact TMDB dates; Stremio and ${Provider.SMARTTUBE.label} will join as their schedule data becomes available.", color = muted, fontSize = 15.sp, lineHeight = 22.sp)
         } else {
             LazyRow(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 items(

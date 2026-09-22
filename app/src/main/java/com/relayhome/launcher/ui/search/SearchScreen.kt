@@ -150,22 +150,26 @@ import java.time.YearMonth
 internal fun SearchScreen(
     palette: RelayPalette,
     providers: Set<Provider>,
+    profileScope: String,
     onBackHome: () -> Unit,
     onItemSelected: (MediaItem) -> Unit
 ) {
     val context = LocalContext.current
     val keyboardController = LocalSoftwareKeyboardController.current
     var query by remember { mutableStateOf("") }
+    var recentSearches by remember(profileScope) { mutableStateOf(SearchHistoryStore.load(context, profileScope)) }
     var results by remember { mutableStateOf(emptyList<MediaItem>()) }
     var loading by remember { mutableStateOf(false) }
     var searchProvider by remember { mutableStateOf(providers.firstOrNull { it == Provider.STREMIO } ?: providers.firstOrNull() ?: Provider.NUVIO) }
     val backFocusRequester = remember { FocusRequester() }
     val providerFocusRequester = remember { FocusRequester() }
     val searchFocusRequester = remember { FocusRequester() }
+    val recentFocusRequester = remember { FocusRequester() }
     val resultFocusRequester = remember { FocusRequester() }
     val handoffFocusRequester = remember { FocusRequester() }
     val appFocusRequester = remember { FocusRequester() }
     val providerSelectorState = rememberScrollState()
+    val searchHistoryState = rememberScrollState()
     val searchScreenState = rememberScrollState()
     val sortedProviders = remember(providers) { providers.sortedBy { it.label } }
     val hasProviders = sortedProviders.isNotEmpty()
@@ -179,11 +183,20 @@ internal fun SearchScreen(
     val hasResults = searchProvider == Provider.NUVIO && visibleResults.isNotEmpty()
     val hasHandoff = query.isNotBlank()
     val hasApps = installedApps.isNotEmpty()
+    val hasRecentSearches = query.isBlank() && recentSearches.isNotEmpty()
     val searchDownRequester = when {
+        hasRecentSearches -> recentFocusRequester
         hasResults -> resultFocusRequester
         hasHandoff -> handoffFocusRequester
         hasApps -> appFocusRequester
         else -> null
+    }
+    fun recordSearch(): String {
+        val cleanQuery = query.trim()
+        if (cleanQuery.isNotBlank()) {
+            recentSearches = SearchHistoryStore.add(context, profileScope, cleanQuery)
+        }
+        return cleanQuery
     }
     LaunchedEffect(Unit) {
         withFrameNanos { }
@@ -247,6 +260,7 @@ internal fun SearchScreen(
                 textStyle = androidx.compose.ui.text.TextStyle(color = ivory, fontSize = 20.sp),
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                 keyboardActions = KeyboardActions(onSearch = {
+                    recordSearch()
                     keyboardController?.hide()
                     searchDownRequester?.requestFocus()
                 }),
@@ -287,6 +301,36 @@ internal fun SearchScreen(
         Spacer(Modifier.height(24.dp))
         Text(if (query.isBlank()) "Start typing to search ${searchProvider.label}" else "Results for “$query”", color = ivory, fontSize = 21.sp, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(13.dp))
+        if (hasRecentSearches) {
+            Row(
+                Modifier.fillMaxWidth().horizontalScroll(searchHistoryState),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                recentSearches.forEachIndexed { index, recentQuery ->
+                    ActionButton(
+                        recentQuery,
+                        palette,
+                        primary = false,
+                        focusRequester = if (index == 0) recentFocusRequester else null,
+                        upFocusRequester = searchFocusRequester
+                    ) {
+                        query = recentQuery
+                        searchFocusRequester.requestFocus()
+                    }
+                }
+                ActionButton(
+                    "Clear history",
+                    palette,
+                    primary = false
+                ) {
+                    SearchHistoryStore.clear(context, profileScope)
+                    recentSearches = emptyList()
+                    searchFocusRequester.requestFocus()
+                }
+            }
+            Spacer(Modifier.height(14.dp))
+        }
         if (loading) {
             Text("Searching…", color = muted, fontSize = 17.sp)
         } else if (query.trim().length < 2) {
@@ -308,7 +352,7 @@ internal fun SearchScreen(
                         focusRequester = if (result.contentKey() == visibleResults.firstOrNull()?.contentKey()) resultFocusRequester else null,
                         upFocusRequester = searchFocusRequester,
                         downFocusRequester = if (hasHandoff) handoffFocusRequester else if (hasApps) appFocusRequester else null,
-                        onClick = { onItemSelected(result) }
+                        onClick = { recordSearch(); onItemSelected(result) }
                     ) { }
                 }
             }
@@ -322,7 +366,7 @@ internal fun SearchScreen(
                 focusRequester = handoffFocusRequester,
                 upFocusRequester = if (hasResults) resultFocusRequester else searchFocusRequester,
                 downFocusRequester = if (hasApps) appFocusRequester else null
-            ) { ProviderHandoff.search(context, searchProvider, query) }
+            ) { recordSearch().takeIf { it.isNotBlank() }?.let { ProviderHandoff.search(context, searchProvider, it) } }
         }
         Spacer(Modifier.height(30.dp))
         Text("Apps", color = ivory, fontSize = 21.sp, fontWeight = FontWeight.Medium)

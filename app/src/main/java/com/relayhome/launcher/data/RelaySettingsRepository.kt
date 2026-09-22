@@ -18,6 +18,7 @@ import com.relayhome.launcher.ui.shared.Provider
 import com.relayhome.launcher.ui.shared.AppIconShape
 import com.relayhome.launcher.ui.shared.AppSortOrder
 import java.util.concurrent.atomic.AtomicReference
+import java.security.MessageDigest
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -448,44 +449,83 @@ internal object RelaySettingsRepository {
         }
     }
 
-    fun getResolvedProfileMapping(context: Context, nuvioProfile: Int): String? {
+    fun getResolvedProfileMapping(context: Context, accountId: String, nuvioProfile: Int): String? {
+        if (accountId.isBlank()) return null
         initialize(context)
-        return snapshot.get().values[stringPreferencesKey(profileMappingKey(resolvedProfileMappingPrefix, nuvioProfile))]
+        return snapshot.get().values[stringPreferencesKey(profileMappingKey(resolvedProfileMappingPrefix, accountId, nuvioProfile))]
     }
 
-    fun getManualProfileMapping(context: Context, nuvioProfile: Int): String? {
+    fun getManualProfileMapping(context: Context, accountId: String, nuvioProfile: Int): String? {
+        if (accountId.isBlank()) return null
         initialize(context)
-        return snapshot.get().values[stringPreferencesKey(profileMappingKey(manualProfileMappingPrefix, nuvioProfile))]
+        return snapshot.get().values[stringPreferencesKey(profileMappingKey(manualProfileMappingPrefix, accountId, nuvioProfile))]
     }
 
-    fun saveManualProfileMapping(context: Context, nuvioProfile: Int, value: String?) {
+    fun isRelayTubeProfileMappedElsewhere(
+        context: Context,
+        accountId: String,
+        nuvioProfile: Int,
+        relayTubeProfileId: String
+    ): Boolean {
+        if (accountId.isBlank() || relayTubeProfileId.isBlank()) return false
+        initialize(context)
+        val values = snapshot.get().values.asMap()
+        val prefixes = profileMappingPrefixes(accountId)
+        val currentKeys = profileMappingKinds.map { kind ->
+            profileMappingKey(kind, accountId, nuvioProfile)
+        }.toSet()
+        return values.any { (key, value) ->
+            key.name.startsWithAny(prefixes) &&
+                key.name !in currentKeys &&
+                value == relayTubeProfileId
+        }
+    }
+
+    fun saveManualProfileMapping(context: Context, accountId: String, nuvioProfile: Int, value: String?) {
+        if (accountId.isBlank()) return
         updateSnapshotAndPersist(context) {
-            val key = stringPreferencesKey(profileMappingKey(manualProfileMappingPrefix, nuvioProfile))
+            value?.takeIf { it.isNotBlank() }?.let { selectedId ->
+                val prefixes = profileMappingPrefixes(accountId)
+                val currentKeys = profileMappingKinds.map { kind ->
+                    profileMappingKey(kind, accountId, nuvioProfile)
+                }.toSet()
+                val duplicates = it.asMap().filter { (key, storedValue) ->
+                    key.name.startsWithAny(prefixes) && key.name !in currentKeys && storedValue == selectedId
+                }.keys
+                duplicates.forEach { duplicate ->
+                    @Suppress("UNCHECKED_CAST")
+                    it.remove(duplicate as Preferences.Key<String>)
+                }
+            }
+            val key = stringPreferencesKey(profileMappingKey(manualProfileMappingPrefix, accountId, nuvioProfile))
             if (value.isNullOrBlank()) it.remove(key) else it[key] = value
         }
     }
 
-    fun saveProfileMappingCandidate(context: Context, nuvioProfile: Int, value: String?) {
+    fun saveProfileMappingCandidate(context: Context, accountId: String, nuvioProfile: Int, value: String?) {
+        if (accountId.isBlank()) return
         updateSnapshotAndPersist(context) {
-            val key = stringPreferencesKey(profileMappingKey(candidateProfileMappingPrefix, nuvioProfile))
+            val key = stringPreferencesKey(profileMappingKey(candidateProfileMappingPrefix, accountId, nuvioProfile))
             if (value == null) it.remove(key) else it[key] = value
         }
     }
 
-    fun clearProfileMapping(context: Context, nuvioProfile: Int) {
+    fun clearProfileMapping(context: Context, accountId: String, nuvioProfile: Int) {
+        if (accountId.isBlank()) return
         updateSnapshotAndPersist(context) {
-            it.remove(stringPreferencesKey(profileMappingKey(manualProfileMappingPrefix, nuvioProfile)))
-            it.remove(stringPreferencesKey(profileMappingKey(candidateProfileMappingPrefix, nuvioProfile)))
-            it.remove(stringPreferencesKey(profileMappingKey(resolvedProfileMappingPrefix, nuvioProfile)))
-            it.remove(stringPreferencesKey(profileMappingKey(legacyProfileMappingPrefix, nuvioProfile)))
+            it.remove(stringPreferencesKey(profileMappingKey(manualProfileMappingPrefix, accountId, nuvioProfile)))
+            it.remove(stringPreferencesKey(profileMappingKey(candidateProfileMappingPrefix, accountId, nuvioProfile)))
+            it.remove(stringPreferencesKey(profileMappingKey(resolvedProfileMappingPrefix, accountId, nuvioProfile)))
+            it.remove(stringPreferencesKey(profileMappingKey(legacyProfileMappingPrefix, accountId, nuvioProfile)))
         }
     }
 
-    fun saveResolvedProfileMapping(context: Context, nuvioProfile: Int, value: String) {
+    fun saveResolvedProfileMapping(context: Context, accountId: String, nuvioProfile: Int, value: String) {
+        if (accountId.isBlank()) return
         updateSnapshotAndPersist(context) {
-            it[stringPreferencesKey(profileMappingKey(resolvedProfileMappingPrefix, nuvioProfile))] = value
-            it.remove(stringPreferencesKey(profileMappingKey(candidateProfileMappingPrefix, nuvioProfile)))
-            it.remove(stringPreferencesKey(profileMappingKey(legacyProfileMappingPrefix, nuvioProfile)))
+            it[stringPreferencesKey(profileMappingKey(resolvedProfileMappingPrefix, accountId, nuvioProfile))] = value
+            it.remove(stringPreferencesKey(profileMappingKey(candidateProfileMappingPrefix, accountId, nuvioProfile)))
+            it.remove(stringPreferencesKey(profileMappingKey(legacyProfileMappingPrefix, accountId, nuvioProfile)))
         }
     }
 
@@ -715,7 +755,30 @@ internal object RelaySettingsRepository {
 
     private fun continueWatchingLimitKey(providerName: String): String = continueWatchingLimitPrefix + providerName
 
-    private fun profileMappingKey(kind: String, nuvioProfile: Int): String = profileMappingPrefix + kind + nuvioProfile
+    private fun profileMappingKey(kind: String, accountId: String, nuvioProfile: Int): String {
+        val accountDigest = MessageDigest.getInstance("SHA-256")
+            .digest(accountId.toByteArray())
+            .take(12)
+            .joinToString("") { byte -> "%02x".format(byte) }
+        return profileMappingPrefix + kind + accountDigest + "_" + nuvioProfile
+    }
+
+    private fun profileMappingPrefixes(accountId: String): List<String> {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(accountId.toByteArray())
+            .take(12)
+            .joinToString("") { byte -> "%02x".format(byte) }
+        return profileMappingKinds.map { kind -> "$profileMappingPrefix$kind$digest_" }
+    }
+
+    private fun String.startsWithAny(prefixes: List<String>): Boolean = prefixes.any(::startsWith)
+
+    private val profileMappingKinds = listOf(
+        manualProfileMappingPrefix,
+        resolvedProfileMappingPrefix,
+        candidateProfileMappingPrefix,
+        legacyProfileMappingPrefix
+    )
 }
 
 private fun sharedPreferencesOrNull(context: Context, name: String): SharedPreferences? =

@@ -129,7 +129,10 @@ class DpadFocusTraversalTest {
 
         val home = composeRule.onNodeWithTag("home-top-destination-home", useUnmergedTree = true)
         val nuvio = composeRule.onNodeWithTag("home-top-destination-nuvio", useUnmergedTree = true)
-        val relayTube = composeRule.onNodeWithTag("home-top-destination-relaytube", useUnmergedTree = true)
+        val relayTube = composeRule.onNodeWithTag(
+            "home-top-destination-${Provider.SMARTTUBE.label.lowercase()}",
+            useUnmergedTree = true
+        )
         val calendar = composeRule.onNodeWithTag("home-top-destination-calendar", useUnmergedTree = true)
         val apps = composeRule.onNodeWithTag("home-top-destination-apps", useUnmergedTree = true)
 

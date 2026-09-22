@@ -46,14 +46,17 @@ internal object ProviderHandoff {
     internal fun isRelayTubePackage(packageName: String): Boolean =
         packageName in relayTubePackages
 
+    internal fun installedRelayTubePackage(context: Context): String? = runCatching {
+        relayTubePackages.firstOrNull { context.packageManager.getLaunchIntentForPackage(it) != null }
+    }.getOrNull()
+
     fun refreshRelayTubeInstallation(context: Context) {
-        relayTubeInstalledCache = context.packageManager.getLaunchIntentForPackage(relayTubePackage) != null
+        relayTubeInstalledCache = installedRelayTubePackage(context) != null
     }
 
-    fun isRelayTubeInstalled(context: Context): Boolean = relayTubeInstalledCache
-        ?: (context.packageManager.getLaunchIntentForPackage(relayTubePackage) != null).also {
-            relayTubeInstalledCache = it
-        }
+    fun isRelayTubeInstalled(context: Context): Boolean = relayTubeInstalledCache ?: run {
+        (installedRelayTubePackage(context) != null).also { relayTubeInstalledCache = it }
+    }
 
     fun mediaAppDisplayName(context: Context): String =
         if (isRelayTubeInstalled(context)) "RelayTube" else "SmartTube"
@@ -101,7 +104,7 @@ internal object ProviderHandoff {
     fun openSmartTube(context: Context) {
         val intent = launchIntentForAnyPackage(context, smartTubePackages)
         if (intent == null) {
-            notice(context, "RelayTube or SmartTube is not installed on this device.")
+            notice(context, "${mediaAppDisplayName(context)} is not installed on this device.")
         } else {
             runCatching { context.startActivity(intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
                 .onFailure { notice(context, "${mediaAppDisplayName(context)} could not be opened.") }
@@ -113,11 +116,11 @@ internal object ProviderHandoff {
         val cleanVideoId = normalizeYouTubeVideoId(videoId)
         val packageName = installedSmartTubePackage(context)
         if (packageName == null) {
-            notice(context, "RelayTube or SmartTube is not installed on this device.")
+            notice(context, "${mediaAppDisplayName(context)} is not installed on this device.")
             return
         }
         if (cleanVideoId == null) {
-            notice(context, "RelayTube cannot open a video without a valid YouTube id.")
+            notice(context, "${mediaAppDisplayName(context)} cannot open a video without a valid YouTube id.")
             return
         }
         val uri = Uri.parse("https://www.youtube.com/watch").buildUpon()
@@ -130,7 +133,7 @@ internal object ProviderHandoff {
             .setPackage(packageName)
             .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         if (resolveActivitySafely(context, intent) == null) {
-            notice(context, "This RelayTube build does not support direct video links.")
+            notice(context, "This ${mediaAppDisplayName(context)} build does not support direct video links.")
             openSmartTube(context)
             return
         }
@@ -181,7 +184,7 @@ internal object ProviderHandoff {
             Provider.SMARTTUBE -> {
                 val packageName = installedSmartTubePackage(context)
                 if (packageName == null) {
-                    notice(context, "RelayTube or SmartTube is not installed on this device.")
+                    notice(context, "${mediaAppDisplayName(context)} is not installed on this device.")
                     return
                 }
                 val uri = Uri.parse("https://www.youtube.com/results").buildUpon()

@@ -35,7 +35,7 @@ class NuvioSessionStoreAndroidTest {
         NuvioSessionStore.saveProfile(context, 3)
         NuvioSessionStore.save(context, session)
 
-        assertEquals(session, NuvioSessionStore.load(context))
+        assertEquals(session.tokenSnapshot(), NuvioSessionStore.load(context)?.tokenSnapshot())
         assertEquals(3, NuvioSessionStore.loadProfile(context))
         val storedPayload = preferences.getString("encrypted_access_token", null).orEmpty()
         assertEquals(1, storedPayload.count { it == ':' })
@@ -56,7 +56,7 @@ class NuvioSessionStoreAndroidTest {
         NuvioSessionStore.saveProfile(context, 2)
         NuvioSessionStore.saveLegacyTokenForTest(context, "legacy-access-token")
 
-        assertEquals(NuvioSession("legacy-access-token"), NuvioSessionStore.load(context))
+        assertEquals("legacy-access-token", NuvioSessionStore.load(context)?.accessToken)
         assertEquals(2, NuvioSessionStore.loadProfile(context))
     }
 }

@@ -19,10 +19,23 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 internal enum class Destination(val label: String) { HOME("Home"), DETAIL("Detail"), APPS("Apps"), SEARCH("Search"), CALENDAR("Calendar"), SETTINGS("Settings"), PROVIDER("Provider"), NUVIO_CONNECT("Nuvio connect") }
-internal enum class Provider(val label: String, val accent: Color) {
+internal enum class Provider(private val defaultLabel: String, val accent: Color) {
     STREMIO("Stremio", Color(0xFF5B87FF)),
     NUVIO("Nuvio", Color(0xFFAF7AFF)),
-    SMARTTUBE("RelayTube", Color(0xFFFF5F5F))
+    SMARTTUBE("SmartTube", Color(0xFFFF5F5F));
+
+    val label: String
+        get() = if (this == SMARTTUBE) MediaProviderBranding.smartTubeLabel else defaultLabel
+}
+
+/** The visible provider label follows the installed app while provider IDs stay stable. */
+internal object MediaProviderBranding {
+    @Volatile var smartTubeLabel: String = "SmartTube"
+        private set
+
+    fun update(relayTubeInstalled: Boolean) {
+        smartTubeLabel = if (relayTubeInstalled) "RelayTube" else "SmartTube"
+    }
 }
 internal data class MediaItem(
     val title: String,
@@ -126,7 +139,7 @@ internal fun MediaItem.heroSubtitle(): String = if (provider == Provider.SMARTTU
         playbackStatus(),
         if (playbackPlaying == null && infoProgress() > 0f) "${(infoProgress() * 100).toInt()}% watched" else null
     ).joinToString(" • ").ifBlank {
-        description.visibleRelayText().ifBlank { "Ready to watch in RelayTube." }
+        description.visibleRelayText().ifBlank { "Ready to watch in ${Provider.SMARTTUBE.label}." }
     }
 } else {
     episodeInfo.visibleRelayText().ifBlank {
@@ -392,11 +405,12 @@ internal val relayNuvioIcon = relayNavigationIcon("RelayNuvio") {
     moveTo(9f, 10f); lineTo(15f, 10f); moveTo(9f, 14f); lineTo(15f, 14f)
 }
 
-internal val relaySmartTubeIcon = relayNavigationIcon("RelayTube") {
-    moveTo(8f, 4f); lineTo(12f, 8f); lineTo(16f, 4f)
-    moveTo(5f, 8f); lineTo(19f, 8f); lineTo(19f, 18f); lineTo(5f, 18f); close()
-    moveTo(10f, 11f); lineTo(15f, 13f); lineTo(10f, 15f); close()
-}
+internal val relaySmartTubeIcon: ImageVector
+    get() = relayNavigationIcon(Provider.SMARTTUBE.label) {
+        moveTo(8f, 4f); lineTo(12f, 8f); lineTo(16f, 4f)
+        moveTo(5f, 8f); lineTo(19f, 8f); lineTo(19f, 18f); lineTo(5f, 18f); close()
+        moveTo(10f, 11f); lineTo(15f, 13f); lineTo(10f, 15f); close()
+    }
 
 internal val relayCalendarIcon = relayNavigationIcon("RelayCalendar") {
     moveTo(5f, 5.5f); lineTo(19f, 5.5f); lineTo(19f, 19f); lineTo(5f, 19f); close()

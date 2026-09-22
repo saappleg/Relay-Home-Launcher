@@ -6,9 +6,10 @@ import org.json.JSONObject
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
 import androidx.compose.ui.graphics.Color
 import com.relayhome.launcher.ui.shared.MediaItem
 import com.relayhome.launcher.ui.shared.Provider
@@ -27,6 +28,10 @@ import java.text.Normalizer
 import java.time.LocalDate
 import java.util.Locale
 import java.net.UnknownHostException
+import java.util.LinkedHashMap
+import java.util.concurrent.atomic.AtomicReference
+import kotlin.coroutines.resume
+import kotlin.coroutines.resumeWithException
 
 internal data class TmdbCalendarEntry(val date: LocalDate, val item: MediaItem)
 internal data class TvEpisode(val number: Int, val title: String)
@@ -200,7 +205,11 @@ internal object TmdbTitleMatcher {
 /** Read-only metadata supplement for Nuvio episodes. Nuvio remains the progress authority. */
 internal object TmdbApi {
     private const val baseUrl = "https://api.themoviedb.org/3"
+    private const val metadataCacheTtlMs = 15 * 60 * 1000L
+    private const val metadataCacheMaxEntries = 160
     private val apiKey get() = MetadataApiKeyAccess.tmdbApiKey()
+    private data class CachedResponse(val value: String, val storedAtMs: Long)
+    private val responseCache = object : LinkedHashMap<String, CachedResponse>(32, .75f, true) {}
 
     suspend fun enrichEpisodeDetails(item: MediaItem): MediaItem = withContext(Dispatchers.IO) {
         enrichEpisodeDetailsResult(item).getOrDefault(item)
@@ -520,39 +529,100 @@ internal object TmdbApi {
 
     private val IMDb_ID_PATTERN = Regex("tt\\d{5,12}")
 
-    private suspend fun get(path: String, query: Map<String, String> = emptyMap()): String {
+    private suspend fun get(path: String, query: Map<String, String> = emptyMap()): String =
+        getCancellable(path, query)
+
+    /**
+     * Uses the same bounded retry path as the feature branch while disconnecting any active
+     * HttpURLConnection when the caller cancels. Cache only completed successful responses.
+     */
+    private suspend fun getCancellable(path: String, query: Map<String, String> = emptyMap()): String {
+        currentCoroutineContext().ensureActive()
+        val key = cacheKey(path, query)
+        cachedResponse(key)?.let { return it }
         val params = (query + ("api_key" to apiKey)).entries.joinToString("&") {
-            "${URLEncoder.encode(it.key, "UTF-8")}=${URLEncoder.encode(it.value, "UTF-8")}"
+            URLEncoder.encode(it.key, "UTF-8") + "=" + URLEncoder.encode(it.value, "UTF-8")
         }
-        return requestWithRetry(path, request = {
-            val connection = (URL("$baseUrl$path?$params").openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = REQUEST_TIMEOUT_MS
-                readTimeout = REQUEST_TIMEOUT_MS
-            }
-            try {
-                val status = connection.responseCode
-                if (connection.contentLengthLong > MAX_HTTP_RESPONSE_BYTES) throw TmdbResponseTooLargeException()
-                val stream = if (status in 200..299) connection.inputStream else connection.errorStream
-                val body = stream?.use {
-                    readResponseBodyAtMost(it, MAX_HTTP_RESPONSE_BYTES) { TmdbResponseTooLargeException() }
-                }.orEmpty()
-                TmdbHttpResponse(status, body)
-            } finally {
-                connection.disconnect()
-            }
+        val body = requestWithRetry(path, request = {
+            cancellableHttpRequest(baseUrl + path + "?" + params)
         })
+        currentCoroutineContext().ensureActive()
+        cacheResponse(key, body)
+        return body
     }
+
+    private fun cacheKey(path: String, query: Map<String, String>): String = path + "?" +
+        query.toSortedMap().entries.joinToString("&") {
+            URLEncoder.encode(it.key, "UTF-8") + "=" + URLEncoder.encode(it.value, "UTF-8")
+        }
+
+    private fun cachedResponse(key: String): String? = synchronized(responseCache) {
+        val entry = responseCache[key] ?: return@synchronized null
+        if (System.currentTimeMillis() - entry.storedAtMs > metadataCacheTtlMs) {
+            responseCache.remove(key)
+            null
+        } else {
+            entry.value
+        }
+    }
+
+    private fun cacheResponse(key: String, value: String) = synchronized(responseCache) {
+        responseCache[key] = CachedResponse(value, System.currentTimeMillis())
+        while (responseCache.size > metadataCacheMaxEntries) {
+            responseCache.remove(responseCache.keys.iterator().next())
+        }
+    }
+
+    /** Performs blocking socket work on IO and disconnects it promptly on coroutine cancellation. */
+    private suspend fun cancellableHttpRequest(url: String): TmdbHttpResponse =
+        suspendCancellableCoroutine { continuation ->
+            val activeConnection = AtomicReference<HttpURLConnection?>()
+            continuation.invokeOnCancellation { activeConnection.getAndSet(null)?.disconnect() }
+            Dispatchers.IO.dispatch(continuation.context) {
+                if (!continuation.isActive) return@dispatch
+                var connection: HttpURLConnection? = null
+                try {
+                    connection = (URL(url).openConnection() as HttpURLConnection).apply {
+                        requestMethod = "GET"
+                        connectTimeout = REQUEST_TIMEOUT_MS
+                        readTimeout = REQUEST_TIMEOUT_MS
+                    }
+                    activeConnection.set(connection)
+                    if (!continuation.isActive) {
+                        connection.disconnect()
+                        return@dispatch
+                    }
+                    val status = connection.responseCode
+                    if (connection.contentLengthLong > MAX_HTTP_RESPONSE_BYTES) {
+                        throw TmdbResponseTooLargeException()
+                    }
+                    val stream = if (status in 200..299) connection.inputStream else connection.errorStream
+                    val body = stream?.use {
+                        readResponseBodyAtMost(it, MAX_HTTP_RESPONSE_BYTES) { TmdbResponseTooLargeException() }
+                    }.orEmpty()
+                    if (continuation.isActive) continuation.resume(TmdbHttpResponse(status, body))
+                } catch (error: Throwable) {
+                    if (continuation.isActive) continuation.resumeWithException(error)
+                } finally {
+                    connection?.let {
+                        activeConnection.compareAndSet(it, null)
+                        it.disconnect()
+                    }
+                }
+            }
+        }
 
     private suspend fun requestWithRetry(
         operation: String,
-        request: () -> TmdbHttpResponse,
+        request: suspend () -> TmdbHttpResponse,
         sleeper: suspend (Long) -> Unit = { delay(it) }
     ): String {
         var attempt = 1
         while (true) {
+            currentCoroutineContext().ensureActive()
             try {
                 val response = request()
+                currentCoroutineContext().ensureActive()
                 if (response.statusCode in TRANSIENT_HTTP_STATUSES) {
                     if (attempt >= MAX_REQUEST_ATTEMPTS) throw TmdbTransientException(operation, attempt, response.statusCode)
                 } else {
@@ -576,7 +646,7 @@ internal object TmdbApi {
     internal suspend fun requestWithRetryForTesting(
         request: () -> TmdbHttpResponse,
         sleeper: suspend (Long) -> Unit
-    ): Result<String> = tmdbCall { requestWithRetry("test", request, sleeper) }
+    ): Result<String> = tmdbCall { requestWithRetry("test", { request() }, sleeper) }
 
     private suspend inline fun <T> tmdbCall(crossinline block: suspend () -> T): Result<T> = try {
         Result.success(block())

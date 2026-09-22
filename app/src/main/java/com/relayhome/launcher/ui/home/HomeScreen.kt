@@ -649,6 +649,7 @@ internal fun HomeScreen(
     onHomeFocusRestored: () -> Unit,
     nuvioProfiles: List<NuvioProfile>,
     activeNuvioProfile: Int,
+    nuvioAccountId: String = "",
     profileImageUri: String?,
     wallpaperImageUri: String? = null,
     onWallpaperInvalid: () -> Unit = {},
@@ -672,15 +673,34 @@ internal fun HomeScreen(
     val defaultBringIntoViewSpec = LocalBringIntoViewSpec.current
     var profilePickerVisible by remember { mutableStateOf(false) }
     var lastHomeFocusTarget by remember { mutableStateOf<HomeFocusRestoreTarget>(HomeFocusRestoreTarget.Home) }
+    var pendingHomeFocusAcknowledgement by remember { mutableStateOf<HomeFocusRestoreTarget?>(null) }
+    var peekReturnFocusPending by remember { mutableStateOf(false) }
     var ambientFocus by remember { mutableStateOf(ambientFocusFor(hero)) }
+    val ambientFocusScope = rememberCoroutineScope()
+    val pendingAmbientMediaFocus = remember { arrayOfNulls<Job>(1) }
+    DisposableEffect(Unit) {
+        onDispose { pendingAmbientMediaFocus[0]?.cancel() }
+    }
     val wallpaperResolution = rememberWallpaperUriResolution(wallpaperImageUri)
     val showHeroAmbient = {
+        pendingAmbientMediaFocus[0]?.cancel()
+        pendingAmbientMediaFocus[0] = null
         ambientFocus = ambientFocusFor(hero)
     }
     val showMediaAmbient: (MediaItem) -> Unit = { item ->
-        ambientFocus = ambientFocusFor(item)
+        // A held D-pad can cross several cards in a short burst. Keep focus ownership and the
+        // focused card immediate, but only load/recompose the full-screen ambient layer for the
+        // card where focus settles, just like the hero preview below.
+        pendingAmbientMediaFocus[0]?.cancel()
+        pendingAmbientMediaFocus[0] = ambientFocusScope.launch {
+            delay(HOME_MEDIA_PREVIEW_SETTLE_MS)
+            pendingAmbientMediaFocus[0] = null
+            ambientFocus = ambientFocusFor(item)
+        }
     }
     val showAppAmbient: (InstalledApp?) -> Unit = { app ->
+        pendingAmbientMediaFocus[0]?.cancel()
+        pendingAmbientMediaFocus[0] = null
         ambientFocus = app?.let { ambientFocusFor(it, palette) } ?: ambientFocusFor(hero)
     }
     LaunchedEffect(wallpaperResolution.rawUri, wallpaperResolution.complete, wallpaperResolution.resolvedUri) {
@@ -741,6 +761,9 @@ internal fun HomeScreen(
         // composition that created them while D-pad navigation moves between top-bar items;
         // comparing against that callback's captured value could otherwise leave an old peek
         // panel visible when Home, Calendar, Apps, Search, or Settings receives focus.
+        // Track focus synchronously as well, so a fast provider-to-Home move does not depend on
+        // TopBar having recomposed with the provider before it decides whether to restore Home.
+        peekReturnFocusPending = provider != null
         val changed = provider != peekProvider
         onPeekProvider(provider)
         if (changed && provider == Provider.NUVIO) onRefreshNuvio()
@@ -823,6 +846,24 @@ internal fun HomeScreen(
     } else {
         topContentFocusRequester
     }
+    val defaultHomeReturnFocusTarget = when {
+        minimalHomeEnabled && favoriteAppsVisible && HomeRow.FAVORITE_APPS in rowEntryFocusRequesters ->
+            HomeFocusRestoreTarget.Row(HomeRow.FAVORITE_APPS)
+        minimalHomeEnabled -> null
+        else -> HomeFocusRestoreTarget.Hero
+    }
+    val homeReturnFocusTarget = when (val target = lastHomeFocusTarget) {
+        HomeFocusRestoreTarget.Home -> defaultHomeReturnFocusTarget
+        HomeFocusRestoreTarget.Hero -> if (minimalHomeEnabled) defaultHomeReturnFocusTarget else HomeFocusRestoreTarget.Hero
+        is HomeFocusRestoreTarget.Row -> if (target.row in rowEntryFocusRequesters) target else defaultHomeReturnFocusTarget
+    }
+    fun focusRequesterForHomeTarget(target: HomeFocusRestoreTarget?): FocusRequester = when (target) {
+        HomeFocusRestoreTarget.Hero -> heroFocusRequester
+        is HomeFocusRestoreTarget.Row -> rowEntryFocusRequesters[target.row] ?: homeFocusRequester
+        HomeFocusRestoreTarget.Home, null -> homeFocusRequester
+    }
+    val defaultHomeReturnFocusRequester = focusRequesterForHomeTarget(defaultHomeReturnFocusTarget)
+    val homeReturnFocusRequester = focusRequesterForHomeTarget(homeReturnFocusTarget)
     fun previousRowEntryFocusRequester(index: Int): FocusRequester =
         if (index == 0) topContentFocusRequester else rowEntryFocusRequesters.getValue(availableHomeRows[index - 1])
     fun nextRowEntryFocusRequester(index: Int): FocusRequester? =
@@ -834,6 +875,75 @@ internal fun HomeScreen(
     }
     fun scrollHomeToTop() {
         heroFocusScrollGuard.requestTop()
+    }
+    fun recordHomeFocusTarget(target: HomeFocusRestoreTarget) {
+        lastHomeFocusTarget = target
+        if (pendingHomeFocusAcknowledgement == target) pendingHomeFocusAcknowledgement = null
+    }
+    var homeTabHasFocus by remember { mutableStateOf(false) }
+    var restoreHomeFocusAfterPeek by remember { mutableStateOf(false) }
+    var homeReturnFocusCancelGeneration by remember { mutableStateOf(0) }
+    fun onTopNavigationFocusIntent() {
+        if (restoreHomeFocusAfterPeek) homeReturnFocusCancelGeneration += 1
+        scrollHomeToTop()
+    }
+    BackHandler(enabled = visible && !suppressProviderPeek && peekProvider != null) {
+        // The Home tab's focus callback clears the transient peek and starts the same saved-
+        // Home-target restoration used when navigating there with the D-pad.
+        runCatching { homeFocusRequester.requestFocus() }
+    }
+    LaunchedEffect(restoreHomeFocusAfterPeek, peekProvider, activePeekProvider, homeReturnFocusTarget, defaultHomeReturnFocusTarget, visible, homeReturnFocusCancelGeneration) {
+        if (!restoreHomeFocusAfterPeek) return@LaunchedEffect
+        if (!visible || !homeTabHasFocus) {
+            pendingHomeFocusAcknowledgement = null
+            restoreHomeFocusAfterPeek = false
+            return@LaunchedEffect
+        }
+        if (peekProvider != null || activePeekProvider != null) {
+            pendingHomeFocusAcknowledgement = null
+            return@LaunchedEffect
+        }
+        val target = homeReturnFocusTarget
+        if (target == null) {
+            // Minimal Home has no content target when there are no favorite apps to focus.
+            pendingHomeFocusAcknowledgement = null
+            restoreHomeFocusAfterPeek = false
+            return@LaunchedEffect
+        }
+        // Home's top tab clears the peek first. Wait until that content swap has committed, then
+        // restore the last logical Home target (Hero or row) instead of always entering at Hero.
+        val homeReturnFocusCancelGenerationAtStart = homeReturnFocusCancelGeneration
+        pendingHomeFocusAcknowledgement = target
+        withFrameNanos { }
+        requestHomeFocusWithRetry(focusRequesterForHomeTarget(target))
+        suspend fun awaitActualHomeFocus(targetToConfirm: HomeFocusRestoreTarget): Boolean {
+            repeat(16) {
+                if (!visible || peekProvider != null || activePeekProvider != null || homeReturnFocusCancelGeneration != homeReturnFocusCancelGenerationAtStart) return false
+                if (pendingHomeFocusAcknowledgement != targetToConfirm) return true
+                withFrameNanos { }
+            }
+            return pendingHomeFocusAcknowledgement != targetToConfirm
+        }
+        var acknowledged = awaitActualHomeFocus(target)
+        if (!acknowledged && defaultHomeReturnFocusTarget != null && defaultHomeReturnFocusTarget != target) {
+            // A row requester can first focus its invisible entry bridge. If its card never
+            // confirms focus, fall back to a visible Hero/favorite-app target.
+            pendingHomeFocusAcknowledgement = defaultHomeReturnFocusTarget
+            requestHomeFocusWithRetry(defaultHomeReturnFocusRequester)
+            acknowledged = awaitActualHomeFocus(defaultHomeReturnFocusTarget)
+        }
+        if (!acknowledged) {
+            // If neither visible content target acknowledges focus, leave the user on the
+            // always-mounted Home tab rather than stranding focus on the invisible row bridge.
+            pendingHomeFocusAcknowledgement = null
+            requestHomeFocusWithRetry(homeFocusRequester)
+            for (frame in 0 until 6) {
+                if (homeTabHasFocus) break
+                withFrameNanos { }
+            }
+        }
+        pendingHomeFocusAcknowledgement = null
+        restoreHomeFocusAfterPeek = false
     }
     LaunchedEffect(focusResetGeneration) {
         if (!visible) return@LaunchedEffect
@@ -898,7 +1008,7 @@ internal fun HomeScreen(
                         hero, palette, homeFocusRequester, heroFocusRequester, heroCandidates,
                         downFocusRequester = firstRowEntryFocusRequester,
                         onHeroFocused = {
-                            lastHomeFocusTarget = HomeFocusRestoreTarget.Hero
+                            recordHomeFocusTarget(HomeFocusRestoreTarget.Hero)
                             showHeroAmbient()
                         },
                         onItemSelected = onItemSelected,
@@ -923,7 +1033,7 @@ internal fun HomeScreen(
                             downFocusRequester = null,
                             onRailEntered = heroFocusScrollGuard.onRailEntered,
                             onRailExited = heroFocusScrollGuard.onRailExited,
-                            onFocusTarget = { lastHomeFocusTarget = HomeFocusRestoreTarget.Row(HomeRow.FAVORITE_APPS) },
+                            onFocusTarget = { recordHomeFocusTarget(HomeFocusRestoreTarget.Row(HomeRow.FAVORITE_APPS)) },
                             onFocusedApp = showAppAmbient
                         ) { app -> InstalledApps.launch(context, app) }
                     }
@@ -940,7 +1050,7 @@ internal fun HomeScreen(
                             downFocusRequester = null,
                             onRailEntered = heroFocusScrollGuard.onRailEntered,
                             onRailExited = heroFocusScrollGuard.onRailExited,
-                            onFocusTarget = { lastHomeFocusTarget = HomeFocusRestoreTarget.Row(HomeRow.FAVORITE_APPS) },
+                            onFocusTarget = { recordHomeFocusTarget(HomeFocusRestoreTarget.Row(HomeRow.FAVORITE_APPS)) },
                             onFocusedApp = showAppAmbient
                         ) { app -> InstalledApps.launch(context, app) }
                         Spacer(Modifier.height(18.dp))
@@ -977,7 +1087,7 @@ internal fun HomeScreen(
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
                                 onRailEntered = heroFocusScrollGuard.onRailEntered,
                                 onRailExited = heroFocusScrollGuard.onRailExited,
-                                onFocusTarget = { lastHomeFocusTarget = HomeFocusRestoreTarget.Row(HomeRow.CONTINUE_WATCHING) }
+                                onFocusTarget = { recordHomeFocusTarget(HomeFocusRestoreTarget.Row(HomeRow.CONTINUE_WATCHING)) }
                             )
                             HomeRow.FAVORITE_APPS -> FavoriteAppsRail(
                                 apps = favoriteInstalledApps,
@@ -988,7 +1098,7 @@ internal fun HomeScreen(
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
                                 onRailEntered = heroFocusScrollGuard.onRailEntered,
                                 onRailExited = heroFocusScrollGuard.onRailExited,
-                                onFocusTarget = { lastHomeFocusTarget = HomeFocusRestoreTarget.Row(HomeRow.FAVORITE_APPS) },
+                                onFocusTarget = { recordHomeFocusTarget(HomeFocusRestoreTarget.Row(HomeRow.FAVORITE_APPS)) },
                                 onFocusedApp = showAppAmbient
                             ) { app -> InstalledApps.launch(context, app) }
                             HomeRow.RECOMMENDATIONS -> MediaRail(
@@ -1005,7 +1115,7 @@ internal fun HomeScreen(
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
                                 onRailEntered = heroFocusScrollGuard.onRailEntered,
                                 onRailExited = heroFocusScrollGuard.onRailExited,
-                                onFocusTarget = { lastHomeFocusTarget = HomeFocusRestoreTarget.Row(HomeRow.RECOMMENDATIONS) }
+                                onFocusTarget = { recordHomeFocusTarget(HomeFocusRestoreTarget.Row(HomeRow.RECOMMENDATIONS)) }
                             )
                             HomeRow.SUBSCRIPTIONS -> MediaRail(
                                 title = "New from subscriptions",
@@ -1021,7 +1131,7 @@ internal fun HomeScreen(
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
                                 onRailEntered = heroFocusScrollGuard.onRailEntered,
                                 onRailExited = heroFocusScrollGuard.onRailExited,
-                                onFocusTarget = { lastHomeFocusTarget = HomeFocusRestoreTarget.Row(HomeRow.SUBSCRIPTIONS) }
+                                onFocusTarget = { recordHomeFocusTarget(HomeFocusRestoreTarget.Row(HomeRow.SUBSCRIPTIONS)) }
                             )
                             HomeRow.UPCOMING -> MediaRail(
                                 title = "Coming Up",
@@ -1038,7 +1148,7 @@ internal fun HomeScreen(
                                 downFocusRequester = nextRowEntryFocusRequester(rowIndex),
                                 onRailEntered = heroFocusScrollGuard.onRailEntered,
                                 onRailExited = heroFocusScrollGuard.onRailExited,
-                                onFocusTarget = { lastHomeFocusTarget = HomeFocusRestoreTarget.Row(HomeRow.UPCOMING) }
+                                onFocusTarget = { recordHomeFocusTarget(HomeFocusRestoreTarget.Row(HomeRow.UPCOMING)) }
                             )
                         }
                         Spacer(Modifier.height(18.dp))
@@ -1058,22 +1168,30 @@ internal fun HomeScreen(
             TopBar(
                 providers = providers,
                 palette = palette,
-                peekProvider = activePeekProvider,
+                peekProvider = peekProvider,
                 homeFocusRequester = homeFocusRequester,
                 peekFocusRequester = peekFocusRequester,
                 providerFocusRequesters = providerFocusRequesters,
                 heroFocusRequester = if (minimalHomeEnabled) topContentFocusRequester else heroFocusRequester,
                 firstContentFocusRequester = firstContentFocusRequester,
+                homeReturnFocusRequester = homeReturnFocusRequester,
                 onDestination = onDestination,
                 onProvider = onProvider,
                 onSettings = onSettings,
                 onPeekProvider = ::activatePeek,
+                onReturnHomeFromPeek = {
+                    if (peekReturnFocusPending) {
+                        peekReturnFocusPending = false
+                        restoreHomeFocusAfterPeek = true
+                    }
+                },
+                onHomeTabFocusChanged = { homeTabHasFocus = it },
                 // Activation must not depend on the panel already being mounted: the panel can
                 // only become active after this focus callback publishes the provider. Keep the
                 // separate readiness gate for Down so a held key cannot target an unmounted Peek.
                 allowProviderPeek = !suppressProviderPeek,
                 providerPeekReady = activePeekProvider != null,
-                onTopFocused = ::scrollHomeToTop,
+                onTopFocused = ::onTopNavigationFocusIntent,
                 nuvioProfiles = nuvioProfiles,
                 activeNuvioProfile = activeNuvioProfile,
                 profileImageUri = profileImageUri,
@@ -1122,7 +1240,7 @@ internal fun EmptyHomeState(palette: RelayPalette, onSettings: () -> Unit) {
     Column(Modifier.padding(horizontal = 76.dp, vertical = 18.dp)) {
         Text("Add your media", color = ivory, fontSize = 24.sp, fontWeight = FontWeight.Light)
         Spacer(Modifier.height(8.dp))
-        Text("Choose Nuvio, Stremio, or SmartTube in Settings to build your personal Home view.", color = muted, fontSize = 16.sp)
+        Text("Choose Nuvio, Stremio, or ${Provider.SMARTTUBE.label} in Settings to build your personal Home view.", color = muted, fontSize = 16.sp)
         Spacer(Modifier.height(16.dp))
         ActionButton("Open Settings", palette, primary = true, onClick = onSettings)
     }
@@ -1262,10 +1380,13 @@ internal fun TopBar(
     peekFocusRequester: FocusRequester,
     providerFocusRequesters: Map<Provider, FocusRequester>,
     firstContentFocusRequester: FocusRequester,
+    homeReturnFocusRequester: FocusRequester = firstContentFocusRequester,
     onDestination: (Destination) -> Unit,
     onProvider: (Provider) -> Unit,
     onSettings: () -> Unit,
     onPeekProvider: (Provider?) -> Unit,
+    onReturnHomeFromPeek: () -> Unit = {},
+    onHomeTabFocusChanged: (Boolean) -> Unit = {},
     allowProviderPeek: Boolean,
     providerPeekReady: Boolean = false,
     onTopFocused: () -> Unit,
@@ -1336,10 +1457,12 @@ internal fun TopBar(
                 }
                 Spacer(Modifier.width(18.dp))
             }
-            TopDestination("Home", icon = relayHomeIcon, selected = peekProvider == null, palette = palette, compact = compact, focusRequester = homeFocusRequester, downFocusRequester = firstContentFocusRequester, leftFocusRequester = topNeighbor("home", -1), rightFocusRequester = topNeighbor("home", 1), onFocused = {
+            TopDestination("Home", icon = relayHomeIcon, selected = peekProvider == null, palette = palette, compact = compact, focusRequester = homeFocusRequester, downFocusRequester = homeReturnFocusRequester, leftFocusRequester = topNeighbor("home", -1), rightFocusRequester = topNeighbor("home", 1), onFocused = {
+                onHomeTabFocusChanged(it)
                 if (it) {
-                    onPeekProvider(null)
                     onTopFocused()
+                    onReturnHomeFromPeek()
+                    onPeekProvider(null)
                 }
             }) {
                 onPeekProvider(null)
@@ -1366,6 +1489,7 @@ internal fun TopBar(
                         } else {
                             // Returning from a provider can briefly restore the old focused
                             // tab. Keep that transient focus from reopening a stale peek panel.
+                            onTopFocused()
                             onPeekProvider(null)
                         }
                     }
@@ -1425,9 +1549,10 @@ internal fun TopBar(
                         ProfileSwitcher(
                             palette = palette,
                             profiles = nuvioProfiles,
-                            relayTubeProfiles = SmartTubePlaybackStore.profiles,
-                            activeProfile = activeNuvioProfile,
-                            profileImageUri = profileImageUri,
+                        relayTubeProfiles = SmartTubePlaybackStore.profiles,
+                        activeProfile = activeNuvioProfile,
+                        nuvioAccountId = nuvioAccountId,
+                        profileImageUri = profileImageUri,
                             onSelect = onProfileSelect,
                             onDismiss = onProfileDismiss
                         )
@@ -1525,6 +1650,7 @@ internal fun ProfileSwitcher(
     profiles: List<NuvioProfile>,
     relayTubeProfiles: List<RelayTubeProfile>,
     activeProfile: Int,
+    nuvioAccountId: String,
     profileImageUri: String?,
     onSelect: (Int) -> Unit,
     onDismiss: () -> Unit
@@ -1550,13 +1676,12 @@ internal fun ProfileSwitcher(
             Column(Modifier.padding(22.dp).focusGroup()) {
                 Text("Who’s watching?", color = ivory, fontSize = 26.sp, fontWeight = FontWeight.Light)
                 Spacer(Modifier.height(8.dp))
-                Text("Each Relay profile keeps its own Nuvio and RelayTube viewing feeds.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+                Text("Each Relay profile keeps its own Nuvio and ${Provider.SMARTTUBE.label} viewing feeds.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
                 Spacer(Modifier.height(24.dp))
                 profiles.forEachIndexed { index, profile ->
                     key(profile.index) {
-                    val relayTubeProfile = RelayProfileMappingStore.get(LocalContext.current, profile.index)
+                    val relayTubeProfile = RelayProfileMappingStore.get(LocalContext.current, nuvioAccountId, profile.index)
                         ?.let { id -> relayTubeProfiles.firstOrNull { it.id == id } }
-                        ?: relayTubeProfiles.firstOrNull { it.name.equals(profile.name, ignoreCase = true) }
                     val source = remember(profile.index) { MutableInteractionSource() }
                     val focused by source.collectIsFocusedAsState()
                     Row(
@@ -1599,7 +1724,7 @@ internal fun ProfileSwitcher(
                         Spacer(Modifier.width(12.dp))
                         Column {
                             Text(profile.name, color = ivory, fontSize = 17.sp, fontWeight = FontWeight.SemiBold)
-                            relayTubeProfile?.let { Text("RelayTube · ${it.name}", color = muted, fontSize = 12.sp) }
+                            relayTubeProfile?.let { Text("${Provider.SMARTTUBE.label} · ${it.name}", color = muted, fontSize = 12.sp) }
                         }
                         Spacer(Modifier.weight(1f))
                         if (profile.index == activeProfile) Text("Watching", color = Provider.NUVIO.accent, fontSize = 13.sp)
@@ -1801,7 +1926,7 @@ internal fun HeroPanel(
         ) {
             val heroItem = hero.item
             if (heroItem?.provider == Provider.SMARTTUBE) {
-                Text("RELAYTUBE FOCUS", color = Provider.SMARTTUBE.accent, fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp, modifier = Modifier.testTag("hero-heading"))
+                Text("${Provider.SMARTTUBE.label.uppercase()} FOCUS", color = Provider.SMARTTUBE.accent, fontSize = 14.sp, fontWeight = FontWeight.Bold, letterSpacing = 2.sp, modifier = Modifier.testTag("hero-heading"))
                 Spacer(Modifier.height(10.dp))
                 // Keep the RelayTube information slot fixed. A long video title can still use
                 // two lines inside the card, but provider descriptions must not change the

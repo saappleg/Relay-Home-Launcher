@@ -7,45 +7,54 @@ import java.util.Locale
 
 /** Maps a local Relay/Nuvio profile to an opaque RelayTube profile id. */
 internal object RelayProfileMappingStore {
-    fun get(context: Context, nuvioProfile: Int): String? =
-        (RelaySettingsRepository.getManualProfileMapping(context, nuvioProfile)
-            ?: RelaySettingsRepository.getResolvedProfileMapping(context, nuvioProfile))
+    fun get(context: Context, accountId: String, nuvioProfile: Int): String? {
+        if (accountId.isBlank()) return null
+        return (RelaySettingsRepository.getManualProfileMapping(context, accountId, nuvioProfile)
+            ?: RelaySettingsRepository.getResolvedProfileMapping(context, accountId, nuvioProfile))
             ?.let(::cleanOpaqueId)
+    }
 
-    fun setManual(context: Context, nuvioProfile: Int, relayTubeProfileId: String?) {
+    fun setManual(context: Context, accountId: String, nuvioProfile: Int, relayTubeProfileId: String?) {
+        if (accountId.isBlank()) return
         RelaySettingsRepository.saveManualProfileMapping(
             context,
+            accountId,
             nuvioProfile,
             relayTubeProfileId?.let(::cleanOpaqueId)
         )
     }
 
     /** Stores a candidate only; resolve() promotes it after an exact profile-name match. */
-    fun set(context: Context, nuvioProfile: Int, relayTubeProfileId: String) {
+    fun set(context: Context, accountId: String, nuvioProfile: Int, relayTubeProfileId: String) {
+        if (accountId.isBlank()) return
         if (relayTubeProfileId.isBlank()) {
-            RelaySettingsRepository.clearProfileMapping(context, nuvioProfile)
+            RelaySettingsRepository.clearProfileMapping(context, accountId, nuvioProfile)
         } else {
             RelaySettingsRepository.saveProfileMappingCandidate(
                 context,
+                accountId,
                 nuvioProfile,
                 cleanOpaqueId(relayTubeProfileId)
             )
         }
     }
 
-    @Suppress("UNUSED_PARAMETER")
     fun resolve(
         context: Context,
         accountId: String,
         nuvioProfile: NuvioProfile,
         relayTubeProfiles: List<RelayTubeProfile>
     ): String? {
+        if (accountId.isBlank()) return null
         val normalizedName = normalizeProfileName(nuvioProfile.name)
         if (normalizedName.isBlank()) return null
 
-        // A user-selected pairing is authoritative. Automatic name matching is only a
-        // fallback, so a refresh cannot silently undo a deliberate pairing from Settings.
-        getManualMapping(context, nuvioProfile.index)?.let { return it }
+        // A user-selected pairing is authoritative while that RelayTube profile still exists.
+        // If it disappeared, clear the stale id and allow a current exact-name match instead.
+        getManualMapping(context, accountId, nuvioProfile.index)?.let { manualId ->
+            if (relayTubeProfiles.any { cleanOpaqueId(it.id) == manualId }) return manualId
+            RelaySettingsRepository.clearProfileMapping(context, accountId, nuvioProfile.index)
+        }
 
         val matched = relayTubeProfiles
             .filter { cleanOpaqueId(it.id) != null && normalizeProfileName(it.name) == normalizedName }
@@ -55,14 +64,21 @@ internal object RelayProfileMappingStore {
         // exact name match. If there is no name match, leave the profile visibly unmapped rather
         // than guessing from list order or the selected RelayTube profile.
         if (matched == null) {
-            if (shouldClearMapping(get(context, nuvioProfile.index))) {
-                set(context, nuvioProfile.index, "")
+            if (shouldClearMapping(get(context, accountId, nuvioProfile.index))) {
+                RelaySettingsRepository.clearProfileMapping(context, accountId, nuvioProfile.index)
             }
             return null
         }
         val resolvedId = cleanOpaqueId(matched.id) ?: return null
-        if (shouldPersistMapping(get(context, nuvioProfile.index), resolvedId)) {
-            saveResolved(context, nuvioProfile.index, resolvedId)
+        if (RelaySettingsRepository.isRelayTubeProfileMappedElsewhere(
+                context,
+                accountId,
+                nuvioProfile.index,
+                resolvedId
+            )
+        ) return null
+        if (shouldPersistMapping(get(context, accountId, nuvioProfile.index), resolvedId)) {
+            saveResolved(context, accountId, nuvioProfile.index, resolvedId)
         }
         return resolvedId
     }
@@ -77,14 +93,14 @@ internal object RelayProfileMappingStore {
         ?.takeIf { it.isNotBlank() && it.length <= MAX_OPAQUE_ID_LENGTH }
         ?.takeIf { id -> id.none { it.isWhitespace() || it.isISOControl() } }
 
-    private fun saveResolved(context: Context, nuvioProfile: Int, relayTubeProfileId: String) {
+    private fun saveResolved(context: Context, accountId: String, nuvioProfile: Int, relayTubeProfileId: String) {
         cleanOpaqueId(relayTubeProfileId)?.let { cleanId ->
-            RelaySettingsRepository.saveResolvedProfileMapping(context, nuvioProfile, cleanId)
+            RelaySettingsRepository.saveResolvedProfileMapping(context, accountId, nuvioProfile, cleanId)
         }
     }
 
-    private fun getManualMapping(context: Context, nuvioProfile: Int): String? =
-        RelaySettingsRepository.getManualProfileMapping(context, nuvioProfile)?.let(::cleanOpaqueId)
+    private fun getManualMapping(context: Context, accountId: String, nuvioProfile: Int): String? =
+        RelaySettingsRepository.getManualProfileMapping(context, accountId, nuvioProfile)?.let(::cleanOpaqueId)
 
     internal fun shouldPersistMapping(current: String?, desired: String): Boolean = current != desired
 

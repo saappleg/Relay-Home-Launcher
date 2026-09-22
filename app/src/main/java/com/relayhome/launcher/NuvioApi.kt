@@ -1,5 +1,6 @@
 package com.relayhome.launcher
 
+import android.util.Base64
 import androidx.compose.ui.graphics.Color
 import com.relayhome.launcher.ui.shared.MediaItem
 import com.relayhome.launcher.ui.shared.Provider
@@ -23,16 +24,55 @@ import java.net.URL
 import java.net.UnknownHostException
 import java.time.Instant
 
-internal data class NuvioSession(
-    val accessToken: String,
-    val refreshToken: String? = null,
-    val expiresAtEpochSeconds: Long? = null
+/** Mutable credentials let concurrent 401 responses share one refreshed token. */
+internal class NuvioSession(
+    accessToken: String,
+    refreshToken: String? = null,
+    expiresAtEpochSeconds: Long? = null,
+    accountId: String = ""
 ) {
+    @Volatile var accessToken: String = accessToken
+        private set
+    @Volatile var refreshToken: String? = refreshToken
+        private set
+    @Volatile var expiresAtEpochSeconds: Long? = expiresAtEpochSeconds
+        private set
+    @Volatile var accountId: String = accountId.ifBlank { accessToken.subjectFromJwt().orEmpty() }
+        private set
+
+    @Volatile internal var persistTokens: ((NuvioTokenSnapshot) -> Unit)? = null
+
+    @Synchronized internal fun tokenSnapshot() = NuvioTokenSnapshot(
+        accessToken, refreshToken.orEmpty(), expiresAtEpochSeconds ?: 0L, accountId
+    )
+
+    @Synchronized internal fun updateTokens(snapshot: NuvioTokenSnapshot) {
+        accessToken = snapshot.accessToken
+        refreshToken = snapshot.refreshToken.takeIf(String::isNotBlank)
+        expiresAtEpochSeconds = snapshot.expiresAtEpochSeconds.takeIf { it > 0L }
+        accountId = snapshot.accountId.ifBlank { snapshot.accessToken.subjectFromJwt().orEmpty().ifBlank { accountId } }
+        persistTokens?.invoke(snapshot)
+    }
+
     fun isExpired(nowEpochSeconds: Long = Instant.now().epochSecond): Boolean =
         expiresAtEpochSeconds?.let { nowEpochSeconds >= it } == true
 }
 
+internal data class NuvioTokenSnapshot(
+    val accessToken: String,
+    val refreshToken: String,
+    val expiresAtEpochSeconds: Long,
+    val accountId: String = ""
+)
+
 internal data class NuvioProfile(val index: Int, val name: String, val color: String, val imageUrl: String? = null)
+
+/** Distinct provider views let Home render Continue Watching and the library independently. */
+internal data class NuvioMediaSnapshot(
+    val all: List<MediaItem>,
+    val library: List<MediaItem>,
+    val continueWatching: List<MediaItem>
+)
 
 internal open class NuvioApiException(message: String, cause: Throwable? = null) : IOException(message, cause)
 
@@ -49,6 +89,20 @@ private class NuvioSignInException(statusCode: Int, detail: String?) : NuvioApiE
 private class NuvioSyncException(statusCode: Int) : NuvioApiException(
     "Nuvio sync failed (HTTP $statusCode). Your last successful Home data was kept; try again."
 )
+
+private class NuvioRpcException(
+    val statusCode: Int,
+    val responseBody: String
+) : NuvioApiException(
+    runCatching { JSONObject(responseBody).optString("message") }.getOrNull()?.takeIf(String::isNotBlank)
+        ?: "Nuvio sync failed (HTTP $statusCode). Your last successful Home data was kept; try again."
+) {
+    fun isUnsupportedOffset(): Boolean {
+        val message = responseBody.lowercase()
+        return "p_offset" in message && listOf("does not exist", "not found", "could not find", "schema cache", "unexpected")
+            .any(message::contains)
+    }
+}
 
 private class NuvioNetworkException(cause: Throwable) : NuvioApiException(
     "Nuvio is temporarily unavailable. Your last successful Home data was kept; try again when connected.",
@@ -83,6 +137,9 @@ internal object NuvioApi {
     private const val startQrLoginEndpoint = "/rest/v1/rpc/start_tv_login_session"
     private const val pollQrLoginEndpoint = "/rest/v1/rpc/poll_tv_login_session"
     private const val exchangeQrLoginEndpoint = "/functions/v1/tv-logins-exchange"
+    private const val pageSize = 200
+    private const val maxPages = 10
+    private const val maxRecords = pageSize * maxPages
 
     /**
      * Starts Nuvio's documented TV QR flow. The returned verificationUrl is the exact payload a
@@ -181,14 +238,7 @@ internal object NuvioApi {
                 )
             }
             val result = response.body.firstJsonObject()
-            val accessToken = result.firstString("access_token")
-                ?: throw NuvioQrLoginException("Nuvio QR login returned no access token.")
-            val expiresIn = result.boundedExpiresIn()
-            NuvioSession(
-                accessToken = accessToken,
-                refreshToken = result.firstString("refresh_token"),
-                expiresAtEpochSeconds = expiresIn?.let { Instant.now().epochSecond + it }
-            )
+            sessionFromAuthPayload(result)
         }
     }
 
@@ -218,87 +268,37 @@ internal object NuvioApi {
             if (!response.isSuccessful) {
                 throw NuvioSignInException(response.status, response.body.nuvioErrorDetail())
             }
-            val body = JSONObject(response.body)
-            val token = body.firstString("access_token")
-                ?: throw NuvioSignInException(response.status, "Nuvio did not return a session token.")
-            val expiresIn = body.boundedExpiresIn()
-            NuvioSession(
-                accessToken = token,
-                refreshToken = body.firstString("refresh_token"),
-                expiresAtEpochSeconds = expiresIn?.let { Instant.now().epochSecond + it }
-            )
+            sessionFromAuthPayload(JSONObject(response.body))
         }
     }
 
-    suspend fun pullRelayMedia(session: NuvioSession, profileId: Int): Result<List<MediaItem>> = withContext(Dispatchers.IO) {
+    suspend fun pullRelayMedia(session: NuvioSession, profileId: Int): Result<List<MediaItem>> =
+        pullRelayMediaSnapshot(session, profileId).map { it.all }
+
+    suspend fun pullRelayMediaSnapshot(session: NuvioSession, profileId: Int): Result<NuvioMediaSnapshot> = withContext(Dispatchers.IO) {
         apiCall {
             requireUsableSession(session)
-            val library = JSONArray(rpc(session, "sync_pull_library", JSONObject().put("p_profile_id", profileId).put("p_limit", 200).put("p_offset", 0)))
-            val progress = JSONArray(rpc(session, "sync_pull_watch_progress", JSONObject().put("p_profile_id", profileId).put("p_limit", 200)))
-            val libraryByContent = buildMap {
-                for (i in 0 until library.length()) {
-                    val item = library.getJSONObject(i)
-                    item.firstString("content_id", "contentId", "media_id", "id")?.let { put(it, item) }
-                }
+            val profile = { JSONObject().put("p_profile_id", profileId) }
+            val library = pullPaged(session, "sync_pull_library", profile, offsetSupported = true)
+            val progress = pullPaged(session, "sync_pull_watch_progress", profile, offsetSupported = true)
+            val libraryByContent = LinkedHashMap<String, JSONObject>()
+            library.forEach { item ->
+                item.firstString("content_id", "contentId", "media_id", "id")?.let { libraryByContent[it] = item }
             }
-            val progressByContent = buildMap<String, JSONObject> {
-                for (i in 0 until progress.length()) {
-                    val item = progress.getJSONObject(i)
-                    item.firstString("content_id", "contentId", "media_id", "id")?.let { contentId ->
-                        val existing = get(contentId)
-                        val isNewer = existing == null || isNewerWatchProgress(
-                            item.firstString("last_watched"),
-                            existing.firstString("last_watched")
-                        )
-                        if (isNewer) put(contentId, item)
+            val progressByContent = LinkedHashMap<String, JSONObject>()
+            progress.forEach { item ->
+                item.firstString("content_id", "contentId", "media_id", "id")?.let { contentId ->
+                    val current = progressByContent[contentId]
+                    val timestamp = item.firstString("last_watched", "watched_at", "updated_at")
+                    val currentTimestamp = current?.firstString("last_watched", "watched_at", "updated_at")
+                    if (current == null || isNewerWatchProgress(timestamp, currentTimestamp)) {
+                        progressByContent[contentId] = item
                     }
                 }
             }
-            val relayItems = progressByContent.mapNotNull { (contentId, progressItem) ->
-                val item = libraryByContent[contentId] ?: progressItem
-                val duration = progressItem.finiteDouble("duration") ?: 0.0
-                val position = progressItem.finiteDouble("position") ?: 0.0
-                val season = progressItem.firstInt("season_number", "season", "seasonNumber") ?: item.firstInt("season_number", "season", "seasonNumber") ?: 0
-                val episode = progressItem.firstInt("episode_number", "episode", "episodeNumber")
-                    ?: item.firstInt("episode_number", "episode", "episodeNumber")
-                    ?: 0
-                val episodeTitle = progressItem.firstString("episode_title", "episode_name", "episodeTitle")
-                    ?: item.firstString("episode_title", "episode_name", "episodeTitle")
-                    ?: ""
-                val showTitle = progressItem.firstString("series_title", "show_title", "parent_title", "series_name", "showName")
-                    ?: item.firstString("series_title", "show_title", "parent_title", "series_name", "showName")
-                val episodeInfo = buildList {
-                    if (season > 0 && episode > 0) add("S${season.toString().padStart(2, '0')} • E${episode.toString().padStart(2, '0')}")
-                    if (episodeTitle.isNotBlank()) add(episodeTitle)
-                }.joinToString(" • ").ifBlank { null }
-                val title = item.firstString("name", "title", "display_name", "episode_title", "episode_name")
-                    ?: progressItem.firstString("name", "title", "display_name", "episode_title", "episode_name")
-                    ?: ""
-                val artworkUrl = item.firstString("background", "backdrop", "background_url", "poster", "poster_url", "image_url")
-                    ?: progressItem.firstString("background", "backdrop", "background_url", "poster", "poster_url", "image_url")
-                    ?: ""
-                if ((showTitle ?: title).visibleRelayText().isBlank() || artworkUrl.visibleRelayText().isBlank()) {
-                    return@mapNotNull null
-                }
-                MediaItem(
-                    title = title,
-                    provider = Provider.NUVIO,
-                    progress = if (duration > 0 && position >= 0) (position / duration).toFloat().coerceIn(0f, 1f) else 0f,
-                    colors = listOf(Provider.NUVIO.accent.copy(alpha = .5f), Color(0xFF08060C)),
-                    artworkUrl = artworkUrl,
-                    providerContentId = contentId,
-                    contentType = item.firstString("content_type", "media_type", "type") ?: "movie",
-                    episodeInfo = episodeInfo,
-                    showTitle = showTitle,
-                    description = item.firstString("description") ?: progressItem.firstString("description"),
-                    releaseInfo = item.firstString("release_info"),
-                    rating = item.ratingValue("imdb_rating"),
-                    genres = item.optString("genres").trim().trim('[', ']').takeIf { it.isNotBlank() }
-                )
-            }
-            val continueWatching = continueWatchingIds.mapNotNull { contentId ->
-                mediaItem(contentId, libraryByContent[contentId], progressByContent[contentId])
-            }
+            val continueWatching = progressByContent.entries
+                .sortedByDescending { parseWatchInstant(it.value.firstString("last_watched", "watched_at", "updated_at"))?.toEpochMilli() ?: 0L }
+                .mapNotNull { (contentId, progressItem) -> mediaItem(contentId, libraryByContent[contentId], progressItem) }
             val libraryItems = libraryByContent.mapNotNull { (contentId, libraryItem) ->
                 mediaItem(contentId, libraryItem, progressByContent[contentId])
             }
@@ -308,6 +308,81 @@ internal object NuvioApi {
             }
             NuvioMediaSnapshot(all = all, library = libraryItems, continueWatching = continueWatching)
         }
+    }
+
+    private suspend fun pullPaged(
+        session: NuvioSession,
+        function: String,
+        baseParameters: () -> JSONObject,
+        offsetSupported: Boolean
+    ): List<JSONObject> {
+        val records = ArrayList<JSONObject>()
+        val seenContentIds = HashSet<String>()
+        var offset = 0
+        repeat(maxPages) {
+            val parameters = baseParameters().put("p_limit", pageSize)
+            if (offsetSupported) parameters.put("p_offset", offset)
+            val page = try {
+                JSONArray(rpc(session, function, parameters))
+            } catch (error: NuvioRpcException) {
+                if (offsetSupported && offset == 0 && error.isUnsupportedOffset()) {
+                    val fallback = JSONArray(rpc(session, function, baseParameters().put("p_limit", maxRecords)))
+                    return (0 until minOf(fallback.length(), maxRecords)).map(fallback::getJSONObject)
+                }
+                throw error
+            }
+            val count = minOf(page.length(), maxRecords - records.size)
+            var foundNewContent = false
+            for (index in 0 until count) {
+                val item = page.getJSONObject(index)
+                val contentId = item.firstString("content_id", "contentId", "media_id", "id")
+                if (contentId == null || seenContentIds.add(contentId)) foundNewContent = true
+                records += item
+            }
+            if (page.length() < pageSize || records.size >= maxRecords || !foundNewContent) return records
+            offset += page.length()
+        }
+        return records
+    }
+
+    private fun mediaItem(contentId: String, library: JSONObject?, progress: JSONObject?): MediaItem? {
+        val item = library ?: progress ?: return null
+        val progressItem = progress ?: JSONObject()
+        val duration = progressItem.finiteDouble("duration") ?: 0.0
+        val position = progressItem.finiteDouble("position") ?: 0.0
+        val season = progressItem.firstInt("season_number", "season", "seasonNumber")
+            ?: item.firstInt("season_number", "season", "seasonNumber") ?: 0
+        val episode = progressItem.firstInt("episode_number", "episode", "episodeNumber")
+            ?: item.firstInt("episode_number", "episode", "episodeNumber") ?: 0
+        val episodeTitle = progressItem.firstString("episode_title", "episode_name", "episodeTitle")
+            ?: item.firstString("episode_title", "episode_name", "episodeTitle").orEmpty()
+        val showTitle = progressItem.firstString("series_title", "show_title", "parent_title", "series_name", "showName")
+            ?: item.firstString("series_title", "show_title", "parent_title", "series_name", "showName")
+        val episodeInfo = buildList {
+            if (season > 0 && episode > 0) add("S${season.toString().padStart(2, '0')} • E${episode.toString().padStart(2, '0')}")
+            if (episodeTitle.isNotBlank()) add(episodeTitle)
+        }.joinToString(" • ").ifBlank { null }
+        val title = item.firstString("name", "title", "display_name", "episode_title", "episode_name")
+            ?: progressItem.firstString("name", "title", "display_name", "episode_title", "episode_name").orEmpty()
+        val artworkUrl = item.firstString("background", "backdrop", "background_url", "poster", "poster_url", "image_url")
+            ?: progressItem.firstString("background", "backdrop", "background_url", "poster", "poster_url", "image_url").orEmpty()
+        if ((showTitle ?: title).visibleRelayText().isBlank()) return null
+        return MediaItem(
+            title = title,
+            provider = Provider.NUVIO,
+            progress = if (progress != null && duration > 0.0) (position / duration).toFloat().coerceIn(0f, 1f) else 0f,
+            colors = listOf(Provider.NUVIO.accent.copy(alpha = .5f), Color(0xFF08060C)),
+            artworkUrl = artworkUrl,
+            providerContentId = contentId,
+            contentType = item.firstString("content_type", "media_type", "type") ?: "movie",
+            episodeInfo = episodeInfo,
+            showTitle = showTitle,
+            description = item.firstString("description") ?: progressItem.firstString("description"),
+            releaseInfo = item.firstString("release_info") ?: progressItem.firstString("release_info"),
+            rating = item.ratingValue("imdb_rating") ?: progressItem.ratingValue("imdb_rating"),
+            genres = item.optString("genres").trim().trim('[', ']').takeIf { it.isNotBlank() }
+                ?: progressItem.optString("genres").trim().trim('[', ']').takeIf { it.isNotBlank() }
+        )
     }
 
     suspend fun pullProfiles(session: NuvioSession): Result<List<NuvioProfile>> = withContext(Dispatchers.IO) {
@@ -364,14 +439,32 @@ internal object NuvioApi {
         body: JSONObject,
         retryOnTransient: Boolean = true
     ): String {
-        val response = requestWithRetry("sync/$function", retryOnTransient) {
+        val rejectedToken = session.accessToken
+        var response = requestRpc(function, body, rejectedToken, retryOnTransient)
+        if (response.status == HttpURLConnection.HTTP_UNAUTHORIZED) {
+            val refreshedToken = refreshAfterUnauthorized(session, rejectedToken)
+            response = requestRpc(function, body, refreshedToken, retryOnTransient)
+        }
+        if (response.status == HttpURLConnection.HTTP_UNAUTHORIZED || response.status == HttpURLConnection.HTTP_FORBIDDEN) {
+            throw NuvioSessionExpiredException(response.status)
+        }
+        if (!response.isSuccessful) throw NuvioRpcException(response.status, response.body)
+        return response.body
+    }
+
+    private suspend fun requestRpc(
+        function: String,
+        body: JSONObject,
+        accessToken: String,
+        retryOnTransient: Boolean
+    ): HttpResponse = requestWithRetry("sync/$function", retryOnTransient) {
             val connection = URL("$baseUrl/rest/v1/rpc/$function").openConnection() as HttpURLConnection
             try {
                 connection.apply {
                     requestMethod = "POST"
                     doOutput = true
                     setRequestProperty("apikey", publishableKey)
-                    setRequestProperty("Authorization", "Bearer ${session.accessToken}")
+                    setRequestProperty("Authorization", "Bearer $accessToken")
                     setRequestProperty("Content-Type", "application/json")
                     connectTimeout = REQUEST_TIMEOUT_MS
                     readTimeout = REQUEST_TIMEOUT_MS
@@ -382,13 +475,71 @@ internal object NuvioApi {
                 connection.disconnect()
             }
         }
-        if (response.status == HttpURLConnection.HTTP_UNAUTHORIZED || response.status == HttpURLConnection.HTTP_FORBIDDEN) {
+
+    /** Refresh exactly once after a 401; simultaneous requests reuse the winning refresh. */
+    private fun refreshAfterUnauthorized(session: NuvioSession, rejectedToken: String): String = synchronized(session) {
+        if (session.accessToken != rejectedToken) return@synchronized session.accessToken
+        val refreshToken = session.refreshToken?.takeIf { it.isNotBlank() }
+            ?: throw NuvioSessionExpiredException()
+        val response = requestJson(
+            "$baseUrl/auth/v1/token?grant_type=refresh_token",
+            JSONObject().put("refresh_token", refreshToken),
+            "Bearer $publishableKey"
+        )
+        if (response.status == HttpURLConnection.HTTP_UNAUTHORIZED || response.status == HttpURLConnection.HTTP_BAD_REQUEST) {
             throw NuvioSessionExpiredException(response.status)
         }
-        if (!response.isSuccessful) {
-            throw NuvioSyncException(response.status)
+        if (!response.isSuccessful) throw NuvioSyncException(response.status)
+        val snapshot = parseTokenSnapshot(
+            JSONObject(response.body),
+            fallbackRefreshToken = refreshToken,
+            fallbackAccountId = session.accountId
+        )
+        session.updateTokens(snapshot)
+        snapshot.accessToken
+    }
+
+    private fun requestJson(url: String, body: JSONObject, authorization: String): HttpResponse {
+        val connection = (URL(url).openConnection() as HttpURLConnection).apply {
+            requestMethod = "POST"
+            doOutput = true
+            connectTimeout = REQUEST_TIMEOUT_MS
+            readTimeout = REQUEST_TIMEOUT_MS
+            setRequestProperty("apikey", publishableKey)
+            setRequestProperty("Authorization", authorization)
+            setRequestProperty("Accept", "application/json")
+            setRequestProperty("Content-Type", "application/json")
         }
-        return response.body
+        return try {
+            connection.outputStream.bufferedWriter().use { it.write(body.toString()) }
+            connection.readResponse()
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+    private fun sessionFromAuthPayload(payload: JSONObject): NuvioSession {
+        val snapshot = parseTokenSnapshot(payload)
+        return NuvioSession(snapshot.accessToken, snapshot.refreshToken, snapshot.expiresAtEpochSeconds, snapshot.accountId)
+    }
+
+    private fun parseTokenSnapshot(
+        payload: JSONObject,
+        fallbackRefreshToken: String = "",
+        fallbackAccountId: String = ""
+    ): NuvioTokenSnapshot {
+        val accessToken = payload.optString("access_token").trim()
+        check(accessToken.isNotBlank()) { "Nuvio returned an empty session token." }
+        val refreshToken = payload.optString("refresh_token").trim().ifBlank { fallbackRefreshToken }
+        val user = payload.optJSONObject("user")
+        val accountId = user?.optString("id")?.trim()?.takeIf { it.isNotBlank() }
+            ?: user?.optString("email")?.trim()?.takeIf { it.isNotBlank() }
+            ?: accessToken.subjectFromJwt()?.takeIf { it.isNotBlank() }
+            ?: fallbackAccountId
+        val expiresAt = payload.optLong("expires_at", 0L).takeIf { it > 0L }
+            ?: payload.boundedExpiresIn()?.let { Instant.now().epochSecond + it }
+            ?: 0L
+        return NuvioTokenSnapshot(accessToken, refreshToken, expiresAt, accountId)
     }
 
     private suspend fun postPublicJson(
@@ -425,7 +576,7 @@ internal object NuvioApi {
     }
 
     private fun requireUsableSession(session: NuvioSession) {
-        if (session.accessToken.isBlank() || session.isExpired()) throw NuvioSessionExpiredException()
+        if (session.accessToken.isBlank()) throw NuvioSessionExpiredException()
     }
 
     private suspend inline fun <T> apiCall(crossinline block: suspend () -> T): Result<T> = try {
@@ -582,6 +733,14 @@ private fun parseWatchInstant(value: String?): Instant? {
         ?: runCatching { java.time.OffsetDateTime.parse(raw).toInstant() }.getOrNull()
     return parsed?.takeIf { it.epochSecond in 0..MAX_REASONABLE_WATCH_EPOCH_SECONDS }
 }
+
+private fun String.subjectFromJwt(): String? = runCatching {
+    val payload = split('.').getOrNull(1) ?: return null
+    val decoded = Base64.decode(payload, Base64.URL_SAFE or Base64.NO_PADDING or Base64.NO_WRAP)
+    JSONObject(String(decoded, Charsets.UTF_8)).optString("sub")
+        .trim()
+        .takeIf { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+}.getOrNull()
 
 /** Reads at most [maxBytes] of an HTTP response and rejects an oversized body. */
 internal fun readResponseBodyAtMost(
