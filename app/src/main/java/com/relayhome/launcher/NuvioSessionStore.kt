@@ -38,7 +38,7 @@ internal object NuvioSessionStore {
         bindPersistence(appContext, session, prefs.getLong(generationKey, 0L))
         session
     }.getOrElse {
-        clear(context)
+        clearCorruptSession(context)
         null
     }
 
@@ -73,13 +73,21 @@ internal object NuvioSessionStore {
     }
 
     fun clear(context: Context) {
+        clearStoredSession(context, clearProfile = true)
+    }
+
+    private fun clearCorruptSession(context: Context) {
+        clearStoredSession(context, clearProfile = false)
+    }
+
+    private fun clearStoredSession(context: Context, clearProfile: Boolean) {
         val appContext = applicationContextSafely(context)
         synchronized(storeLock) {
             val prefs = preferences(appContext)
             writeSharedPreferencesSafely(appContext, preferencesName) {
-                it.putLong(generationKey, prefs.getLong(generationKey, 0L) + 1L)
+                val editor = it.putLong(generationKey, prefs.getLong(generationKey, 0L) + 1L)
                     .remove(tokenKey)
-                    .remove(profileKey)
+                if (clearProfile) editor.remove(profileKey)
             }
         }
     }
