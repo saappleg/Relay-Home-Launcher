@@ -9,14 +9,14 @@ and playback.
 
 ## Current beta
 
-The latest published build is [v0.1.0-beta.10](https://github.com/saappleg/Relay-Home-Launcher/releases/tag/v0.1.0-beta.10), a GitHub prerelease with version code 33 and the signed APK `relay-home-0.1.0-beta.10.apk`. Its published SHA-256 digest is
-`c887c334b93756422010aa3514e8d749cafc9b18f59479984c67cda00bde3094`.
+The latest published build is [v0.1.0-beta.11](https://github.com/saappleg/Relay-Home-Launcher/releases/tag/v0.1.0-beta.11), a GitHub prerelease with version code 34 and the signed APK `relay-home-0.1.0-beta.11.apk`. Its published SHA-256 digest is
+`6b836420b23afa566f397f6bf8fb79781df4065c3f1914d8c7a1b39819c9468a`.
 
-Beta.10 includes the previous round of TV-first, provider, cache, focus, and
-launcher-safety updates. This source also reconciles the newer Home/App Peek
-focus work from `feature/focus-info-preview` with beta.10's account/session and
-provider fixes; these follow-ups are not part of the published APK until the
-next signed release passes its release gate. See [the release checklist](docs/RELEASES.md).
+Beta.11 brings the latest Home/App Peek experience back together with the
+beta.10 reliability work. It adds acknowledged Home focus restoration after
+App Peek, smoother settled-card previews, account-scoped Nuvio/RelayTube
+profiles and search history, and RelayTube-aware provider labels. See [the
+release checklist](docs/RELEASES.md) for verification details.
 
 ## Features
 

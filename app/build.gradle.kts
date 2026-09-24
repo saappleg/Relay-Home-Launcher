@@ -33,11 +33,11 @@ val relayTmdbApiKey = configuredValue("tmdb.apiKey", "RELAY_TMDB_API_KEY")
 val relayVersionCodeOverride = providers.environmentVariable("RELAY_VERSION_CODE").orNull
 val relayVersionNameOverride = providers.environmentVariable("RELAY_VERSION_NAME").orNull
 
-// The newest published release is v0.1.0-beta.10 (versionCode 33). Keep local debug/test builds
+// The newest published release is v0.1.0-beta.11 (versionCode 34). Keep local debug/test builds
 // visibly on the next unreleased identity instead of silently presenting an obsolete beta. This
 // fallback is never accepted for release packaging; releases must receive explicit version inputs.
-val localNextVersionCode = 34
-val localNextVersionName = "0.1.0-beta.11"
+val localNextVersionCode = 35
+val localNextVersionName = "0.1.0-beta.12"
 val relayVersionCode = relayVersionCodeOverride?.toIntOrNull() ?: localNextVersionCode
 val relayVersionName = relayVersionNameOverride?.takeIf { it.isNotBlank() } ?: localNextVersionName
 val releaseVersionCodePattern = Regex("^[1-9][0-9]{0,9}$")

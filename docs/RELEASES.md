@@ -57,13 +57,34 @@ Published beta.7 verification:
 The GitHub release is non-draft and marked as a prerelease. The APK was
 downloaded from that release and independently checked before TV installation.
 
-Beta.8 and beta.9 added later follow-ups. Beta.10 is the latest published
-prerelease; its signed APK uses version code 33 and has SHA-256
-`c887c334b93756422010aa3514e8d749cafc9b18f59479984c67cda00bde3094`. Its tag
-points to `11be5a7bccd2dc913d437e933c19e3053c69b5d9`. This source reconciles the
-newer `feature/focus-info-preview` Home/App Peek implementation with beta.10's
-Nuvio session, RelayTube naming, TMDB, and Shizuku fixes. The follow-up release
-must pass the normal gate before it is considered published.
+Beta.8 and beta.9 added later follow-ups. Beta.10's signed APK uses version
+code 33 and has SHA-256
+`c887c334b93756422010aa3514e8d749cafc9b18f59479984c67cda00bde3094`; its tag
+points to `11be5a7bccd2dc913d437e933c19e3053c69b5d9`.
+
+## Published beta.11 verification
+
+[v0.1.0-beta.11](https://github.com/saappleg/Relay-Home-Launcher/releases/tag/v0.1.0-beta.11)
+is the latest published prerelease. Its signed APK is `relay-home-0.1.0-beta.11.apk`:
+
+- workflow: [GitHub Actions run 35789140861](https://github.com/saappleg/Relay-Home-Launcher/actions/runs/35789140861);
+- tag target: `ac61b1251fa9e950883d531c9c6b0b6b87a834a1`;
+- package/version: `com.relayhome.launcher`, `0.1.0-beta.11`, versionCode `34`;
+- asset SHA-256: `6b836420b23afa566f397f6bf8fb79781df4065c3f1914d8c7a1b39819c9468a`;
+- production signing certificate SHA-256:
+  `4da8c2767f2e47a8a95c74bda80e9349c4e5b1b0e8fdb2b52d3bd0775d68bc21`.
+
+The release is non-draft and marked as a prerelease. The isolated Android TV
+emulator suite passed all 109 tests before the workflow verified the signed
+APK and published it. The downloaded APK's SHA-256 matches the GitHub asset
+digest.
+
+Beta.11 brings the newer Home/App Peek implementation together with beta.10's
+Nuvio session, RelayTube naming, TMDB, and Shizuku fixes. It also includes
+acknowledged Home focus restoration after App Peek, settled-card artwork
+updates, account-scoped Nuvio/RelayTube mappings, profile-specific search
+history, and preserved profile selection when a corrupt session token is
+cleared.
 
 ## Beta.8 release notes
 
@@ -103,8 +124,8 @@ isolated Android TV emulator suite passed before signing and publication.
 
 ## Version and signing rules
 
-Use a version code larger than every published APK. Beta.10 is code 33, so the
-next beta must use at least code 34. Never replace the production signing key
+Use a version code larger than every published APK. Beta.11 is code 34, so the
+next beta must use at least code 35. Never replace the production signing key
 after the first signed beta; Android updates require certificate continuity.
 
 The publish workflow requires these repository secrets:
@@ -119,8 +140,8 @@ The checked-in signing example uses the corresponding five
 `relay.signing.*` values: store file, store type, store password, key alias,
 and key password. A JKS keystore is not accepted by the publish workflow.
 
-Non-release local builds use the development identity `0.1.0-beta.11` / code 34.
-This fallback is useful for debug and test APKs but is not the published beta.10
+Non-release local builds use the development identity `0.1.0-beta.12` / code 35.
+This fallback is useful for debug and test APKs but is not the published beta.11
 build and must never be used as release evidence. Release packaging fails closed
 unless `RELAY_VERSION_NAME`, `RELAY_VERSION_CODE`, and the signing values are
 explicitly provided. The local release keystore may be configured in ignored
@@ -131,8 +152,8 @@ explicitly provided. The local release keystore may be configured in ignored
 Use JDK 17. With a permanent PKCS12 keystore configured, run:
 
 ```bash
-export RELAY_VERSION_NAME=0.1.0-beta.11
-export RELAY_VERSION_CODE=34
+export RELAY_VERSION_NAME=0.1.0-beta.12
+export RELAY_VERSION_CODE=35
 ./gradlew :app:verifyRelayReleaseVersion :app:lintRelease \
   :app:testReleaseUnitTest :app:assembleRelease
 ```
@@ -154,9 +175,9 @@ gh workflow run publish-release.yml \
   --repo saappleg/Relay-Home-Launcher \
   --ref main \
   -f channel=beta \
-  -f version_name=0.1.0-beta.11 \
-  -f version_code=34 \
-  -f release_notes='Faster Home focus previews and reliable App Peek return focus; account-safe Nuvio and RelayTube profiles; RelayTube-aware labels; safer cached metadata and launcher handoff.'
+  -f version_name=0.1.0-beta.12 \
+  -f version_code=35 \
+  -f release_notes='Describe the changes included in the next release.'
 ```
 
 The workflow checks out exactly the requested revision, validates the channel
@@ -180,12 +201,12 @@ workflow's display alone:
 
 ```bash
 gh run list --repo saappleg/Relay-Home-Launcher --workflow publish-release.yml --limit 5
-gh release view v0.1.0-beta.11 --repo saappleg/Relay-Home-Launcher \
+gh release view v0.1.0-beta.12 --repo saappleg/Relay-Home-Launcher \
   --json tagName,isDraft,isPrerelease,targetCommitish,assets
 ```
 
 Confirm the release is not a draft, has the expected prerelease flag, contains
-exactly `relay-home-0.1.0-beta.11.apk`, and that its tag points to the tested
+exactly `relay-home-0.1.0-beta.12.apk`, and that its tag points to the tested
 revision. Install the published asset on a clean TV, then update from the
 signed beta baseline and verify that app data remains intact.
 
@@ -229,6 +250,10 @@ updates preserve app data normally.
 - `v0.1.0-beta.10` (code 33) contains configurable Home rows, ordered favorites,
   profile-safe Nuvio syncing and automatic refresh, TMDB caching, RelayTube-aware
   handoff, and safer Shizuku launcher switching.
+- `v0.1.0-beta.11` (code 34) restores the latest Home/App Peek experience,
+  confirms focus on a visible Home target after peeks, coalesces focused-art
+  updates, scopes Nuvio/RelayTube profile mappings and search history, and
+  preserves Nuvio profile selection when a corrupt session is cleared.
 
 The baseline-profile module is wired but generation is explicit and is not a
 release-workflow step. It currently covers startup and a short Home D-pad
