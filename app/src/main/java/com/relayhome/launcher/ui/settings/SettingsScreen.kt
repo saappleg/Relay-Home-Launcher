@@ -1572,8 +1572,9 @@ private fun SubscriptionSettings(
 ) {
     SettingsSectionTitle("Channel visibility", "Choose which RelayTube creators appear in the Home subscriptions row.")
     var channelQuery by rememberSaveable { mutableStateOf("") }
-    var channelSearchEditing by rememberSaveable { mutableStateOf(false) }
+    var channelSearchActive by remember { mutableStateOf(false) }
     val channelSearchFocusRequester = remember { FocusRequester() }
+    val channelSearchFieldFocusRequester = remember { FocusRequester() }
     val smartTubeChannels = remember(smartTubeSubscriptions) {
         smartTubeSubscriptions
             .mapNotNull { video -> video.channelId?.let { id -> id to (video.channel ?: "Unknown channel") } }
@@ -1588,42 +1589,46 @@ private fun SubscriptionSettings(
             channelId to if (index == 0 && firstFocusRequester != null) firstFocusRequester else FocusRequester()
         }.toMap()
     }
+    LaunchedEffect(channelSearchActive) {
+        if (channelSearchActive) {
+            withFrameNanos { }
+            runCatching { channelSearchFieldFocusRequester.requestFocus() }
+        }
+    }
     if (smartTubeChannels.isNotEmpty()) {
         Spacer(Modifier.height(20.dp))
         Text("New from subscriptions", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(8.dp))
         Text("Choose which subscribed creators appear in Relay. This never changes your YouTube subscriptions.", color = muted, fontSize = 15.sp, lineHeight = 21.sp)
         Spacer(Modifier.height(14.dp))
-        OutlinedTextField(
-            value = channelQuery,
-            onValueChange = { if (channelSearchEditing) channelQuery = it.take(80) },
-            readOnly = !channelSearchEditing,
-            label = { Text(if (channelSearchEditing) "Find a channel" else "Select to search") },
-            singleLine = true,
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("relaytube-channel-search")
-                .onFocusChanged { if (!it.hasFocus) channelSearchEditing = false }
-                .onPreviewKeyEvent { event ->
-                    if (!channelSearchEditing && event.composeKeyType == KeyEventType.KeyDown &&
-                        (event.composeKey == ComposeKey.Enter || event.composeKey == ComposeKey.DirectionCenter)
-                    ) {
-                        channelSearchEditing = true
-                        true
-                    } else {
-                        false
-                    }
-                }
-                .focusRequester(
-                    if (visibleChannels.isEmpty()) firstFocusRequester ?: channelSearchFocusRequester
-                    else channelSearchFocusRequester
-                )
-                .focusProperties {
-                    if (backFocusRequester != null) up = backFocusRequester
-                    visibleChannels.firstOrNull()?.let { first -> down = channelFocusRequesters.getValue(first.first) }
-                },
-            textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
-        )
+        if (channelSearchActive) {
+            OutlinedTextField(
+                value = channelQuery,
+                onValueChange = { channelQuery = it.take(80) },
+                label = { Text("Find a channel") },
+                singleLine = true,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("relaytube-channel-search")
+                    .focusRequester(channelSearchFieldFocusRequester)
+                    .focusProperties {
+                        if (backFocusRequester != null) up = backFocusRequester
+                        visibleChannels.firstOrNull()?.let { first -> down = channelFocusRequesters.getValue(first.first) }
+                    },
+                textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
+            )
+        } else {
+            ActionButton(
+                "Search channels",
+                palette,
+                primary = false,
+                modifier = Modifier.fillMaxWidth().testTag("relaytube-channel-search"),
+                focusRequester = if (visibleChannels.isEmpty()) firstFocusRequester ?: channelSearchFocusRequester else channelSearchFocusRequester,
+                upFocusRequester = backFocusRequester,
+                downFocusRequester = visibleChannels.firstOrNull()?.let { channelFocusRequesters.getValue(it.first) },
+                onClick = { channelSearchActive = true }
+            )
+        }
         Spacer(Modifier.height(10.dp))
         if (visibleChannels.isEmpty()) {
             Text("No channels match that name.", color = muted, fontSize = 14.sp)
@@ -1646,7 +1651,7 @@ private fun SubscriptionSettings(
                                 .focusRequester(channelFocusRequesters.getValue(channelId))
                                 .focusProperties {
                                     if (channelIndex == 0) {
-                                        up = channelSearchFocusRequester
+                                        up = if (channelSearchActive) channelSearchFieldFocusRequester else channelSearchFocusRequester
                                     } else {
                                         up = channelFocusRequesters.getValue(visibleChannels[channelIndex - 1].first)
                                     }
