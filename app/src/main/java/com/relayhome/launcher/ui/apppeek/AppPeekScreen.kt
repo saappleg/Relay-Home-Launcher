@@ -133,6 +133,7 @@ import com.google.zxing.EncodeHintType
 import com.google.zxing.MultiFormatWriter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.time.DayOfWeek
@@ -253,12 +254,16 @@ internal fun AppPeekPanel(
     items: List<MediaItem>,
     palette: RelayPalette,
     loading: Boolean,
+    bridgeUnavailable: Boolean = false,
+    needsProfilePairing: Boolean = false,
     focusRequester: FocusRequester,
     topFocusRequester: FocusRequester? = null,
     onPreviewFocused: () -> Unit,
     onItemSelected: (MediaItem) -> Unit,
     onOpenRelayTube: () -> Unit,
     onPlayRelayTube: (MediaItem) -> Unit,
+    onRetryRelayTube: () -> Unit = {},
+    onOpenSettings: () -> Unit = {},
     onArtworkColor: (Color?) -> Unit
 ) {
     val context = LocalContext.current
@@ -272,10 +277,25 @@ internal fun AppPeekPanel(
     val selectedIndex = usableItems.indexOfFirst { it.contentKey() == selectedKey }
         .takeIf { it >= 0 } ?: 0
     val lead = usableItems.getOrNull(selectedIndex) ?: usableItems.firstOrNull()
+    val leadKey = lead?.contentKey()
+    var settledArtworkKey by remember(provider) { mutableStateOf<String?>(null) }
+    LaunchedEffect(provider, leadKey) {
+        if (settledArtworkKey == null) {
+            settledArtworkKey = leadKey
+        } else {
+            // Focus movement stays immediate for the tiles and metadata. Coalesce only the
+            // full-width backdrop request so a held D-pad key does not decode every poster.
+            delay(180L)
+            settledArtworkKey = leadKey
+        }
+    }
+    val backdropLead = usableItems.firstOrNull { it.contentKey() == settledArtworkKey } ?: lead
     val detailsFocusRequester = remember(provider) { FocusRequester() }
-    val peekImageRequest = remember(lead?.artworkUrl) {
+    val retryFocusRequester = remember(provider) { FocusRequester() }
+    val pairingFocusRequester = remember(provider) { FocusRequester() }
+    val peekImageRequest = remember(backdropLead?.artworkUrl) {
         ImageRequest.Builder(context)
-            .data(lead?.artworkUrl)
+            .data(backdropLead?.artworkUrl)
             .size(1920, 1080)
             .crossfade(false)
             .build()
@@ -284,7 +304,7 @@ internal fun AppPeekPanel(
         if (selectedKey?.let { it !in itemKeys } != false) selectedKey = itemKeys.firstOrNull()
     }
     Box(Modifier.fillMaxWidth().height(580.dp).background(midnight)) {
-        lead?.let { item ->
+        backdropLead?.let { item ->
             AsyncImage(
                 model = peekImageRequest,
                 contentDescription = null,
@@ -354,7 +374,11 @@ internal fun AppPeekPanel(
                             .border(if (focused) 2.dp else if (selected) 1.dp else 0.dp, ivory.copy(alpha = if (focused) .78f else .28f), RoundedCornerShape(14.dp))
                             .focusProperties {
                                 topFocusRequester?.let { up = it }
-                                down = detailsFocusRequester
+                                down = if (provider == Provider.SMARTTUBE && lead != null) {
+                                    retryFocusRequester
+                                } else {
+                                    detailsFocusRequester
+                                }
                             }
                             // Focus is the preview action on TV. Observe the clickable target
                             // directly so the lead updates without requiring Select.
@@ -400,7 +424,9 @@ internal fun AppPeekPanel(
                 Text(
                     when {
                         provider == Provider.SMARTTUBE && loading -> "Connecting to ${provider.label}…"
-                        provider == Provider.SMARTTUBE -> "No live ${provider.label} video yet"
+                        provider == Provider.SMARTTUBE && needsProfilePairing -> "Pair your ${provider.label} profile"
+                        provider == Provider.SMARTTUBE && bridgeUnavailable -> "${provider.label} feed did not sync"
+                        provider == Provider.SMARTTUBE -> "No synced ${provider.label} media yet"
                         provider == Provider.STREMIO -> "Stremio catalog unavailable"
                         else -> "No recent ${provider.label} media"
                     },
@@ -412,8 +438,12 @@ internal fun AppPeekPanel(
                 Text(
                     if (provider == Provider.SMARTTUBE && loading) {
                         "Waiting for ${provider.label} to share playback and feed metadata."
+                    } else if (provider == Provider.SMARTTUBE && needsProfilePairing) {
+                        "RelayTube profiles do not match this Nuvio profile automatically. Choose the pairing in Settings to keep each profile's feed separate."
+                    } else if (provider == Provider.SMARTTUBE && bridgeUnavailable) {
+                        "Relay Home did not receive both feed lists from ${provider.label}. Open it once, then retry the sync."
                     } else if (provider == Provider.SMARTTUBE) {
-                        "Start a video in ${provider.label} and its title, channel, artwork, and playback state will appear here."
+                        "Relay Home refreshes this feed when it starts and when you return from ${provider.label}. Open ${provider.label}, sign in, or retry if your subscriptions are missing."
                     } else if (provider == Provider.STREMIO) {
                         "Relay does not receive Stremio's live catalog or Continue Watching data. Use the Stremio tab to browse."
                     } else {
@@ -428,7 +458,6 @@ internal fun AppPeekPanel(
                 Spacer(Modifier.height(12.dp))
                 ActionButton(
                     when {
-                        provider == Provider.SMARTTUBE && loading -> "Loading ${provider.label}…"
                         provider == Provider.SMARTTUBE -> "Open ${provider.label}"
                         provider == Provider.STREMIO -> "Stremio is handoff-only"
                         else -> "Waiting for ${provider.label} media"
@@ -438,10 +467,62 @@ internal fun AppPeekPanel(
                     focusRequester = focusRequester,
                     upFocusRequester = topFocusRequester,
                     onFocused = { if (it) onPreviewFocused() },
-                    onClick = { if (provider == Provider.SMARTTUBE && !loading) onOpenRelayTube() }
+                    onClick = { if (provider == Provider.SMARTTUBE) onOpenRelayTube() }
                 )
+                if (provider == Provider.SMARTTUBE) {
+                    Spacer(Modifier.height(8.dp))
+                    ActionButton(
+                        if (loading) "Retrying ${provider.label}…" else "Retry feed sync",
+                        palette.copy(accent = provider.accent),
+                        primary = true,
+                        focusRequester = retryFocusRequester,
+                        upFocusRequester = focusRequester,
+                        onFocused = { if (it) onPreviewFocused() },
+                        onClick = { if (!loading) onRetryRelayTube() }
+                    )
+                    if (needsProfilePairing) {
+                        Spacer(Modifier.height(8.dp))
+                        ActionButton(
+                            "Pair profiles in Settings",
+                            palette.copy(accent = provider.accent),
+                            primary = false,
+                            focusRequester = pairingFocusRequester,
+                            upFocusRequester = retryFocusRequester,
+                            onFocused = { if (it) onPreviewFocused() },
+                            onClick = onOpenSettings
+                        )
+                    }
+                }
             }
             if (lead != null) {
+                if (provider == Provider.SMARTTUBE) {
+                    when {
+                        loading -> Text("Refreshing ${provider.label} feeds…", color = muted, fontSize = 14.sp)
+                        bridgeUnavailable -> Text(
+                            "Showing cached ${provider.label} media while feed sync is unavailable.",
+                            color = muted,
+                            fontSize = 14.sp,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    ActionButton(
+                        when {
+                            loading -> "Refreshing ${provider.label}…"
+                            bridgeUnavailable -> "Retry feed sync"
+                            else -> "Refresh ${provider.label} feed"
+                        },
+                        palette.copy(accent = provider.accent),
+                        primary = false,
+                        focusRequester = retryFocusRequester,
+                        upFocusRequester = focusRequester,
+                        downFocusRequester = detailsFocusRequester,
+                        onFocused = { if (it) onPreviewFocused() },
+                        onClick = { if (!loading) onRetryRelayTube() }
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
                 Spacer(Modifier.height(12.dp))
                 ActionButton(
                     when {
@@ -452,7 +533,7 @@ internal fun AppPeekPanel(
                     palette.copy(accent = provider.accent),
                     primary = false,
                     focusRequester = detailsFocusRequester,
-                    upFocusRequester = focusRequester,
+                    upFocusRequester = if (provider == Provider.SMARTTUBE) retryFocusRequester else focusRequester,
                     onFocused = { if (it) onPreviewFocused() }
                 ) { onItemSelected(lead) }
             }

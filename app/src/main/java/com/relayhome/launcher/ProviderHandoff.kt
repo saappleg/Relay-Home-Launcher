@@ -21,6 +21,7 @@ internal object ProviderHandoff {
         "com.relaytube.beta",
         "com.relaytube.stable",
         "com.relaytube.fdroid",
+        "app.smarttube.fdroid",
         "app.smarttube.stable",
         "org.smarttube.stable",
         "org.smarttube.beta"
@@ -30,7 +31,9 @@ internal object ProviderHandoff {
     internal val relayTubePackages = listOf(
         "com.relaytube.beta",
         "com.relaytube.stable",
-        "com.relaytube.fdroid"
+        "com.relaytube.fdroid",
+        // RelayTube's F-Droid flavor retains the upstream package ID for compatibility.
+        "app.smarttube.fdroid"
     )
 
     fun isSmartTubeInstalled(context: Context): Boolean =

@@ -10,6 +10,8 @@ import androidx.compose.foundation.layout.requiredWidth
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.input.key.Key
@@ -177,6 +179,54 @@ class HomeOrphanFocusAndroidTest {
         card.performClick()
 
         assertEquals(listOf("details", "media"), clicks)
+    }
+
+    @Test
+    fun mediaRail_restoresTheExactSavedCardAfterItsScrollPositionChanges() {
+        val items = (0..8).map { index ->
+            MediaItem(
+                title = "Saved card $index",
+                provider = Provider.NUVIO,
+                progress = 0f,
+                colors = emptyList(),
+                artworkUrl = ""
+            )
+        }
+        val restoreKey = mutableStateOf(items.last().contentKey())
+        val restoreGeneration = mutableIntStateOf(1)
+
+        composeRule.setContent {
+            MaterialTheme(colorScheme = darkColorScheme()) {
+                Box(Modifier.requiredWidth(960.dp).requiredHeight(500.dp)) {
+                    MediaRail(
+                        title = "Continue Watching",
+                        items = items,
+                        palette = orbitalPalette,
+                        dateFormat = RelayDateFormat.LOCAL,
+                        onHeroChanged = {},
+                        onItemSelected = {},
+                        upFocusRequester = FocusRequester(),
+                        firstFocusRequester = FocusRequester(),
+                        restoreFocusItemKey = restoreKey.value,
+                        restoreFocusGeneration = restoreGeneration.intValue,
+                        onRailEntered = {},
+                        onRailExited = {}
+                    )
+                }
+            }
+        }
+
+        val lastCard = composeRule.onNodeWithTag("media-card-${items.last().contentKey()}", useUnmergedTree = true)
+        composeRule.awaitDisplayed(lastCard)
+        composeRule.awaitFocused(lastCard)
+
+        composeRule.runOnUiThread {
+            restoreKey.value = items[2].contentKey()
+            restoreGeneration.intValue += 1
+        }
+        val restoredCard = composeRule.onNodeWithTag("media-card-${items[2].contentKey()}", useUnmergedTree = true)
+        composeRule.awaitDisplayed(restoredCard)
+        composeRule.awaitFocused(restoredCard)
     }
 
     @Test

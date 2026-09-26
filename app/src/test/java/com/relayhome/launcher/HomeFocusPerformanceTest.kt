@@ -47,8 +47,22 @@ class HomeFocusPerformanceTest {
     }
 
     @Test
+    fun focusRetry_doesNotTreatFailedRequestAsSuccess() = runBlocking {
+        var requests = 0
+
+        val result = retryHomeFocusRequest(
+            attempts = 2,
+            awaitFrame = {},
+            request = { ++requests > 1 }
+        )
+
+        assertTrue(result)
+        assertEquals(2, requests)
+    }
+
+    @Test
     fun mediaPreviewSettleWindow_isResponsive() {
-        assertEquals(80L, HOME_MEDIA_PREVIEW_SETTLE_MS)
+        assertEquals(120L, HOME_MEDIA_PREVIEW_SETTLE_MS)
         assertTrue("Preview delay must stay below the old 220ms interaction pause", HOME_MEDIA_PREVIEW_SETTLE_MS < 220L)
     }
 }

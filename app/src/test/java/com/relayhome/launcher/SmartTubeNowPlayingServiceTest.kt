@@ -25,6 +25,18 @@ class SmartTubeNowPlayingServiceTest {
     }
 
     @Test
+    fun subscriptionPayload_treatsUnknownRelayTubeTimingAsZero() {
+        val unknownTiming = video("dQw4w9WgXcQ", "Video")
+            .put("duration_ms", -1)
+            .put("position_ms", -1)
+        val result = parseSubscriptionVideoPayloadForTest("[$unknownTiming]")
+
+        assertTrue(result.first)
+        assertEquals(0L, result.second.single().durationMs)
+        assertEquals(0L, result.second.single().resumePositionMs)
+    }
+
+    @Test
     fun payloadValidators_rejectOversizedAndMalformedJson() {
         val oversized = "[${" ".repeat(256 * 1024)}]"
 
@@ -72,8 +84,7 @@ class SmartTubeNowPlayingServiceTest {
     @Test
     fun feedPayload_acceptsMissingEcho_butRejectsMismatchedEcho() {
         assertTrue(relayTubeFeedProfileMatchesForTest(" profile-1 ", "profile-1"))
-        // RelayTube beta scopes the response by the requested provider-call argument but does
-        // not currently echo profile_id in its feeds Bundle.
+        // Older RelayTube builds may scope by argument without echoing the requested id.
         assertTrue(relayTubeFeedProfileMatchesForTest("profile-1", null))
         assertTrue(relayTubeFeedProfileMatchesForTest("profile-1", ""))
         assertFalse(relayTubeFeedProfileMatchesForTest("profile-1", "profile-2"))

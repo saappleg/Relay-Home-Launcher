@@ -71,10 +71,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.coroutines.CoroutineContext
 
 /** System actions that must remain owned by the Activity (role/settings activity results). */
@@ -93,6 +96,7 @@ internal enum class HeroSource {
 
 private const val MAX_OMDB_ITEMS_PER_BATCH = 18
 private const val OMDB_CONCURRENT_REQUESTS = 4
+private const val RELAY_TUBE_BROADCAST_RESPONSE_TIMEOUT_MS = 2_000L
 internal const val MAX_HERO_CANDIDATES_PER_SOURCE = 4
 internal const val MAX_OPERATION_DIAGNOSTICS = 24
 
@@ -156,6 +160,8 @@ internal data class RelayHomeUiState(
     val upcomingEpisodes: List<com.relayhome.launcher.TmdbCalendarEntry> = emptyList(),
     val tmdbRecommendations: List<MediaItem> = emptyList(),
     val smartTubeFeedLoading: Boolean = false,
+    val smartTubeFeedUnavailable: Boolean = false,
+    val relayTubeNeedsProfilePairing: Boolean = false,
     val smartTubeNowPlaying: SmartTubeNowPlaying? = null,
     val relayTubeProfiles: List<RelayTubeProfile> = emptyList(),
     val smartTubeSubscriptions: List<SmartTubeSubscriptionVideo> = emptyList(),
@@ -282,6 +288,8 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
     private var omdbJob: Job? = null
     private var heroRotationJob: Job? = null
     private var lastProfilePairingSignature: Triple<String, Int, List<String>>? = null
+    private val relayTubeRefreshGeneration = AtomicLong(0L)
+    private val relayTubePairingGeneration = AtomicLong(0L)
 
     private fun launchTracked(
         operation: String,
@@ -325,7 +333,10 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 val diagnostic = RelayOperationError(operation = operation, message = message)
                 val recovered = when (operation) {
                     "nuvio.media.sync" -> current.copy(nuvioSyncing = false, nuvioSyncError = message)
-                    "smarttube.bootstrap" -> current.copy(smartTubeFeedLoading = false)
+                    "smarttube.bootstrap", "relaytube.manual-refresh" -> current.copy(
+                        smartTubeFeedLoading = false,
+                        smartTubeFeedUnavailable = true
+                    )
                     else -> current
                 }
                 recovered.copy(
@@ -384,6 +395,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
             val mediaName = ProviderHandoff.mediaAppDisplayName(appContext)
             MediaProviderBranding.update(mediaName == "RelayTube")
             _state.update { it.copy(smartTubeInstalled = installed, mediaAppDisplayName = mediaName) }
+            refreshRelayTubeFeeds(showLoading = false)
             refreshHeroCandidates()
         }
         if (resetHomeOnNextResume) {
@@ -556,6 +568,12 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         startNuvioMediaSync()
     }
 
+    fun refreshRelayTube() {
+        launchTracked("relaytube.manual-refresh", Dispatchers.IO) {
+            refreshRelayTubeFeeds(showLoading = true)
+        }
+    }
+
     fun selectNuvioProfile(profileIndex: Int) {
         val current = _state.value
         if (profileIndex == current.activeNuvioProfile) return
@@ -564,7 +582,8 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 activeNuvioProfile = profileIndex,
                 nuvioMedia = emptyList(),
                 upcomingEpisodes = emptyList(),
-                tmdbRecommendations = emptyList()
+                tmdbRecommendations = emptyList(),
+                relayTubeNeedsProfilePairing = false
             )
         }
         launchTracked("nuvio.profile-selection-persist", Dispatchers.IO) {
@@ -576,6 +595,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
     }
 
     fun onNuvioConnected(session: NuvioSession) {
+        relayTubePairingGeneration.incrementAndGet()
         lastProfilePairingSignature = null
         val enabled = _state.value.enabledProviders + Provider.NUVIO
         _state.update {
@@ -583,6 +603,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 nuvioSession = session,
                 nuvioAuthRequired = false,
                 nuvioSyncError = null,
+                relayTubeNeedsProfilePairing = false,
                 enabledProviders = enabled,
                 activeProvider = Provider.NUVIO
             )
@@ -600,6 +621,8 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         profilesJob?.cancel()
         mediaJob?.cancel()
         tmdbJob?.cancel()
+        relayTubePairingGeneration.incrementAndGet()
+        lastProfilePairingSignature = null
         _state.update {
             it.afterDestinationTransition(Destination.NUVIO_CONNECT).copy(
                 nuvioSession = null,
@@ -608,6 +631,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 upcomingEpisodes = emptyList(),
                 tmdbRecommendations = emptyList(),
                 nuvioSyncing = false,
+                relayTubeNeedsProfilePairing = false,
                 enabledProviders = enabled
             )
         }
@@ -955,6 +979,10 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
 
     private fun observeSmartTube() {
         launchTracked("smarttube.observe") {
+            var observedSubscriptionBroadcastRevision = SmartTubePlaybackStore.subscriptionBroadcastRevision
+            var observedContinueWatchingBroadcastRevision = SmartTubePlaybackStore.continueWatchingBroadcastRevision
+            var observedSubscriptionProviderRevision = SmartTubePlaybackStore.subscriptionProviderRevision
+            var observedContinueWatchingProviderRevision = SmartTubePlaybackStore.continueWatchingProviderRevision
             snapshotFlow {
                 SmartTubeSnapshot(
                     nowPlaying = SmartTubePlaybackStore.nowPlaying,
@@ -962,9 +990,22 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                     activeProfileId = SmartTubePlaybackStore.activeProfileId,
                     subscriptions = SmartTubePlaybackStore.subscriptionVideos,
                     continueWatching = SmartTubePlaybackStore.continueWatchingVideos,
-                    hiddenChannels = SmartTubeChannelFilter.hiddenChannelIds
+                    hiddenChannels = SmartTubeChannelFilter.hiddenChannelIds,
+                    subscriptionBroadcastRevision = SmartTubePlaybackStore.subscriptionBroadcastRevision,
+                    continueWatchingBroadcastRevision = SmartTubePlaybackStore.continueWatchingBroadcastRevision,
+                    subscriptionProviderRevision = SmartTubePlaybackStore.subscriptionProviderRevision,
+                    continueWatchingProviderRevision = SmartTubePlaybackStore.continueWatchingProviderRevision
                 )
             }.collect { snapshot ->
+                val relayTubeFeedResponded =
+                    snapshot.subscriptionBroadcastRevision > observedSubscriptionBroadcastRevision ||
+                        snapshot.continueWatchingBroadcastRevision > observedContinueWatchingBroadcastRevision ||
+                        snapshot.subscriptionProviderRevision > observedSubscriptionProviderRevision ||
+                        snapshot.continueWatchingProviderRevision > observedContinueWatchingProviderRevision
+                observedSubscriptionBroadcastRevision = snapshot.subscriptionBroadcastRevision
+                observedContinueWatchingBroadcastRevision = snapshot.continueWatchingBroadcastRevision
+                observedSubscriptionProviderRevision = snapshot.subscriptionProviderRevision
+                observedContinueWatchingProviderRevision = snapshot.continueWatchingProviderRevision
                 _state.update {
                     val feedsAllowed = relayTubeProfileDataAllowed(it, snapshot.activeProfileId)
                     val visibleNowPlaying = snapshot.nowPlaying.takeIf { feedsAllowed }
@@ -983,6 +1024,9 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                         smartTubeSubscriptions = snapshot.subscriptions.takeIf { feedsAllowed }.orEmpty(),
                         smartTubeContinueWatching = snapshot.continueWatching.takeIf { feedsAllowed }.orEmpty(),
                         hiddenSmartTubeChannels = snapshot.hiddenChannels,
+                        smartTubeFeedUnavailable = if (relayTubeFeedResponded) {
+                            false
+                        } else it.smartTubeFeedUnavailable,
                         hero = nextHero
                     )
                 }
@@ -1003,10 +1047,72 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                     SmartTubePlaybackStore.subscriptionVideos.isNotEmpty() ||
                     SmartTubePlaybackStore.continueWatchingVideos.isNotEmpty()
             }
-            _state.update { it.copy(smartTubeFeedLoading = !hasCachedData) }
-            withContext(Dispatchers.IO) { RelayTubeProfileBridge.requestProfiles(appContext) }
-            if (!hasCachedData) delay(650)
-            _state.update { it.copy(smartTubeFeedLoading = false) }
+            refreshRelayTubeFeeds(showLoading = !hasCachedData)
+        }
+    }
+
+    /**
+     * Refresh RelayTube when the launcher starts, resumes, or the user asks for a retry. The
+     * provider path replies synchronously; the protected broadcast fallback is given a bounded
+     * response window. Cached cards stay visible while refreshing, and a silent failure becomes
+     * an actionable empty state instead of disappearing after an arbitrary short spinner delay.
+     */
+    private suspend fun refreshRelayTubeFeeds(showLoading: Boolean) {
+        val generation = relayTubeRefreshGeneration.incrementAndGet()
+        val installed = withContext(Dispatchers.IO) {
+            ProviderHandoff.refreshRelayTubeInstallation(appContext)
+            ProviderHandoff.isRelayTubeInstalled(appContext)
+        }
+        if (generation != relayTubeRefreshGeneration.get()) return
+        _state.update { current ->
+            if (generation != relayTubeRefreshGeneration.get()) return@update current
+            current.copy(
+                smartTubeFeedLoading = installed && showLoading,
+                smartTubeFeedUnavailable = false,
+                relayTubeNeedsProfilePairing = if (installed) current.relayTubeNeedsProfilePairing else false
+            )
+        }
+        if (!installed) {
+            _state.update { current ->
+                if (generation == relayTubeRefreshGeneration.get()) {
+                    current.copy(smartTubeFeedLoading = false, smartTubeFeedUnavailable = false)
+                } else current
+            }
+            return
+        }
+
+        val beforeSubscriptionBroadcast = SmartTubePlaybackStore.subscriptionBroadcastRevision
+        val beforeContinueWatchingBroadcast = SmartTubePlaybackStore.continueWatchingBroadcastRevision
+        val beforeSubscriptionProvider = SmartTubePlaybackStore.subscriptionProviderRevision
+        val beforeContinueWatchingProvider = SmartTubePlaybackStore.continueWatchingProviderRevision
+        val providerResult = withContext(Dispatchers.IO) {
+            RelayTubeProfileBridge.requestProfiles(appContext)
+        }
+        val broadcastResponded = providerResult.feedsResponded || withTimeoutOrNull(
+            RELAY_TUBE_BROADCAST_RESPONSE_TIMEOUT_MS
+        ) {
+            snapshotFlow {
+                listOf(
+                    SmartTubePlaybackStore.subscriptionBroadcastRevision,
+                    SmartTubePlaybackStore.continueWatchingBroadcastRevision,
+                    SmartTubePlaybackStore.subscriptionProviderRevision,
+                    SmartTubePlaybackStore.continueWatchingProviderRevision
+                )
+            }.first { revisions ->
+                    (revisions[0] > beforeSubscriptionBroadcast &&
+                        revisions[1] > beforeContinueWatchingBroadcast) ||
+                        (revisions[2] > beforeSubscriptionProvider &&
+                            revisions[3] > beforeContinueWatchingProvider)
+                }
+        } != null
+        if (generation != relayTubeRefreshGeneration.get()) return
+        val feedsAvailable = (providerResult.profilesResponded && providerResult.feedsResponded) || broadcastResponded
+        _state.update { current ->
+            if (generation != relayTubeRefreshGeneration.get()) return@update current
+            current.copy(
+                smartTubeFeedLoading = false,
+                smartTubeFeedUnavailable = !feedsAvailable
+            )
         }
     }
 
@@ -1016,7 +1122,11 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         val activeProfileId: String?,
         val subscriptions: List<SmartTubeSubscriptionVideo>,
         val continueWatching: List<SmartTubeSubscriptionVideo>,
-        val hiddenChannels: Set<String>
+        val hiddenChannels: Set<String>,
+        val subscriptionBroadcastRevision: Int,
+        val continueWatchingBroadcastRevision: Int,
+        val subscriptionProviderRevision: Int,
+        val continueWatchingProviderRevision: Int
     )
 
     private fun relayTubeProfileDataAllowed(state: RelayHomeUiState, activeRelayTubeProfileId: String?): Boolean {
@@ -1101,6 +1211,8 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         profilesJob?.cancel()
         mediaJob?.cancel()
         tmdbJob?.cancel()
+        relayTubePairingGeneration.incrementAndGet()
+        lastProfilePairingSignature = null
         _state.update {
             it.copy(
                 nuvioSession = null,
@@ -1110,6 +1222,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 tmdbRecommendations = emptyList(),
                 nuvioAuthRequired = true,
                 nuvioSyncing = false,
+                relayTubeNeedsProfilePairing = false,
                 nuvioSyncError = "Your Nuvio session expired. Sign in again to reconnect your account.",
                 activeProvider = Provider.NUVIO
             )
@@ -1124,13 +1237,24 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         force: Boolean = false
     ) {
         val current = _state.value
-        val nuvioProfile = current.nuvioProfiles.firstOrNull { it.index == profileIndex } ?: return
-        if (current.relayTubeProfiles.isEmpty()) return
+        val nuvioProfile = current.nuvioProfiles.firstOrNull { it.index == profileIndex }
+        if (nuvioProfile == null || current.relayTubeProfiles.isEmpty()) {
+            relayTubePairingGeneration.incrementAndGet()
+            lastProfilePairingSignature = null
+            _state.update { it.copy(relayTubeNeedsProfilePairing = false) }
+            return
+        }
         val accountId = current.nuvioSession?.accountId.orEmpty()
-        if (accountId.isBlank()) return
+        if (accountId.isBlank()) {
+            relayTubePairingGeneration.incrementAndGet()
+            lastProfilePairingSignature = null
+            _state.update { it.copy(relayTubeNeedsProfilePairing = false) }
+            return
+        }
         val signature = Triple(accountId, profileIndex, current.relayTubeProfiles.map(RelayTubeProfile::id))
         if (!force && signature == lastProfilePairingSignature) return
         lastProfilePairingSignature = signature
+        val generation = relayTubePairingGeneration.incrementAndGet()
         launchTracked(
             operation = "relaytube.profile-pairing",
             dispatcher = Dispatchers.IO,
@@ -1141,7 +1265,18 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 accountId,
                 nuvioProfile,
                 current.relayTubeProfiles
-            ) ?: return@launchTracked
+            )
+            val latest = _state.value
+            val stillCurrent = generation == relayTubePairingGeneration.get() &&
+                latest.nuvioSession?.accountId == accountId &&
+                latest.activeNuvioProfile == profileIndex &&
+                latest.relayTubeProfiles.map(RelayTubeProfile::id) == signature.third
+            if (!stillCurrent) return@launchTracked
+            if (pairedId == null) {
+                _state.update { it.copy(relayTubeNeedsProfilePairing = true) }
+                return@launchTracked
+            }
+            _state.update { it.copy(relayTubeNeedsProfilePairing = false) }
             if (pairedId != SmartTubePlaybackStore.activeProfileId) {
                 RelayTubeProfileBridge.selectProfile(appContext, pairedId)
             }

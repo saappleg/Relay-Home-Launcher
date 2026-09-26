@@ -4,6 +4,7 @@
     <uses-permission android:name="com.relaytube.stable.ACCESS_VIDEO_DATA" />
     <uses-permission android:name="com.relaytube.beta.ACCESS_VIDEO_DATA" />
     <uses-permission android:name="com.relaytube.fdroid.ACCESS_VIDEO_DATA" />
+    <uses-permission android:name="app.smarttube.fdroid.ACCESS_VIDEO_DATA" />
     <uses-feature android:name="android.software.leanback" android:required="false" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
 
@@ -28,6 +29,7 @@
         <package android:name="com.relaytube.stable" />
         <package android:name="com.relaytube.beta" />
         <package android:name="com.relaytube.fdroid" />
+        <package android:name="app.smarttube.fdroid" />
         <package android:name="app.smarttube.stable" />
         <package android:name="org.smarttube.stable" />
         <package android:name="org.smarttube.beta" />
@@ -91,6 +93,17 @@
         </receiver>
         <receiver
             android:name=".RelayTubePlaybackReceiverFdroid"
+            android:exported="true"
+            android:permission="app.smarttube.fdroid.ACCESS_VIDEO_DATA">
+            <intent-filter>
+                <action android:name="com.relaytube.action.PLAYBACK" />
+                <action android:name="com.relaytube.action.SUBSCRIPTIONS" />
+                <action android:name="com.relaytube.action.CONTINUE_WATCHING" />
+                <action android:name="com.relaytube.action.PROFILES" />
+            </intent-filter>
+        </receiver>
+        <receiver
+            android:name=".RelayTubePlaybackReceiverLegacyFdroid"
             android:exported="true"
             android:permission="com.relaytube.fdroid.ACCESS_VIDEO_DATA">
             <intent-filter>

@@ -13,6 +13,10 @@ class ProviderHandoffTest {
         assertTrue(ProviderHandoff.isProviderPackage("com.stremio.one"))
         assertTrue(ProviderHandoff.isProviderPackage("com.relaytube.beta"))
         assertTrue(ProviderHandoff.isSmartTubePackage("org.smarttube.beta"))
+        assertTrue(ProviderHandoff.isProviderPackage("app.smarttube.fdroid"))
+        assertTrue(ProviderHandoff.isRelayTubePackage("app.smarttube.fdroid"))
+        assertTrue(ProviderHandoff.isProviderPackage("com.relaytube.fdroid"))
+        assertTrue(ProviderHandoff.isRelayTubePackage("com.relaytube.fdroid"))
 
         assertFalse(ProviderHandoff.isProviderPackage("com.relayhome.launcher"))
         assertFalse(ProviderHandoff.isProviderPackage("com.relaytube"))
@@ -30,9 +34,11 @@ class ProviderHandoffTest {
             "com.nuvio.tv",
             "com.stremio.one",
             "app.smarttube.stable",
+            "app.smarttube.fdroid",
             "org.smarttube.beta",
             "com.relaytube.beta",
-            "com.relaytube.stable"
+            "com.relaytube.stable",
+            "com.relaytube.fdroid"
         ).forEach { packageName ->
             assertFalse(
                 "Expected $packageName to remain discoverable in All Apps",
