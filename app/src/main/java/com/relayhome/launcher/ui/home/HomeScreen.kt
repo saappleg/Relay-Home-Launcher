@@ -620,6 +620,7 @@ internal fun HomeScreen(
     nuvioSyncError: String?,
     upcomingEpisodes: List<TmdbCalendarEntry>,
     recommendations: List<MediaItem>,
+    movieRecommendations: List<MediaItem>,
     dateFormat: RelayDateFormat,
     homeRowOrder: List<HomeRow>,
     hiddenHomeRows: Set<HomeRow>,
@@ -794,11 +795,14 @@ internal fun HomeScreen(
     val recommendationItems = remember(providers, recommendations, nuvioOnly) {
         recommendations.filter { it.provider in providers }
     }
+    val recommendedMovieItems = remember(providers, movieRecommendations) {
+        movieRecommendations.filter { it.provider in providers }
+    }
     val subscriptionItems = remember(providers, visibleSmartTubeSubscriptionItems) {
         if (Provider.SMARTTUBE in providers) visibleSmartTubeSubscriptionItems else emptyList()
     }
-    val omdbItems = remember(continueWatching, recommendationItems, subscriptionItems, upcomingEpisodes) {
-        (continueWatching + recommendationItems + subscriptionItems + upcomingEpisodes.map { it.item })
+    val omdbItems = remember(continueWatching, recommendationItems, recommendedMovieItems, subscriptionItems, upcomingEpisodes) {
+        (continueWatching + recommendationItems + recommendedMovieItems + subscriptionItems + upcomingEpisodes.map { it.item })
             .distinctBy(MediaItem::contentKey)
             .take(18)
     }
@@ -817,6 +821,7 @@ internal fun HomeScreen(
             HomeRow.CONTINUE_WATCHING -> continueWatching.isNotEmpty()
             HomeRow.FAVORITE_APPS -> favoriteInstalledApps.isNotEmpty()
             HomeRow.RECOMMENDATIONS -> recommendationItems.isNotEmpty()
+            HomeRow.RECOMMENDED_MOVIES -> recommendedMovieItems.isNotEmpty()
             HomeRow.SUBSCRIPTIONS -> subscriptionItems.isNotEmpty()
             HomeRow.UPCOMING -> upcomingEpisodes.isNotEmpty()
         }
@@ -1079,7 +1084,7 @@ internal fun HomeScreen(
                 HomeContentItem {
                     EmptyHomeState(palette, onSettings)
                 }
-            } else if (continueWatching.isEmpty() && favoriteInstalledApps.isEmpty() && recommendationItems.isEmpty() && subscriptionItems.isEmpty() && upcomingEpisodes.isEmpty()) {
+            } else if (continueWatching.isEmpty() && favoriteInstalledApps.isEmpty() && recommendationItems.isEmpty() && recommendedMovieItems.isEmpty() && subscriptionItems.isEmpty() && upcomingEpisodes.isEmpty()) {
                 HomeContentItem {
                     ProviderDataEmptyState(
                         palette = palette,
@@ -1142,6 +1147,24 @@ internal fun HomeScreen(
                                 onRailEntered = heroFocusScrollGuard.onRailEntered,
                                 onRailExited = heroFocusScrollGuard.onRailExited,
                                 onFocusTarget = { itemKey -> recordHomeFocusTarget(HomeFocusRestoreTarget.Row(HomeRow.RECOMMENDATIONS, itemKey)) }
+                            )
+                            HomeRow.RECOMMENDED_MOVIES -> MediaRail(
+                                title = "Recommended Movies",
+                                items = recommendedMovieItems,
+                                palette = palette,
+                                dateFormat = dateFormat,
+                                onHeroChanged = onHeroChanged,
+                                onFocusedItem = showMediaAmbient,
+                                onItemSelected = onItemSelected,
+                                posters = true,
+                                upFocusRequester = previousRowEntryFocusRequester(rowIndex),
+                                firstFocusRequester = rowEntryFocusRequesters.getValue(HomeRow.RECOMMENDED_MOVIES),
+                                downFocusRequester = nextRowEntryFocusRequester(rowIndex),
+                                restoreFocusItemKey = itemToRestoreInRow(HomeRow.RECOMMENDED_MOVIES),
+                                restoreFocusGeneration = homePeekRestoreGeneration,
+                                onRailEntered = heroFocusScrollGuard.onRailEntered,
+                                onRailExited = heroFocusScrollGuard.onRailExited,
+                                onFocusTarget = { itemKey -> recordHomeFocusTarget(HomeFocusRestoreTarget.Row(HomeRow.RECOMMENDED_MOVIES, itemKey)) }
                             )
                             HomeRow.SUBSCRIPTIONS -> MediaRail(
                                 title = "New from subscriptions",

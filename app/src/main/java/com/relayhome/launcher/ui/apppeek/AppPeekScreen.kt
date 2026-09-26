@@ -439,7 +439,7 @@ internal fun AppPeekPanel(
                     if (provider == Provider.SMARTTUBE && loading) {
                         "Waiting for ${provider.label} to share playback and feed metadata."
                     } else if (provider == Provider.SMARTTUBE && needsProfilePairing) {
-                        "RelayTube profiles do not match this Nuvio profile automatically. Choose the pairing in Settings to keep each profile's feed separate."
+                        "${provider.label} profiles do not match this Nuvio profile automatically. Choose the pairing in Settings to keep each profile's feed separate."
                     } else if (provider == Provider.SMARTTUBE && bridgeUnavailable) {
                         "Relay Home did not receive both feed lists from ${provider.label}. Open it once, then retry the sync."
                     } else if (provider == Provider.SMARTTUBE) {

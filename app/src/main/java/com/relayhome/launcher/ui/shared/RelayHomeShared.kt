@@ -18,7 +18,7 @@ import androidx.palette.graphics.Palette
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-internal enum class Destination(val label: String) { HOME("Home"), DETAIL("Detail"), APPS("Apps"), SEARCH("Search"), CALENDAR("Calendar"), SETTINGS("Settings"), PROVIDER("Provider"), NUVIO_CONNECT("Nuvio connect") }
+internal enum class Destination(val label: String) { HOME("Home"), DETAIL("Detail"), APPS("Apps"), SEARCH("Search"), CALENDAR("Calendar"), SETTINGS("Settings"), PROVIDER("Provider"), NUVIO_CONNECT("Nuvio connect"), STREMIO_CONNECT("Stremio connect") }
 internal enum class Provider(private val defaultLabel: String, val accent: Color) {
     STREMIO("Stremio", Color(0xFF5B87FF)),
     NUVIO("Nuvio", Color(0xFFAF7AFF)),
@@ -335,6 +335,7 @@ internal enum class HomeRow(val label: String) {
     CONTINUE_WATCHING("Continue Watching"),
     FAVORITE_APPS("Favorite Apps"),
     RECOMMENDATIONS("Recommended TV Shows"),
+    RECOMMENDED_MOVIES("Recommended Movies"),
     SUBSCRIPTIONS("New from subscriptions"),
     UPCOMING("Coming Up")
 }

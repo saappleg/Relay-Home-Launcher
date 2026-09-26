@@ -120,6 +120,7 @@ import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.input.key.onPreviewKeyEvent
@@ -170,11 +171,32 @@ internal enum class SettingsCategory(val label: String, val description: String)
     APPEARANCE("Appearance", "Theme and date presentation"),
     HOME_LAYOUT("Home Layout", "Rows, visibility, and wallpaper mode"),
     APPS("Apps", "All Apps and favorite app preferences"),
-    PROVIDERS_ACCOUNTS("Providers & Accounts", "Connections, profiles, and subscriptions"),
+    PROVIDERS_ACCOUNTS("Providers & Accounts", "Manage accounts, Home visibility, and Nuvio–RelayTube profile pairing"),
+    PROFILE("Profile Picture", "Choose the image shown beside the Settings button"),
+    SUBSCRIPTIONS("Subscription Feeds", "Choose which subscribed channels appear in the Home feed"),
     WEATHER_WIDGETS("Weather & Widgets", "Local weather shown on Home"),
-    DATA_SOURCES("Data Sources", "Metadata services and API keys"),
+    DATA_SOURCES("Metadata & API Keys", "TMDB, OMDb, Fanart, and TVDB settings"),
     DEVICE_SETTINGS("Device Settings", "Home role, override mode, and diagnostics"),
     LAUNCHER_UPDATES("Launcher Updates", "Update channel and installed releases")
+}
+
+internal enum class SettingsCategoryGroup(val label: String, val categories: List<SettingsCategory>) {
+    PERSONALIZE("Personalize", listOf(
+        SettingsCategory.APPEARANCE,
+        SettingsCategory.HOME_LAYOUT,
+        SettingsCategory.PROFILE,
+        SettingsCategory.WEATHER_WIDGETS
+    )),
+    APPS_AND_MEDIA("Apps & Media", listOf(
+        SettingsCategory.APPS,
+        SettingsCategory.PROVIDERS_ACCOUNTS,
+        SettingsCategory.SUBSCRIPTIONS,
+        SettingsCategory.DATA_SOURCES
+    )),
+    DEVICE("Device", listOf(
+        SettingsCategory.DEVICE_SETTINGS,
+        SettingsCategory.LAUNCHER_UPDATES
+    ))
 }
 
 internal enum class LauncherSetupMode(val label: String) {
@@ -256,8 +278,14 @@ internal fun SettingsScreen(
     nuvioSyncing: Boolean,
     nuvioItemCount: Int,
     nuvioSyncError: String?,
-    onRefreshNuvio: () -> Unit,
+    stremioConnected: Boolean = false,
+    stremioSyncing: Boolean = false,
+    stremioItemCount: Int = 0,
+    stremioSyncError: String? = null,
     onManageProvider: (Provider) -> Unit,
+    onConnectNuvio: () -> Unit = { onManageProvider(Provider.NUVIO) },
+    onConnectStremio: () -> Unit = { onManageProvider(Provider.STREMIO) },
+    onOpenRelayTube: () -> Unit = { onManageProvider(Provider.SMARTTUBE) },
     dateFormat: RelayDateFormat,
     onDateFormatChanged: (RelayDateFormat) -> Unit,
     onAppearanceChanged: (RelayAppearance) -> Unit,
@@ -493,11 +521,24 @@ internal fun SettingsScreen(
                     nuvioSyncing = nuvioSyncing,
                     nuvioItemCount = nuvioItemCount,
                     nuvioSyncError = nuvioSyncError,
-                    onRefreshNuvio = onRefreshNuvio,
-                    smartTubeSubscriptions = smartTubeSubscriptions,
+                    stremioConnected = stremioConnected,
+                    stremioSyncing = stremioSyncing,
+                    stremioItemCount = stremioItemCount,
+                    stremioSyncError = stremioSyncError,
+                    onConnectNuvio = onConnectNuvio,
+                    onConnectStremio = onConnectStremio,
+                    onOpenRelayTube = onOpenRelayTube,
                     smartTubeInstalled = smartTubeInstalled,
-                    hiddenSmartTubeChannels = hiddenSmartTubeChannels,
-                    onSmartTubeChannelVisible = onSmartTubeChannelVisible,
+                    smartTubeSubscriptionCount = smartTubeSubscriptions.size,
+                    firstFocusRequester = detailFirstFocusRequester,
+                    backFocusRequester = detailBackFocusRequester,
+                    nuvioProfiles = nuvioProfiles,
+                    nuvioAccountId = nuvioAccountId,
+                    relayTubeProfiles = relayTubeProfiles,
+                    onProfileMappingChanged = onProfileMappingChanged
+                )
+                SettingsCategory.PROFILE -> ProfileSettings(
+                    palette = palette,
                     profileImageUri = profileImageUri,
                     webProfileUrl = webProfileUrl,
                     profileUrlError = profileUrlError,
@@ -506,11 +547,16 @@ internal fun SettingsScreen(
                     onProfileImageChanged = onProfileImageChanged,
                     onPickProfileImage = { profileImagePicker.launch(arrayOf("image/*")) },
                     onWebProfileUrlChanged = { webProfileUrl = it; profileUrlError = null },
-                    onProfileUrlError = { profileUrlError = it },
-                    nuvioProfiles = nuvioProfiles,
-                    nuvioAccountId = nuvioAccountId,
-                    relayTubeProfiles = relayTubeProfiles,
-                    onProfileMappingChanged = onProfileMappingChanged
+                    onProfileUrlError = { profileUrlError = it }
+                )
+                SettingsCategory.SUBSCRIPTIONS -> SubscriptionSettings(
+                    palette = palette,
+                    smartTubeSubscriptions = smartTubeSubscriptions,
+                    hiddenSmartTubeChannels = hiddenSmartTubeChannels,
+                    onSmartTubeChannelVisible = onSmartTubeChannelVisible,
+                    onManageProvider = onManageProvider,
+                    firstFocusRequester = detailFirstFocusRequester,
+                    backFocusRequester = detailBackFocusRequester
                 )
                 SettingsCategory.WEATHER_WIDGETS -> WeatherWidgetsSettings(
                     palette = palette,
@@ -619,15 +665,27 @@ internal fun SettingsCategoryRoot(
                 .testTag("settings-category-root"),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            SettingsCategory.entries.forEach { category ->
-                SettingsCategoryEntry(
-                    category = category,
-                    palette = palette,
-                    focusRequester = focusRequesters.getValue(category),
-                    upFocusRequester = if (category == SettingsCategory.APPEARANCE) backFocusRequester else null,
-                    onFocused = { if (it) onCategoryFocused(category) },
-                    onClick = { onCategorySelected(category) }
+            SettingsCategoryGroup.entries.forEachIndexed { groupIndex, group ->
+                if (groupIndex > 0) Spacer(Modifier.height(8.dp))
+                Text(
+                    group.label.uppercase(),
+                    color = palette.accent,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    letterSpacing = 1.sp,
+                    modifier = Modifier.fillMaxWidth().padding(start = 8.dp, top = 4.dp, bottom = 2.dp)
+                        .semantics { heading() }
                 )
+                group.categories.forEach { category ->
+                    SettingsCategoryEntry(
+                        category = category,
+                        palette = palette,
+                        focusRequester = focusRequesters.getValue(category),
+                        upFocusRequester = if (category == SettingsCategory.APPEARANCE) backFocusRequester else null,
+                        onFocused = { if (it) onCategoryFocused(category) },
+                        onClick = { onCategorySelected(category) }
+                    )
+                }
             }
         }
     }
@@ -1087,58 +1145,51 @@ private fun ProvidersAccountsSettings(
     nuvioSyncing: Boolean,
     nuvioItemCount: Int,
     nuvioSyncError: String?,
-    onRefreshNuvio: () -> Unit,
-    smartTubeSubscriptions: List<SmartTubeSubscriptionVideo>,
+    stremioConnected: Boolean,
+    stremioSyncing: Boolean,
+    stremioItemCount: Int,
+    stremioSyncError: String?,
+    onConnectNuvio: () -> Unit,
+    onConnectStremio: () -> Unit,
+    onOpenRelayTube: () -> Unit,
     smartTubeInstalled: Boolean,
-    hiddenSmartTubeChannels: Set<String>,
-    onSmartTubeChannelVisible: (String, Boolean) -> Unit,
-    profileImageUri: String?,
-    webProfileUrl: String,
-    profileUrlError: String?,
     firstFocusRequester: FocusRequester,
     backFocusRequester: FocusRequester,
-    onProfileImageChanged: (String?) -> Unit,
-    onPickProfileImage: () -> Unit,
-    onWebProfileUrlChanged: (String) -> Unit,
-    onProfileUrlError: (String?) -> Unit,
+    smartTubeSubscriptionCount: Int,
     nuvioProfiles: List<NuvioProfile>,
     nuvioAccountId: String,
     relayTubeProfiles: List<RelayTubeProfile>,
     onProfileMappingChanged: (Int, String?) -> Unit
 ) {
-    SettingsSectionTitle("Provider status", "Connect services here, then choose which ones appear in Relay's Home navigation.")
+    SettingsSectionTitle("Media providers", "Connection status, Home visibility, and Continue Watching card limits.")
     Spacer(Modifier.height(20.dp))
-    StatusCard(
-        title = "Nuvio",
-        detail = when {
-            !nuvioConnected -> "Not connected"
-            nuvioSyncing -> "Syncing active profile…"
-            nuvioSyncError != null -> nuvioSyncError
-            else -> "Connected · $nuvioItemCount Continue Watching item${if (nuvioItemCount == 1) "" else "s"} available"
-        },
-        healthy = nuvioConnected && nuvioSyncError == null,
-        palette = palette.copy(accent = Provider.NUVIO.accent),
-        focusRequester = firstFocusRequester,
-        upFocusRequester = backFocusRequester
-    ) {
-        if (nuvioConnected) onRefreshNuvio() else onManageProvider(Provider.NUVIO)
-    }
-    Spacer(Modifier.height(12.dp))
-    StatusCard(
-        title = Provider.SMARTTUBE.label,
-        detail = when {
-            !smartTubeInstalled -> "App not installed"
-            smartTubeSubscriptions.isNotEmpty() -> "Connected · ${smartTubeSubscriptions.size} subscription video${if (smartTubeSubscriptions.size == 1) "" else "s"} received"
-            else -> "Installed · waiting for ${Provider.SMARTTUBE.label} shared data"
-        },
-        healthy = smartTubeInstalled && smartTubeSubscriptions.isNotEmpty(),
-        palette = palette.copy(accent = Provider.SMARTTUBE.accent)
-    ) { onManageProvider(Provider.SMARTTUBE) }
-    Spacer(Modifier.height(24.dp))
-    Text("Media providers", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-    Spacer(Modifier.height(7.dp))
-    Provider.entries.forEach { provider ->
-        val connected = provider in providers
+    val profilePairingUpFocusRequester = remember { FocusRequester() }
+    listOf(Provider.NUVIO, Provider.STREMIO, Provider.SMARTTUBE).forEachIndexed { providerIndex, provider ->
+        val shownOnHome = provider in providers
+        val accountConnected = when (provider) {
+            Provider.NUVIO -> nuvioConnected
+            Provider.STREMIO -> stremioConnected
+            Provider.SMARTTUBE -> smartTubeInstalled
+        }
+        val status = when (provider) {
+            Provider.NUVIO -> when {
+                !nuvioConnected -> "Account not connected"
+                nuvioSyncError != null -> nuvioSyncError
+                nuvioSyncing -> "Syncing your active profile…"
+                else -> "$nuvioItemCount items synced"
+            }
+            Provider.STREMIO -> when {
+                stremioSyncError != null -> stremioSyncError
+                !stremioConnected -> "Account not connected"
+                stremioSyncing -> "Syncing saved library…"
+                else -> "$stremioItemCount saved library items synced"
+            }
+            Provider.SMARTTUBE -> when {
+                !smartTubeInstalled -> "App not installed"
+                smartTubeSubscriptionCount == 0 -> "Installed · waiting for ${Provider.SMARTTUBE.label} shared data"
+                else -> "$smartTubeSubscriptionCount subscription videos received"
+            }
+        }
         Column(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(15.dp)).background(Color(0xFF171A20))
                 .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(15.dp)).padding(18.dp)
@@ -1148,80 +1199,69 @@ private fun ProvidersAccountsSettings(
                 Spacer(Modifier.width(10.dp))
                 Text(provider.label, color = ivory, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
                 Spacer(Modifier.weight(1f))
-                Text(if (connected) "Shown on Home" else "Hidden from Home", color = muted, fontSize = 14.sp)
             }
+            Spacer(Modifier.height(5.dp))
+            Text(status, color = if ((provider == Provider.NUVIO && nuvioSyncError != null) || (provider == Provider.STREMIO && stremioSyncError != null)) Provider.SMARTTUBE.accent else muted, fontSize = 14.sp)
             Spacer(Modifier.height(15.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                ActionButton(if (connected) "Hide from Home" else "Show on Home", palette.copy(accent = provider.accent), primary = connected) {
+                ActionButton(
+                    when {
+                        provider == Provider.SMARTTUBE && accountConnected -> "Open ${provider.label}"
+                        accountConnected -> "Manage connection"
+                        provider == Provider.SMARTTUBE -> "Open ${provider.label}"
+                        provider == Provider.NUVIO -> "Connect Nuvio"
+                        else -> "Connect Stremio"
+                    },
+                    palette.copy(accent = provider.accent),
+                    primary = true,
+                    focusRequester = if (providerIndex == 0) firstFocusRequester else null,
+                    upFocusRequester = if (providerIndex == 0) backFocusRequester else null
+                ) {
+                    when {
+                        provider == Provider.NUVIO && !nuvioConnected -> onConnectNuvio()
+                        provider == Provider.STREMIO && !stremioConnected -> onConnectStremio()
+                        provider == Provider.SMARTTUBE -> onOpenRelayTube()
+                        else -> onManageProvider(provider)
+                    }
+                }
+                ActionButton(if (shownOnHome) "Hide from Home" else "Show on Home", palette.copy(accent = provider.accent), primary = false) {
                     onProviderToggle(provider)
                 }
-                ActionButton(if (provider == Provider.NUVIO && nuvioConnected) "Manage connection" else "Connect", palette.copy(accent = provider.accent), primary = false) {
-                    onManageProvider(provider)
-                }
             }
-            Spacer(Modifier.height(18.dp))
-            Text("Continue Watching cards", color = ivory, fontSize = 15.sp, fontWeight = FontWeight.Medium)
-            Spacer(Modifier.height(5.dp))
-            Text("${continueWatchingLimits[provider] ?: ContinueWatchingLimits.defaultLimit} maximum from ${provider.label}", color = muted, fontSize = 14.sp)
-            Spacer(Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf(1, 2, 4, 6, 8, 12).forEach { limit ->
-                    ActionButton(limit.toString(), palette.copy(accent = provider.accent), primary = (continueWatchingLimits[provider] ?: ContinueWatchingLimits.defaultLimit) == limit) {
-                        onContinueWatchingLimitChanged(provider, limit)
+            if (provider != Provider.STREMIO) {
+                Spacer(Modifier.height(18.dp))
+                Text("Continue Watching cards", color = ivory, fontSize = 15.sp, fontWeight = FontWeight.Medium)
+                Spacer(Modifier.height(5.dp))
+                Text("${continueWatchingLimits[provider] ?: ContinueWatchingLimits.defaultLimit} maximum from ${provider.label}", color = muted, fontSize = 14.sp)
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf(1, 2, 4, 6, 8, 12).forEach { limit ->
+                        ActionButton(
+                            limit.toString(),
+                            palette.copy(accent = provider.accent),
+                            primary = (continueWatchingLimits[provider] ?: ContinueWatchingLimits.defaultLimit) == limit,
+                            focusRequester = if (provider == Provider.SMARTTUBE && limit == 12) profilePairingUpFocusRequester else null
+                        ) {
+                            onContinueWatchingLimitChanged(provider, limit)
+                        }
                     }
                 }
             }
         }
         Spacer(Modifier.height(12.dp))
     }
-    Text("Nuvio library sync", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-    Spacer(Modifier.height(7.dp))
-    val status = when {
-        !nuvioConnected -> "Not connected"
-        nuvioSyncing -> "Syncing your active profile…"
-        nuvioSyncError != null -> nuvioSyncError
-        else -> "$nuvioItemCount Continue Watching item${if (nuvioItemCount == 1) "" else "s"} synced"
-    }
-    Text(status, color = if (nuvioSyncError != null) Provider.SMARTTUBE.accent else muted, fontSize = 15.sp)
-    if (nuvioConnected) {
-        Spacer(Modifier.height(14.dp))
-        ActionButton(if (nuvioSyncing) "Refreshing Nuvio…" else "Refresh Nuvio", palette.copy(accent = Provider.NUVIO.accent), primary = false, onClick = onRefreshNuvio)
-    }
-    if (nuvioProfiles.isNotEmpty() && relayTubeProfiles.isNotEmpty()) {
+    if (nuvioProfiles.isNotEmpty()) {
         Spacer(Modifier.height(30.dp))
         ProfileMappingSettings(
             palette = palette,
             nuvioProfiles = nuvioProfiles,
             nuvioAccountId = nuvioAccountId,
             relayTubeProfiles = relayTubeProfiles,
-            firstFocusRequester = firstFocusRequester,
-            backFocusRequester = backFocusRequester,
-            onProfileMappingChanged = onProfileMappingChanged
+            precedingFocusRequester = profilePairingUpFocusRequester,
+            onProfileMappingChanged = onProfileMappingChanged,
+            onOpenRelayTube = onOpenRelayTube
         )
     }
-    Spacer(Modifier.height(30.dp))
-    ProfileSettings(
-        palette = palette,
-        profileImageUri = profileImageUri,
-        webProfileUrl = webProfileUrl,
-        profileUrlError = profileUrlError,
-        firstFocusRequester = null,
-        backFocusRequester = null,
-        onProfileImageChanged = onProfileImageChanged,
-        onPickProfileImage = onPickProfileImage,
-        onWebProfileUrlChanged = onWebProfileUrlChanged,
-        onProfileUrlError = onProfileUrlError
-    )
-    Spacer(Modifier.height(30.dp))
-    SubscriptionSettings(
-        palette = palette,
-        smartTubeSubscriptions = smartTubeSubscriptions,
-        hiddenSmartTubeChannels = hiddenSmartTubeChannels,
-        onSmartTubeChannelVisible = onSmartTubeChannelVisible,
-        onManageProvider = onManageProvider,
-        firstFocusRequester = null,
-        backFocusRequester = backFocusRequester
-    )
 }
 
 @Composable
@@ -1230,9 +1270,9 @@ private fun ProfileMappingSettings(
     nuvioProfiles: List<NuvioProfile>,
     nuvioAccountId: String,
     relayTubeProfiles: List<RelayTubeProfile>,
-    firstFocusRequester: FocusRequester,
-    backFocusRequester: FocusRequester,
-    onProfileMappingChanged: (Int, String?) -> Unit
+    precedingFocusRequester: FocusRequester,
+    onProfileMappingChanged: (Int, String?) -> Unit,
+    onOpenRelayTube: () -> Unit
 ) {
     val context = LocalContext.current
     val availableProfiles = remember(relayTubeProfiles) {
@@ -1256,13 +1296,28 @@ private fun ProfileMappingSettings(
     )
     Spacer(Modifier.height(14.dp))
     Text(
-        "Automatic name matching is used until you choose a pairing. Open a profile button to select a ${Provider.SMARTTUBE.label} profile or clear the pairing.",
+        "Profiles pair automatically only when there is one unused ${Provider.SMARTTUBE.label} profile with the same name (ignoring case, accents, and punctuation). If the names differ or the match is ambiguous, choose the intended profile here. Open a profile button to change or clear its pairing.",
         color = muted,
         fontSize = 14.sp,
         lineHeight = 20.sp
     )
     Spacer(Modifier.height(14.dp))
-    nuvioProfiles.forEach { nuvioProfile ->
+    if (availableProfiles.isEmpty()) {
+        Text(
+            "No ${Provider.SMARTTUBE.label} profile data is available yet. Open ${Provider.SMARTTUBE.label} on this TV, then return here to pair profiles.",
+            color = muted,
+            fontSize = 15.sp,
+            lineHeight = 21.sp
+        )
+        Spacer(Modifier.height(14.dp))
+        ActionButton(
+            "Open ${Provider.SMARTTUBE.label}",
+            palette.copy(accent = Provider.SMARTTUBE.accent),
+            primary = false,
+            upFocusRequester = precedingFocusRequester,
+            onClick = onOpenRelayTube
+        )
+    } else nuvioProfiles.forEach { nuvioProfile ->
         val selectedId = selectedMappings[nuvioProfile.index]
         val selectedName = availableProfiles.firstOrNull { it.id == selectedId }?.name ?: "Automatic / not paired"
         val options: List<Pair<String?, String>> = listOf(null to "Automatic / not paired") + availableProfiles.map { it.id to it.name }
@@ -1285,7 +1340,7 @@ private fun ProfileMappingSettings(
                     palette = palette,
                     primary = selectedId != null,
                     focusRequester = focusRequester,
-                    upFocusRequester = if (nuvioProfile == nuvioProfiles.firstOrNull()) firstFocusRequester else mappingFocusRequesters[nuvioProfiles.getOrNull(nuvioProfiles.indexOf(nuvioProfile) - 1)?.index],
+                    upFocusRequester = if (nuvioProfile == nuvioProfiles.firstOrNull()) precedingFocusRequester else mappingFocusRequesters[nuvioProfiles.getOrNull(nuvioProfiles.indexOf(nuvioProfile) - 1)?.index],
                     downFocusRequester = mappingFocusRequesters[nuvioProfiles.getOrNull(nuvioProfiles.indexOf(nuvioProfile) + 1)?.index],
                     modifier = Modifier.widthIn(min = 220.dp).testTag("profile-mapping-${nuvioProfile.index}"),
                     onClick = { expandedProfileIndex = nuvioProfile.index }
@@ -1344,7 +1399,7 @@ private fun ProfileSettings(
     onWebProfileUrlChanged: (String) -> Unit,
     onProfileUrlError: (String?) -> Unit
 ) {
-    SettingsSectionTitle("Profile", "Personalize the profile button shown beside Settings.")
+    SettingsSectionTitle("Profile picture", "Personalize the profile button shown beside Settings.")
     Spacer(Modifier.height(20.dp))
     Box(
         Modifier.size(116.dp).clip(CircleShape).background(Provider.NUVIO.accent.copy(alpha = .65f))
@@ -1406,15 +1461,17 @@ private fun SubscriptionSettings(
     firstFocusRequester: FocusRequester?,
     backFocusRequester: FocusRequester?
 ) {
-    SettingsSectionTitle("Subscriptions", "Choose which subscribed creators appear in New from subscriptions.")
+    SettingsSectionTitle("Subscription feeds", "Choose which subscribed creators appear in New from subscriptions.")
     val smartTubeChannels = remember(smartTubeSubscriptions) {
         smartTubeSubscriptions
             .mapNotNull { video -> video.channelId?.let { id -> id to (video.channel ?: "Unknown channel") } }
             .distinctBy { it.first }
             .sortedBy { it.second.lowercase() }
     }
-    val channelFocusRequesters = remember(smartTubeChannels) {
-        smartTubeChannels.associate { (channelId, _) -> channelId to FocusRequester() }
+    val channelFocusRequesters = remember(smartTubeChannels, firstFocusRequester) {
+        smartTubeChannels.mapIndexed { index, (channelId, _) ->
+            channelId to if (index == 0 && firstFocusRequester != null) firstFocusRequester else FocusRequester()
+        }.toMap()
     }
     if (smartTubeChannels.isNotEmpty()) {
         Spacer(Modifier.height(20.dp))
@@ -2551,39 +2608,4 @@ internal fun SettingsSectionTitle(title: String, description: String) {
     Text(title, color = ivory, fontSize = 25.sp, fontWeight = FontWeight.Light)
     Spacer(Modifier.height(8.dp))
     Text(description, color = muted, fontSize = 15.sp, lineHeight = 22.sp)
-}
-
-@Composable
-internal fun StatusCard(
-    title: String,
-    detail: String,
-    healthy: Boolean,
-    palette: RelayPalette,
-    focusRequester: FocusRequester? = null,
-    upFocusRequester: FocusRequester? = null,
-    leftFocusRequester: FocusRequester? = null,
-    onClick: () -> Unit
-) {
-    Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(15.dp)).background(Color(0xFF171A20))
-            .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(15.dp)).padding(18.dp)
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(Modifier.size(10.dp).clip(CircleShape).background(if (healthy) Color(0xFF65D68A) else Color(0xFFE3AA62)))
-            Spacer(Modifier.width(10.dp))
-            Text(title, color = ivory, fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
-        }
-        Spacer(Modifier.height(8.dp))
-        Text(detail, color = muted, fontSize = 14.sp, lineHeight = 20.sp, maxLines = 3, overflow = TextOverflow.Ellipsis)
-        Spacer(Modifier.height(14.dp))
-        ActionButton(
-            if (title == "Nuvio" && healthy) "Refresh" else "Open",
-            palette,
-            primary = false,
-            focusRequester = focusRequester,
-            upFocusRequester = upFocusRequester,
-            leftFocusRequester = leftFocusRequester,
-            onClick = onClick
-        )
-    }
 }

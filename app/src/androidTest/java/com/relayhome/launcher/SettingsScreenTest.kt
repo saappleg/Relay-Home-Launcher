@@ -94,6 +94,8 @@ class SettingsScreenTest {
         var selectedDateFormat: RelayDateFormat? = null
         var resetRows = false
         var managedProvider: Provider? = null
+        var connectedProvider: Provider? = null
+        var openedRelayTube = false
         var savedWeatherCity: String? = null
         var showHomeClock = false
         var heroCap: Int? = null
@@ -106,6 +108,9 @@ class SettingsScreenTest {
             onDateFormatChanged = { selectedDateFormat = it },
             onHomeRowOrderChanged = { resetRows = true },
             onManageProvider = { managedProvider = it },
+            onConnectNuvio = { connectedProvider = Provider.NUVIO },
+            onConnectStremio = { connectedProvider = Provider.STREMIO },
+            onOpenRelayTube = { openedRelayTube = true },
             onWeatherCityChanged = { savedWeatherCity = it },
             onShowHomeClockChanged = { showHomeClock = it },
             onHeroItemCapChanged = { heroCap = it },
@@ -139,10 +144,21 @@ class SettingsScreenTest {
         composeRule.onNodeWithText("Back to Settings").performClick()
 
         composeRule.onNodeWithText(SettingsCategory.PROVIDERS_ACCOUNTS.label).performClick()
-        composeRule.awaitDisplayed(composeRule.onNodeWithText("Profile").performScrollTo())
-        composeRule.awaitDisplayed(composeRule.onNodeWithText("Subscriptions").performScrollTo())
-        composeRule.onAllNodesWithText("Open")[0].performScrollTo().performClick()
-        assertEquals(Provider.NUVIO, managedProvider)
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Media providers").performScrollTo())
+        composeRule.onNodeWithText("Connect Nuvio").performScrollTo().performClick()
+        assertEquals(Provider.NUVIO, connectedProvider)
+        composeRule.onNodeWithText("Connect Stremio").performScrollTo().performClick()
+        assertEquals(Provider.STREMIO, connectedProvider)
+        composeRule.onNodeWithText("Open ${Provider.SMARTTUBE.label}").performScrollTo().performClick()
+        assertEquals(true, openedRelayTube)
+        composeRule.onNodeWithText("Back to Settings").performClick()
+
+        composeRule.onNodeWithText(SettingsCategory.PROFILE.label).performScrollTo().performClick()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Choose picture"))
+        composeRule.onNodeWithText("Back to Settings").performClick()
+
+        composeRule.onNodeWithText(SettingsCategory.SUBSCRIPTIONS.label).performScrollTo().performClick()
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("No ${Provider.SMARTTUBE.label} subscriptions found yet.", substring = true))
         composeRule.onNodeWithText("Back to Settings").performClick()
 
         composeRule.onNodeWithText(SettingsCategory.WEATHER_WIDGETS.label).performClick()
@@ -165,7 +181,7 @@ class SettingsScreenTest {
         composeRule.onNodeWithText("Back to Settings").performClick()
         composeRule.waitForIdle()
 
-        // Data Sources has dedicated persistence/UI coverage in DataSourcesSettingsAndroidTest;
+        // Metadata & API Keys has dedicated persistence/UI coverage in DataSourcesSettingsAndroidTest;
         // keep this callback smoke test focused on the settings categories modified in this pass.
 
         // Launcher & Updates navigation is covered by enteringCategoryAndPressingBack above.
@@ -217,9 +233,10 @@ class SettingsScreenTest {
             )
         )
 
-        composeRule.onNodeWithText(SettingsCategory.PROVIDERS_ACCOUNTS.label).performClick()
+        composeRule.onNodeWithText(SettingsCategory.SUBSCRIPTIONS.label).performClick()
         val channelTags = listOf("channel-a", "channel-b", "channel-c").map { "smarttube-channel-switch-$it" }
         val firstChannel = composeRule.onNodeWithTag(channelTags.first(), useUnmergedTree = true)
+        composeRule.awaitFocused(firstChannel)
         firstChannel.performSemanticsAction(SemanticsActions.RequestFocus)
         channelTags.forEachIndexed { index, tag ->
             val channel = composeRule.onNodeWithTag(tag, useUnmergedTree = true)
@@ -468,6 +485,9 @@ class SettingsScreenTest {
         onDateFormatChanged: (RelayDateFormat) -> Unit = {},
         onHomeRowOrderChanged: (List<HomeRow>) -> Unit = {},
         onManageProvider: (Provider) -> Unit = {},
+        onConnectNuvio: () -> Unit = {},
+        onConnectStremio: () -> Unit = {},
+        onOpenRelayTube: () -> Unit = {},
         onWeatherCityChanged: (String) -> Unit = {},
         onShowHomeClockChanged: (Boolean) -> Unit = {},
         minimalHomeEnabled: androidx.compose.runtime.State<Boolean> = mutableStateOf(false),
@@ -505,8 +525,10 @@ class SettingsScreenTest {
                     nuvioSyncing = false,
                     nuvioItemCount = 0,
                     nuvioSyncError = null,
-                    onRefreshNuvio = {},
                     onManageProvider = onManageProvider,
+                    onConnectNuvio = onConnectNuvio,
+                    onConnectStremio = onConnectStremio,
+                    onOpenRelayTube = onOpenRelayTube,
                     dateFormat = RelayDateFormat.LOCAL,
                     onDateFormatChanged = onDateFormatChanged,
                     onAppearanceChanged = onAppearanceChanged,

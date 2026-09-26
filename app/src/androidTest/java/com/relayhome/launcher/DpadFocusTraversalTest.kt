@@ -448,6 +448,7 @@ class DpadFocusTraversalTest {
                 nuvioSyncError = null,
                 upcomingEpisodes = emptyList(),
                 recommendations = emptyList(),
+                movieRecommendations = emptyList(),
                 dateFormat = RelayDateFormat.LOCAL,
                 homeRowOrder = HomeRow.entries,
                 hiddenHomeRows = emptySet(),

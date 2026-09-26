@@ -14,6 +14,10 @@ import com.relayhome.launcher.NuvioApi
 import com.relayhome.launcher.NuvioProfile
 import com.relayhome.launcher.NuvioSession
 import com.relayhome.launcher.NuvioSessionStore
+import com.relayhome.launcher.StremioApi
+import com.relayhome.launcher.StremioApiException
+import com.relayhome.launcher.StremioSession
+import com.relayhome.launcher.StremioSessionStore
 import com.relayhome.launcher.profileScope
 import com.relayhome.launcher.OmdbApi
 import com.relayhome.launcher.MediaScores
@@ -154,11 +158,22 @@ internal data class RelayHomeUiState(
     val nuvioProfiles: List<NuvioProfile> = emptyList(),
     val activeNuvioProfile: Int = 1,
     val nuvioMedia: List<MediaItem> = emptyList(),
+    /** Saved titles are kept separate from watch progress so recommendations use library only. */
+    val nuvioLibrary: List<MediaItem> = emptyList(),
     val nuvioSyncing: Boolean = false,
     val nuvioSyncError: String? = null,
     val nuvioRefreshGeneration: Int = 0,
+    val stremioSession: StremioSession? = null,
+    val stremioLibrary: List<MediaItem> = emptyList(),
+    val stremioSyncing: Boolean = false,
+    val stremioSyncError: String? = null,
+    val stremioPairingQr: String? = null,
+    val stremioPairingLink: String? = null,
+    val stremioPairingLoading: Boolean = false,
+    val stremioPairingMessage: String? = null,
     val upcomingEpisodes: List<com.relayhome.launcher.TmdbCalendarEntry> = emptyList(),
     val tmdbRecommendations: List<MediaItem> = emptyList(),
+    val tmdbMovieRecommendations: List<MediaItem> = emptyList(),
     val smartTubeFeedLoading: Boolean = false,
     val smartTubeFeedUnavailable: Boolean = false,
     val relayTubeNeedsProfilePairing: Boolean = false,
@@ -284,12 +299,15 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
     private var profilesJob: Job? = null
     private var mediaJob: Job? = null
     private var tmdbJob: Job? = null
+    private var stremioSyncJob: Job? = null
+    private var stremioPairingJob: Job? = null
     private var detailEnrichmentJob: Job? = null
     private var omdbJob: Job? = null
     private var heroRotationJob: Job? = null
     private var lastProfilePairingSignature: Triple<String, Int, List<String>>? = null
     private val relayTubeRefreshGeneration = AtomicLong(0L)
     private val relayTubePairingGeneration = AtomicLong(0L)
+    private val stremioPairingGeneration = AtomicLong(0L)
 
     private fun launchTracked(
         operation: String,
@@ -333,6 +351,8 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 val diagnostic = RelayOperationError(operation = operation, message = message)
                 val recovered = when (operation) {
                     "nuvio.media.sync" -> current.copy(nuvioSyncing = false, nuvioSyncError = message)
+                    "stremio.library.sync" -> current.copy(stremioSyncing = false, stremioSyncError = message)
+                    "stremio.qr-pairing" -> current.copy(stremioPairingLoading = false, stremioPairingMessage = message)
                     "smarttube.bootstrap", "relaytube.manual-refresh" -> current.copy(
                         smartTubeFeedLoading = false,
                         smartTubeFeedUnavailable = true
@@ -366,12 +386,23 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         observeSmartTube()
         launchTracked("startup.session-and-settings") {
             val initial = withContext(Dispatchers.IO) {
-                NuvioSessionStore.load(appContext) to NuvioSessionStore.loadProfile(appContext)
+                Triple(
+                    NuvioSessionStore.load(appContext),
+                    NuvioSessionStore.loadProfile(appContext),
+                    StremioSessionStore.load(appContext)
+                )
             }
-            _state.update { it.copy(nuvioSession = initial.first, activeNuvioProfile = initial.second) }
+            _state.update {
+                it.copy(
+                    nuvioSession = initial.first,
+                    activeNuvioProfile = initial.second,
+                    stremioSession = initial.third
+                )
+            }
             loadProfileScopedChannelFilter()
             runTracked("settings.reload") { reloadSettings() }
             initial.first?.let(::startNuvioSync)
+            initial.third?.let(::startStremioSync)
         }
         inspectLauncherState()
     }
@@ -424,6 +455,10 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
     }
 
     fun navigate(destination: Destination) {
+        if (destination != Destination.STREMIO_CONNECT) {
+            stremioPairingJob?.cancel()
+            stremioPairingGeneration.incrementAndGet()
+        }
         _state.update {
             // Selecting Home while already on Home is an explicit top-level reset. It must
             // invalidate any pending restoration and advance the Home scroll-reset generation;
@@ -447,6 +482,162 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         _state.update {
             it.afterDestinationTransition(Destination.NUVIO_CONNECT).copy(activeProvider = Provider.NUVIO)
         }
+    }
+
+    fun connectStremio() {
+        _state.update {
+            it.afterDestinationTransition(Destination.STREMIO_CONNECT).copy(
+                activeProvider = Provider.STREMIO,
+                stremioPairingQr = null,
+                stremioPairingLink = null,
+                stremioPairingMessage = null
+            )
+        }
+        startStremioPairing()
+    }
+
+    fun restartStremioPairing() {
+        if (_state.value.destination == Destination.STREMIO_CONNECT) startStremioPairing()
+    }
+
+    private fun startStremioPairing() {
+        stremioPairingJob?.cancel()
+        val generation = stremioPairingGeneration.incrementAndGet()
+        _state.update {
+            it.copy(
+                stremioPairingQr = null,
+                stremioPairingLink = null,
+                stremioPairingLoading = true,
+                stremioPairingMessage = "Preparing secure pairing…"
+            )
+        }
+        stremioPairingJob = launchTracked("stremio.qr-pairing") {
+            val qrResult = StremioApi.createQrLogin()
+            val qr = qrResult.getOrElse { error ->
+                if (generation == stremioPairingGeneration.get()) {
+                    _state.update { it.copy(stremioPairingLoading = false, stremioPairingMessage = error.message ?: "Could not start Stremio pairing.") }
+                }
+                return@launchTracked
+            }
+            if (!isCurrentStremioPairing(generation)) return@launchTracked
+            _state.update {
+                it.copy(
+                    stremioPairingQr = qr.qrPayload,
+                    stremioPairingLink = qr.link,
+                    stremioPairingLoading = false,
+                    stremioPairingMessage = "Waiting for approval on your phone…"
+                )
+            }
+            // Stremio's link API does not return an expiry time. Keep polling bounded and let
+            // viewers restart pairing instead of leaving a TV account screen polling forever.
+            repeat(90) {
+                kotlinx.coroutines.delay(2_500L)
+                if (!isCurrentStremioPairing(generation)) return@launchTracked
+                val poll = StremioApi.pollQrLogin(qr.code)
+                val token = poll.getOrNull()
+                if (token.isNullOrBlank()) {
+                    val failure = poll.exceptionOrNull()
+                    if (failure is StremioApiException && !failure.isPendingQrApproval) {
+                        if (!isCurrentStremioPairing(generation)) return@launchTracked
+                        _state.update {
+                            it.copy(
+                                stremioPairingLoading = false,
+                                stremioPairingMessage = failure.message
+                                    ?: "Stremio rejected this pairing code. Restart pairing to try again."
+                            )
+                        }
+                        return@launchTracked
+                    }
+                    if (failure != null && failure !is StremioApiException) {
+                        if (!isCurrentStremioPairing(generation)) return@launchTracked
+                        _state.update {
+                            it.copy(stremioPairingMessage = "Still waiting for Stremio approval. Check the network if it takes too long.")
+                        }
+                    }
+                    return@repeat
+                }
+                _state.update { it.copy(stremioPairingMessage = "Approved. Connecting your Stremio account…") }
+                val login = StremioApi.loginWithToken(token)
+                val session = login.getOrNull()
+                if (session == null) {
+                    _state.update {
+                        it.copy(
+                            stremioPairingLoading = false,
+                            stremioPairingMessage = login.exceptionOrNull()?.message ?: "Stremio account linking failed. Restart pairing to try again."
+                        )
+                    }
+                    return@launchTracked
+                }
+                if (isCurrentStremioPairing(generation)) onStremioConnected(session)
+                return@launchTracked
+            }
+            if (isCurrentStremioPairing(generation)) {
+                _state.update {
+                    it.copy(stremioPairingLoading = false, stremioPairingMessage = "Pairing timed out. Start a new code and scan it with Stremio.")
+                }
+            }
+        }
+    }
+
+    private fun isCurrentStremioPairing(generation: Long): Boolean =
+        generation == stremioPairingGeneration.get() && _state.value.destination == Destination.STREMIO_CONNECT
+
+    private fun onStremioConnected(session: StremioSession) {
+        stremioPairingGeneration.incrementAndGet()
+        stremioPairingJob?.cancel()
+        val enabled = _state.value.enabledProviders + Provider.STREMIO
+        _state.update {
+            it.afterDestinationTransition(Destination.PROVIDER).copy(
+                activeProvider = Provider.STREMIO,
+                stremioSession = session,
+                stremioLibrary = emptyList(),
+                stremioSyncing = false,
+                stremioSyncError = null,
+                stremioPairingQr = null,
+                stremioPairingLink = null,
+                stremioPairingLoading = false,
+                stremioPairingMessage = null,
+                enabledProviders = enabled
+            )
+        }
+        val persistenceGeneration = StremioSessionStore.reserveSave(appContext)
+        launchTracked("stremio.connection-persist", Dispatchers.IO) {
+            StremioSessionStore.save(appContext, session, persistenceGeneration) {
+                com.relayhome.launcher.ProviderSettingsStore.save(appContext, enabled)
+            }
+        }
+        startStremioSync(session)
+    }
+
+    fun refreshStremio() = startStremioSync()
+
+    fun disconnectStremio() {
+        stremioSyncJob?.cancel()
+        stremioPairingJob?.cancel()
+        stremioPairingGeneration.incrementAndGet()
+        val enabled = _state.value.enabledProviders - Provider.STREMIO
+        _state.update {
+            it.afterDestinationTransition(Destination.PROVIDER).copy(
+                activeProvider = Provider.STREMIO,
+                stremioSession = null,
+                stremioLibrary = emptyList(),
+                stremioSyncing = false,
+                stremioSyncError = null,
+                stremioPairingQr = null,
+                stremioPairingLink = null,
+                stremioPairingLoading = false,
+                stremioPairingMessage = null,
+                enabledProviders = enabled
+            )
+        }
+        val clearGeneration = StremioSessionStore.reserveClear(appContext)
+        launchTracked("stremio.disconnect-persist", Dispatchers.IO) {
+            StremioSessionStore.clear(appContext, clearGeneration) {
+                com.relayhome.launcher.ProviderSettingsStore.save(appContext, enabled)
+            }
+        }
+        refreshTmdbFromCurrentLibraries()
+        refreshHeroCandidates()
     }
 
     fun setPeekProvider(provider: Provider?) {
@@ -581,8 +772,10 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
             it.copy(
                 activeNuvioProfile = profileIndex,
                 nuvioMedia = emptyList(),
+                nuvioLibrary = emptyList(),
                 upcomingEpisodes = emptyList(),
                 tmdbRecommendations = emptyList(),
+                tmdbMovieRecommendations = emptyList(),
                 relayTubeNeedsProfilePairing = false
             )
         }
@@ -591,6 +784,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
             SmartTubeChannelFilter.load(appContext, profileScope(current.nuvioSession, profileIndex))
         }
         selectRelayTubeProfile(profileIndex, allowSelectedFallback = false, force = true)
+        refreshTmdbFromCurrentLibraries()
         startNuvioMediaSync()
     }
 
@@ -603,6 +797,13 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 nuvioSession = session,
                 nuvioAuthRequired = false,
                 nuvioSyncError = null,
+                nuvioProfiles = emptyList(),
+                nuvioMedia = emptyList(),
+                nuvioLibrary = emptyList(),
+                upcomingEpisodes = emptyList(),
+                tmdbRecommendations = emptyList(),
+                tmdbMovieRecommendations = emptyList(),
+                nuvioSyncing = false,
                 relayTubeNeedsProfilePairing = false,
                 enabledProviders = enabled,
                 activeProvider = Provider.NUVIO
@@ -628,8 +829,10 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 nuvioSession = null,
                 nuvioProfiles = emptyList(),
                 nuvioMedia = emptyList(),
+                nuvioLibrary = emptyList(),
                 upcomingEpisodes = emptyList(),
                 tmdbRecommendations = emptyList(),
+                tmdbMovieRecommendations = emptyList(),
                 nuvioSyncing = false,
                 relayTubeNeedsProfilePairing = false,
                 enabledProviders = enabled
@@ -640,6 +843,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
             com.relayhome.launcher.ProviderSettingsStore.save(appContext, enabled)
         }
         refreshHeroCandidates()
+        refreshTmdbFromCurrentLibraries()
     }
 
     fun toggleProvider(provider: Provider) {
@@ -651,6 +855,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
             com.relayhome.launcher.ProviderSettingsStore.save(appContext, enabled)
         }
         refreshHeroCandidates()
+        if (provider == Provider.NUVIO || provider == Provider.STREMIO) refreshTmdbFromCurrentLibraries()
     }
 
     fun toggleFavorite(packageName: String) {
@@ -1146,18 +1351,29 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
             NuvioApi.pullProfiles(activeSession)
                 .onSuccess { profiles ->
                     if (_state.value.nuvioSession != activeSession) return@onSuccess
+                    val previousProfile = _state.value.activeNuvioProfile
+                    val selectedProfile = if (profiles.any { it.index == previousProfile }) {
+                        previousProfile
+                    } else {
+                        profiles.firstOrNull()?.index ?: 1
+                    }
+                    val profileChanged = selectedProfile != previousProfile
+                    if (profileChanged) tmdbJob?.cancel()
                     _state.update {
                         it.copy(
                             nuvioProfiles = profiles,
-                            activeNuvioProfile = if (profiles.any { profile -> profile.index == it.activeNuvioProfile }) {
-                                it.activeNuvioProfile
-                            } else {
-                                profiles.firstOrNull()?.index ?: 1
-                            }
+                            activeNuvioProfile = selectedProfile,
+                            nuvioMedia = if (profileChanged) emptyList() else it.nuvioMedia,
+                            nuvioLibrary = if (profileChanged) emptyList() else it.nuvioLibrary,
+                            upcomingEpisodes = if (profileChanged) emptyList() else it.upcomingEpisodes,
+                            tmdbRecommendations = if (profileChanged) emptyList() else it.tmdbRecommendations,
+                            tmdbMovieRecommendations = if (profileChanged) emptyList() else it.tmdbMovieRecommendations
                         )
                     }
                     selectRelayTubeProfile()
-                    startNuvioMediaSync()
+                    // Media sync is already running alongside the profile request. Restart it
+                    // only if the saved profile was invalid and had to be corrected.
+                    if (profileChanged) startNuvioMediaSync()
                 }
                 .onFailure { error ->
                     if (error is com.relayhome.launcher.NuvioSessionExpiredException) requireNuvioReauthentication()
@@ -1172,12 +1388,18 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         mediaJob?.cancel()
         mediaJob = launchTracked("nuvio.media.sync") {
             _state.update { it.copy(nuvioSyncing = true, nuvioSyncError = null) }
-            NuvioApi.pullRelayMedia(session, current.activeNuvioProfile)
-                .onSuccess { media ->
+            NuvioApi.pullRelayMediaSnapshot(session, current.activeNuvioProfile)
+                .onSuccess { snapshot ->
                     if (_state.value.nuvioSession != session || _state.value.activeNuvioProfile != current.activeNuvioProfile) return@onSuccess
-                    _state.update { it.copy(nuvioMedia = media, nuvioSyncing = false) }
+                    _state.update {
+                        it.copy(
+                            nuvioMedia = snapshot.all,
+                            nuvioLibrary = snapshot.library,
+                            nuvioSyncing = false
+                        )
+                    }
                     refreshHeroCandidates()
-                    loadTmdb(media)
+                    refreshTmdbFromCurrentLibraries()
                 }
                 .onFailure { error ->
                     if (_state.value.nuvioSession != session || _state.value.activeNuvioProfile != current.activeNuvioProfile) return@onFailure
@@ -1196,13 +1418,94 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         }
     }
 
-    private fun loadTmdb(media: List<MediaItem>) {
+    private fun startStremioSync(session: StremioSession? = _state.value.stremioSession) {
+        val activeSession = session ?: return
+        stremioSyncJob?.cancel()
+        stremioSyncJob = launchTracked("stremio.library.sync") {
+            _state.update { it.copy(stremioSyncing = true, stremioSyncError = null) }
+            StremioApi.pullLibrary(activeSession)
+                .onSuccess { library ->
+                    if (_state.value.stremioSession != activeSession) return@onSuccess
+                    _state.update { it.copy(stremioLibrary = library, stremioSyncing = false, stremioSyncError = null) }
+                    refreshTmdbFromCurrentLibraries()
+                    refreshHeroCandidates()
+                }
+                .onFailure { error ->
+                    if (_state.value.stremioSession != activeSession) return@onFailure
+                    if ((error as? com.relayhome.launcher.StremioApiException)?.isUnauthorized == true) {
+                        requireStremioReauthentication()
+                    } else {
+                        _state.update {
+                            it.copy(
+                                stremioSyncing = false,
+                                stremioSyncError = error.message?.take(180)?.takeIf(String::isNotBlank)
+                                    ?: "Couldn’t sync the Stremio library yet. Check the connection and try again."
+                            )
+                        }
+                    }
+                }
+        }
+    }
+
+    private fun requireStremioReauthentication() {
+        stremioSyncJob?.cancel()
+        _state.update {
+            it.copy(
+                stremioSession = null,
+                stremioLibrary = emptyList(),
+                stremioSyncing = false,
+                stremioSyncError = "Your Stremio session needs to be linked again. Connect the account to continue syncing its library."
+            )
+        }
+        val clearGeneration = StremioSessionStore.reserveClear(appContext)
+        launchTracked("stremio.expired-session.clear", Dispatchers.IO) {
+            StremioSessionStore.clear(appContext, clearGeneration)
+        }
+        refreshTmdbFromCurrentLibraries()
+    }
+
+    private fun refreshTmdbFromCurrentLibraries() {
+        val current = _state.value
+        val nuvioLibrary = if (Provider.NUVIO in current.enabledProviders && current.nuvioSession != null) current.nuvioLibrary else emptyList()
+        val stremioLibrary = if (Provider.STREMIO in current.enabledProviders && current.stremioSession != null) current.stremioLibrary else emptyList()
+        val recommendationLibrary = (nuvioLibrary + stremioLibrary)
+        val nuvioSession = current.nuvioSession
+        val stremioSession = current.stremioSession
+        val profileIndex = current.activeNuvioProfile
+        val enabledProviders = current.enabledProviders
         tmdbJob?.cancel()
         tmdbJob = launchTracked("tmdb.recommendations-and-calendar") {
-            val upcoming = TmdbApi.upcomingEpisodes(media)
-            val recommendations = TmdbApi.recommendations(media)
-            if (_state.value.nuvioMedia == media) {
-                _state.update { it.copy(upcomingEpisodes = upcoming, tmdbRecommendations = recommendations) }
+            if (recommendationLibrary.isEmpty()) {
+                _state.update {
+                    if (it.nuvioSession == nuvioSession && it.stremioSession == stremioSession &&
+                        it.activeNuvioProfile == profileIndex && it.enabledProviders == enabledProviders &&
+                        it.nuvioLibrary == current.nuvioLibrary && it.stremioLibrary == current.stremioLibrary
+                    ) {
+                        it.copy(upcomingEpisodes = emptyList(), tmdbRecommendations = emptyList(), tmdbMovieRecommendations = emptyList())
+                    } else it
+                }
+                return@launchTracked
+            }
+            val (upcoming, tvRecommendations, movieRecommendations) = coroutineScope {
+                val upcoming = async { if (nuvioLibrary.isEmpty()) emptyList() else TmdbApi.upcomingEpisodes(nuvioLibrary) }
+                val tv = async { TmdbApi.recommendations(recommendationLibrary) }
+                val movies = async { TmdbApi.movieRecommendations(recommendationLibrary) }
+                Triple(upcoming.await(), tv.await(), movies.await())
+            }
+            if (_state.value.nuvioSession == nuvioSession &&
+                _state.value.stremioSession == stremioSession &&
+                _state.value.activeNuvioProfile == profileIndex &&
+                _state.value.enabledProviders == enabledProviders &&
+                _state.value.nuvioLibrary == current.nuvioLibrary &&
+                _state.value.stremioLibrary == current.stremioLibrary
+            ) {
+                _state.update {
+                    it.copy(
+                        upcomingEpisodes = upcoming,
+                        tmdbRecommendations = tvRecommendations,
+                        tmdbMovieRecommendations = movieRecommendations
+                    )
+                }
             }
         }
     }
@@ -1218,8 +1521,10 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
                 nuvioSession = null,
                 nuvioProfiles = emptyList(),
                 nuvioMedia = emptyList(),
+                nuvioLibrary = emptyList(),
                 upcomingEpisodes = emptyList(),
                 tmdbRecommendations = emptyList(),
+                tmdbMovieRecommendations = emptyList(),
                 nuvioAuthRequired = true,
                 nuvioSyncing = false,
                 relayTubeNeedsProfilePairing = false,
@@ -1229,6 +1534,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         }
         launchTracked("nuvio.expired-session.clear", Dispatchers.IO) { NuvioSessionStore.clear(appContext) }
         refreshHeroCandidates()
+        refreshTmdbFromCurrentLibraries()
     }
 
     private fun selectRelayTubeProfile(

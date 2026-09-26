@@ -156,12 +156,20 @@ internal fun ProviderHubScreen(
     activeNuvioProfile: Int,
     onNuvioProfileSelected: (Int) -> Unit,
     onRefreshNuvio: () -> Unit,
-    onDisconnectNuvio: () -> Unit
+    onDisconnectNuvio: () -> Unit,
+    stremioConnected: Boolean,
+    stremioAccount: String,
+    stremioSyncing: Boolean,
+    stremioItemCount: Int,
+    stremioSyncError: String?,
+    onConnectStremio: () -> Unit,
+    onRefreshStremio: () -> Unit,
+    onDisconnectStremio: () -> Unit
 ) {
     val context = LocalContext.current
-    val firstActionFocusRequester = remember(provider, nuvioConnected, nuvioProfiles.size) { FocusRequester() }
+    val firstActionFocusRequester = remember(provider, nuvioConnected, nuvioProfiles.size, stremioConnected, stremioSyncing) { FocusRequester() }
     val backFocusRequester = remember { FocusRequester() }
-    LaunchedEffect(provider, nuvioConnected, nuvioProfiles.size) {
+    LaunchedEffect(provider, nuvioConnected, nuvioProfiles.size, stremioConnected, stremioSyncing) {
         withFrameNanos { }
         if (runCatching { firstActionFocusRequester.requestFocus() }.isFailure) {
             runCatching { backFocusRequester.requestFocus() }
@@ -173,13 +181,18 @@ internal fun ProviderHubScreen(
         Spacer(Modifier.height(12.dp))
         Text(
             when (provider) {
-                Provider.STREMIO -> "Stremio handoff is ready. Relay can open Stremio's board, search, and supported detail links. Relay does not read Stremio's catalog or Continue Watching data; browse those in Stremio."
+                Provider.STREMIO -> when {
+                    stremioSyncing -> "Stremio is connected. Syncing your saved library…"
+                    stremioSyncError != null -> stremioSyncError
+                    stremioConnected -> "Stremio is connected${stremioAccount.takeIf(String::isNotBlank)?.let { " as $it" }.orEmpty()}. $stremioItemCount saved library items are available for recommendations."
+                    else -> "Link Stremio to sync your saved library and build recommendations from titles you have saved."
+                }
                 Provider.SMARTTUBE -> "${provider.label} is ready as a focused video destination. Relay launches the installed app directly, while ${provider.label} keeps its own subscriptions and playback experience."
                 Provider.NUVIO -> if (nuvioConnected) {
                     when {
                         nuvioSyncing -> "Nuvio is connected. Syncing your profile and Continue Watching…"
                         nuvioSyncError != null -> nuvioSyncError
-                        else -> "Nuvio is connected. $nuvioItemCount Continue Watching items are now available in Relay."
+                        else -> "Nuvio is connected. $nuvioItemCount media items from your active profile are synced with Relay."
                     }
                 } else {
                     "Nuvio is installed. Connect your Nuvio account to bring its profile, library, and Continue Watching into Relay."
@@ -190,7 +203,28 @@ internal fun ProviderHubScreen(
         )
         Spacer(Modifier.height(30.dp))
         if (provider == Provider.STREMIO) {
-            ActionButton("Open Stremio", palette.copy(accent = provider.accent), primary = true, focusRequester = firstActionFocusRequester) {
+            if (!stremioConnected) {
+                ActionButton(
+                    "Connect Stremio library",
+                    palette.copy(accent = provider.accent),
+                    primary = true,
+                    focusRequester = firstActionFocusRequester,
+                    onClick = onConnectStremio
+                )
+                Spacer(Modifier.height(12.dp))
+            } else {
+                ActionButton(
+                    if (stremioSyncing) "Refreshing Stremio…" else "Refresh Stremio library",
+                    palette.copy(accent = provider.accent),
+                    primary = true,
+                    focusRequester = firstActionFocusRequester,
+                    onClick = onRefreshStremio
+                )
+                Spacer(Modifier.height(12.dp))
+                ActionButton("Disconnect Stremio", palette, primary = false, onClick = onDisconnectStremio)
+                Spacer(Modifier.height(12.dp))
+            }
+            ActionButton("Open Stremio", palette.copy(accent = provider.accent), primary = false) {
                 ProviderHandoff.openStremioBoard(context)
             }
             Spacer(Modifier.height(12.dp))

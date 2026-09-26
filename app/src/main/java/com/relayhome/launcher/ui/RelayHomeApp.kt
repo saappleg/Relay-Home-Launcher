@@ -22,6 +22,7 @@ import com.relayhome.launcher.ui.nuvioconnect.NuvioConnectScreen
 import com.relayhome.launcher.ui.providerhub.ProviderHubScreen
 import com.relayhome.launcher.ui.search.SearchScreen
 import com.relayhome.launcher.ui.settings.SettingsScreen
+import com.relayhome.launcher.ui.stremioconnect.StremioConnectScreen
 import com.relayhome.launcher.ui.shared.Destination
 import com.relayhome.launcher.ui.shared.dynamicRelayColorScheme
 import com.relayhome.launcher.ui.shared.ivory
@@ -94,6 +95,7 @@ internal fun RelayHomeApp(
                     nuvioSyncError = state.nuvioSyncError,
                     upcomingEpisodes = state.upcomingEpisodes,
                     recommendations = state.tmdbRecommendations,
+                    movieRecommendations = state.tmdbMovieRecommendations,
                     dateFormat = state.dateFormat,
                     homeRowOrder = state.homeRowOrder,
                     hiddenHomeRows = state.hiddenHomeRows,
@@ -170,8 +172,14 @@ internal fun RelayHomeApp(
                     nuvioSyncing = state.nuvioSyncing,
                     nuvioItemCount = state.nuvioMedia.size,
                     nuvioSyncError = state.nuvioSyncError,
-                    onRefreshNuvio = stateHolder::refreshNuvio,
+                    stremioConnected = state.stremioSession != null,
+                    stremioSyncing = state.stremioSyncing,
+                    stremioItemCount = state.stremioLibrary.size,
+                    stremioSyncError = state.stremioSyncError,
                     onManageProvider = stateHolder::openProvider,
+                    onConnectNuvio = stateHolder::connectNuvio,
+                    onConnectStremio = stateHolder::connectStremio,
+                    onOpenRelayTube = stateHolder::openRelayTube,
                     dateFormat = state.dateFormat,
                     onDateFormatChanged = stateHolder::setDateFormat,
                     onAppearanceChanged = stateHolder::setAppearance,
@@ -252,7 +260,15 @@ internal fun RelayHomeApp(
                     activeNuvioProfile = state.activeNuvioProfile,
                     onNuvioProfileSelected = stateHolder::selectNuvioProfile,
                     onRefreshNuvio = stateHolder::refreshNuvio,
-                    onDisconnectNuvio = stateHolder::disconnectNuvio
+                    onDisconnectNuvio = stateHolder::disconnectNuvio,
+                    stremioConnected = state.stremioSession != null,
+                    stremioAccount = state.stremioSession?.email.orEmpty(),
+                    stremioSyncing = state.stremioSyncing,
+                    stremioItemCount = state.stremioLibrary.size,
+                    stremioSyncError = state.stremioSyncError,
+                    onConnectStremio = stateHolder::connectStremio,
+                    onRefreshStremio = stateHolder::refreshStremio,
+                    onDisconnectStremio = stateHolder::disconnectStremio
                 )
 
                 Destination.NUVIO_CONNECT -> NuvioConnectScreen(
@@ -260,6 +276,16 @@ internal fun RelayHomeApp(
                     connected = state.nuvioSession != null,
                     reauthRequired = state.nuvioAuthRequired,
                     onConnected = stateHolder::onNuvioConnected,
+                    onBack = { stateHolder.navigate(Destination.PROVIDER) }
+                )
+
+                Destination.STREMIO_CONNECT -> StremioConnectScreen(
+                    palette = palette,
+                    qrPayload = state.stremioPairingQr,
+                    link = state.stremioPairingLink,
+                    loading = state.stremioPairingLoading,
+                    message = state.stremioPairingMessage,
+                    onRestart = stateHolder::restartStremioPairing,
                     onBack = { stateHolder.navigate(Destination.PROVIDER) }
                 )
             }

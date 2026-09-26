@@ -100,7 +100,7 @@ least 0.90 normalized edit similarity (or the same words in another order),
 and a 0.08 score margin over the next candidate. Otherwise Relay leaves the
 item unmatched and attaches no TMDB metadata.
 
-In Settings > Data Sources, the optional services are:
+In Settings > Metadata & API Keys, the optional services are:
 
 - TMDB: title matching, artwork, calendars, recommendations, and episode
   metadata;
@@ -122,9 +122,18 @@ and one-time QR exchanges are not retried after a transport failure.
 
 ## Stremio
 
-Stremio is handoff-only. Relay creates validated `stremio:///` board, search,
-and supported detail links, but does not present a synthetic Stremio catalog or
-claim access to Stremio's private Continue Watching data.
+Relay links a Stremio account through the TV QR approval flow. It exchanges the
+one-time pairing token for an account key, stores that key in the Android
+Keystore-backed encrypted session store, and reads the account's saved
+`libraryItem` collection through Stremio's account API. Sync is read-only and
+accepts saved movie and series items for recommendations; it does not sync
+Stremio playback progress or write to the library. The account key is cleared
+when the user disconnects or Stremio rejects the session.
+
+Relay also creates validated `stremio:///` board, search, and supported detail
+links for playback handoff. Stremio's saved library is kept separate from the
+Nuvio library and is included as a recommendation source only while Stremio is
+connected and enabled in Relay's Home provider settings.
 
 ## Safety and failure behavior
 

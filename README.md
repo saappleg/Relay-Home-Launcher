@@ -37,8 +37,9 @@ release checklist](docs/RELEASES.md) for verification details.
 - RelayTube/SmartTube public-data integration for profile-scoped Continue
   Watching, subscriptions, active playback, rich video details, and direct
   video handoff. Full feed support requires the maintained RelayTube companion.
-- Stremio board, search, and supported detail handoff through its public URI
-  scheme; Relay does not synthesize a private Stremio catalog.
+- Stremio QR account linking and read-only saved-library sync for movie and TV
+  recommendations, plus board, search, and supported detail handoff. Relay does
+  not sync Stremio playback progress or write to its library.
 - TMDB artwork, title matching, recommendations, episode metadata, and
   calendar data, plus optional OMDb ratings, Fanart.tv artwork, and TheTVDB
   episode/season metadata.
@@ -46,10 +47,11 @@ release checklist](docs/RELEASES.md) for verification details.
   hidden-app controls; favorites; and configurable icon treatment. Relay itself
   is excluded from All Apps. Nuvio and RelayTube remain launchable there and
   can be favorited directly.
-- Settings for appearance, date format, Home row order/visibility, minimal
+- Grouped Settings for appearance, date format, Home row order/visibility, minimal
   wallpaper Home, wallpaper image selection, hero source/item limits and
   rotation, weather and clock, app customization, provider limits, profile
-  image, Data Sources, launcher setup, and update channel.
+  picture, subscription feeds, metadata API keys, launcher setup, and update
+  channel.
 - Local crash evidence and recoverable-operation diagnostics under Settings >
   Device Settings > Show advanced diagnostics. Crash records contain bounded
   exception/device context and are not uploaded.
@@ -68,9 +70,10 @@ match until the user chooses a manual pairing. See
 and [Nuvio authentication](docs/NUVIO_AUTH.md) for login details.
 
 Stock SmartTube is limited to Android public media-session and notification
-metadata. Relay never reads private SmartTube history. Stremio remains
-handoff-only because no supported launcher-facing catalog or Continue Watching
-API is available here.
+metadata. Relay never reads private SmartTube history. Stremio account linking
+uses QR approval and encrypted local session storage; Relay reads only saved
+movie and TV library items to seed recommendations. It does not sync Stremio
+Continue Watching or change the library.
 
 ## Known limits
 
@@ -95,7 +98,7 @@ API is available here.
 
 Use JDK 17 and Android SDK Platform 35. A TMDB v3 key is optional for local
 builds; put it in `local.properties` as `tmdb.apiKey` for the packaged default
-metadata client, or configure user keys later in Settings > Data Sources.
+metadata client, or configure user keys later in Settings > Metadata & API Keys.
 
 Debug build and install:
 
@@ -172,7 +175,7 @@ documented in [docs/RELEASES.md](docs/RELEASES.md).
    from both Home and Details.
 5. Exercise Left, Right, Up, Down, Back, and Select through Home, hero, rails,
    App Peek, details, Search, All Apps, Calendar, and Settings.
-6. In Settings, verify Data Sources, Hero Banner controls, profile pairing,
+6. In Settings, verify Metadata & API Keys, Hero Banner controls, profile pairing,
   launcher diagnostics, and Settings > Launcher Updates.
 7. Set Relay as the device Home app only after the above flows pass.
 

@@ -44,7 +44,7 @@ class TmdbApiTest {
     }
 
     @Test
-    fun upcomingEnrichment_isCappedToAReasonableRailSizedBatch() {
+    fun upcomingEnrichment_keepsOnlyDistinctShowsAndCapsTheNetworkBatch() {
         val items = List(40) { index ->
             MediaItem(
                 title = "Show $index",
@@ -57,8 +57,66 @@ class TmdbApiTest {
             )
         }
 
-        assertEquals(24, TmdbApi.upcomingEnrichmentItems(items).size)
-        assertEquals(items.take(24), TmdbApi.upcomingEnrichmentItems(items))
+        assertEquals(8, TmdbApi.upcomingEnrichmentItems(items).size)
+        assertEquals(items.take(8), TmdbApi.upcomingEnrichmentItems(items))
+
+        val mixed = listOf(
+            media("Dune", "movie"),
+            media("Episode 1", "episode", showTitle = "The Expanse"),
+            media("The Expanse", "series", showTitle = "The Expanse")
+        )
+        assertEquals(listOf("The Expanse"), TmdbApi.upcomingEnrichmentItems(mixed).map(MediaItem::title))
+    }
+
+    @Test
+    fun recommendationSeeds_areSelectedFromSavedItemsOfTheMatchingType() {
+        val library = listOf(
+            media("Dune", "movie"),
+            media("The Expanse S1E1", "episode", showTitle = "The Expanse"),
+            media("The Expanse", "series", showTitle = "The Expanse"),
+            media("Severance", "tv"),
+            media("Third Show", "show"),
+            media("Arrival", "film")
+        )
+
+        val tvSeeds = TmdbApi.recommendationSeeds(library, TmdbApi.RecommendationSeedKind.TV)
+        val movieSeeds = TmdbApi.recommendationSeeds(library, TmdbApi.RecommendationSeedKind.MOVIE)
+
+        assertEquals(listOf("The Expanse", "Severance"), tvSeeds.map(MediaItem::title))
+        assertTrue(tvSeeds.all { it.contentType in setOf("series", "tv") })
+        assertEquals(listOf("Dune", "Arrival"), movieSeeds.map(MediaItem::title))
+        assertTrue(movieSeeds.all { it.contentType in setOf("movie", "film") })
+    }
+
+    @Test
+    fun recommendationSeeds_reserveASeedForEachEnabledLibrary() {
+        val nuvioSeeds = listOf(
+            media("Nuvio A", "series").copy(artworkUrl = "poster", description = "description", releaseInfo = "2025", rating = 8.0, genres = "drama"),
+            media("Nuvio B", "series").copy(artworkUrl = "poster", description = "description", releaseInfo = "2024", rating = 7.0, genres = "drama")
+        )
+        val stremioSeed = media("Stremio A", "series").copy(provider = Provider.STREMIO)
+
+        val selected = TmdbApi.recommendationSeeds(nuvioSeeds + stremioSeed, TmdbApi.RecommendationSeedKind.TV)
+
+        assertEquals(listOf("Nuvio A", "Stremio A"), selected.map(MediaItem::title))
+    }
+
+    @Test
+    fun recommendationOwnedTitles_areScopedToTheCurrentMediaType() {
+        val sameNamedItems = listOf(
+            media("Dune", "movie"),
+            media("Dune", "series", showTitle = "Dune"),
+            media("Dune: Part Two", "movie")
+        )
+
+        assertEquals(
+            setOf("dune"),
+            TmdbApi.recommendationOwnedTitles(sameNamedItems, TmdbApi.RecommendationSeedKind.TV)
+        )
+        assertEquals(
+            setOf("dune", "duneparttwo"),
+            TmdbApi.recommendationOwnedTitles(sameNamedItems, TmdbApi.RecommendationSeedKind.MOVIE)
+        )
     }
 
     @Test
@@ -116,4 +174,14 @@ class TmdbApiTest {
 
         assertTrue(thrown is CancellationException)
     }
+
+    private fun media(title: String, contentType: String, showTitle: String? = null) = MediaItem(
+        title = title,
+        provider = Provider.NUVIO,
+        progress = 0f,
+        colors = emptyList(),
+        artworkUrl = "",
+        contentType = contentType,
+        showTitle = showTitle
+    )
 }

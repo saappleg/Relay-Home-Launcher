@@ -10,6 +10,11 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import androidx.compose.ui.graphics.Color
 import com.relayhome.launcher.ui.shared.MediaItem
 import com.relayhome.launcher.ui.shared.Provider
@@ -208,6 +213,7 @@ internal object TmdbApi {
     private const val metadataCacheTtlMs = 15 * 60 * 1000L
     private const val metadataCacheMaxEntries = 160
     private val apiKey get() = MetadataApiKeyAccess.tmdbApiKey()
+    private val requestSemaphore = Semaphore(3)
     private data class CachedResponse(val value: String, val storedAtMs: Long)
     private val responseCache = object : LinkedHashMap<String, CachedResponse>(32, .75f, true) {}
 
@@ -313,51 +319,178 @@ internal object TmdbApi {
         }
     }
 
-    /** Personalized TV recommendations seeded by high-confidence titles in the active library. */
+    /** Personalized TV recommendations seeded only by saved shows in the active library. */
     suspend fun recommendations(items: List<MediaItem>): List<MediaItem> = withContext(Dispatchers.IO) {
         recommendationsResult(items).getOrDefault(emptyList())
     }
 
     internal suspend fun recommendationsResult(items: List<MediaItem>): Result<List<MediaItem>> = withContext(Dispatchers.IO) {
+        libraryRecommendationsResult(items, RecommendationKind.TV)
+    }
+
+    /** Personalized movie recommendations use movie entries from the active saved library. */
+    suspend fun movieRecommendations(items: List<MediaItem>): List<MediaItem> = withContext(Dispatchers.IO) {
+        movieRecommendationsResult(items).getOrDefault(emptyList())
+    }
+
+    internal suspend fun movieRecommendationsResult(items: List<MediaItem>): Result<List<MediaItem>> = withContext(Dispatchers.IO) {
+        libraryRecommendationsResult(items, RecommendationKind.MOVIE)
+    }
+
+    private enum class RecommendationKind(
+        val mediaType: String,
+        val outputContentType: String,
+        val supportedSourceTypes: Set<String>,
+        val titleKeys: Array<String>,
+        val dateKey: String
+    ) {
+        TV("tv", "series", setOf("tv", "show", "series", "episode"), arrayOf("name", "original_name"), "first_air_date"),
+        MOVIE("movie", "movie", setOf("movie", "movies", "film", "feature"), arrayOf("title", "original_title"), "release_date")
+    }
+
+    private data class RankedRecommendation(
+        val item: MediaItem,
+        var supportCount: Int = 0,
+        var reciprocalRankScore: Double = 0.0,
+        var popularity: Double = 0.0
+    )
+
+    private data class TmdbRecommendedTitle(val item: MediaItem, val popularity: Double)
+
+    private suspend fun libraryRecommendationsResult(
+        library: List<MediaItem>,
+        kind: RecommendationKind
+    ): Result<List<MediaItem>> = withContext(Dispatchers.IO) {
         if (apiKey.isBlank()) return@withContext Result.failure(TmdbNotConfiguredException())
         tmdbCall {
-            // Three seeds already provide a full rail; avoid a burst of serial requests when Home
-            // opens on a TV with a slower connection.
-            buildList {
-                for (item in items.take(3)) addAll(isolateTmdbItemFailure { recommendationsFor(item) }.orEmpty())
+            val seedKind = if (kind == RecommendationKind.TV) RecommendationSeedKind.TV else RecommendationSeedKind.MOVIE
+            val seeds = recommendationSeeds(library, seedKind)
+            if (seeds.isEmpty()) return@tmdbCall emptyList()
+            val ownedTitles = recommendationOwnedTitles(
+                library,
+                if (kind == RecommendationKind.TV) RecommendationSeedKind.TV else RecommendationSeedKind.MOVIE
+            )
+            val candidates = LinkedHashMap<String, RankedRecommendation>()
+            // At most two seeds per rail keeps Home refresh bounded; requests run concurrently
+            // so a slow title match does not serialize the entire recommendations section.
+            coroutineScope {
+                seeds.map { source ->
+                    async {
+                        val queryTitle = if (kind == RecommendationKind.TV) source.showTitle ?: source.title else source.title
+                        isolateTmdbItemFailure { recommendationsFor(source, queryTitle, kind) }.orEmpty()
+                    }
+                }.awaitAll().forEach { recommendations ->
+                    recommendations.forEachIndexed { rank, recommended ->
+                        val item = recommended.item
+                        val key = item.providerContentId.orEmpty().ifBlank { TmdbTitleMatcher.normalize(item.title) }
+                        val aggregate = candidates.getOrPut(key) { RankedRecommendation(item) }
+                        aggregate.supportCount += 1
+                        aggregate.reciprocalRankScore += 1.0 / (rank + 1.0)
+                        aggregate.popularity = maxOf(aggregate.popularity, recommended.popularity)
+                    }
+                }
             }
-                .distinctBy { TmdbTitleMatcher.normalize(it.title) }
+            candidates.values
+                .asSequence()
+                .filterNot { TmdbTitleMatcher.normalize(it.item.showTitle ?: it.item.title) in ownedTitles }
+                .sortedWith(
+                    compareByDescending<RankedRecommendation> { it.supportCount }
+                        .thenByDescending { it.reciprocalRankScore }
+                        .thenByDescending { it.item.rating ?: 0.0 }
+                        .thenByDescending { it.popularity }
+                        .thenBy { TmdbTitleMatcher.normalize(it.item.title) }
+                )
+                .map(RankedRecommendation::item)
                 .take(18)
+                .toList()
         }
     }
 
-    private suspend fun recommendationsFor(source: MediaItem): List<MediaItem> {
-        val queryTitle = source.showTitle ?: source.title
-        val search = JSONObject(get("/search/tv", mapOf("query" to queryTitle)))
-        val series = findTmdbTitleMatch(search.optJSONArray("results") ?: JSONArray(), queryTitle, "name", "original_name")?.result
+    internal fun recommendationSeeds(library: List<MediaItem>, kind: RecommendationSeedKind): List<MediaItem> {
+        val supportedTypes = when (kind) {
+            RecommendationSeedKind.TV -> RecommendationKind.TV.supportedSourceTypes
+            RecommendationSeedKind.MOVIE -> RecommendationKind.MOVIE.supportedSourceTypes
+        }
+        val isTv = kind == RecommendationSeedKind.TV
+        val providerOrder = library.map(MediaItem::provider).distinct()
+        val seedsByProvider = providerOrder.associateWith { provider ->
+            library.asSequence()
+                .filter { it.provider == provider && it.contentType.trim().lowercase(Locale.ROOT) in supportedTypes }
+                .map { item ->
+                    if (isTv && item.contentType.trim().equals("episode", ignoreCase = true)) {
+                        item.copy(title = item.showTitle ?: item.title, showTitle = item.showTitle ?: item.title, contentType = "series")
+                    } else item
+                }
+                .filter { item -> TmdbTitleMatcher.normalize(if (isTv) item.showTitle ?: item.title else item.title).isNotBlank() }
+                // Rank within each library so one provider cannot consume every seed slot.
+                .sortedByDescending(::recommendationSeedQuality)
+                .distinctBy { item -> TmdbTitleMatcher.normalize(if (isTv) item.showTitle ?: item.title else item.title) }
+                .toList()
+        }
+        return buildList {
+            var round = 0
+            while (size < MAX_RECOMMENDATION_SEEDS) {
+                var added = false
+                providerOrder.forEach { provider ->
+                    seedsByProvider[provider]?.getOrNull(round)?.let {
+                        add(it)
+                        added = true
+                    }
+                }
+                if (!added) break
+                round++
+            }
+        }
+    }
+
+    internal fun recommendationOwnedTitles(library: List<MediaItem>, seedKind: RecommendationSeedKind): Set<String> {
+        val kind = if (seedKind == RecommendationSeedKind.TV) RecommendationKind.TV else RecommendationKind.MOVIE
+        return library.asSequence()
+            .filter { it.contentType.trim().lowercase(Locale.ROOT) in kind.supportedSourceTypes }
+            .mapNotNull { item ->
+                val title = if (kind == RecommendationKind.TV) item.showTitle ?: item.title else item.title
+                TmdbTitleMatcher.normalize(title).takeIf(String::isNotBlank)
+            }
+            .toSet()
+    }
+
+    private fun recommendationSeedQuality(item: MediaItem): Int = listOf(
+        item.artworkUrl.isNotBlank(),
+        !item.description.isNullOrBlank(),
+        !item.releaseInfo.isNullOrBlank(),
+        item.rating != null,
+        !item.genres.isNullOrBlank()
+    ).count { it }
+
+    internal enum class RecommendationSeedKind { TV, MOVIE }
+
+    private suspend fun recommendationsFor(source: MediaItem, queryTitle: String, kind: RecommendationKind): List<TmdbRecommendedTitle> {
+        val search = JSONObject(get("/search/${kind.mediaType}", mapOf("query" to queryTitle)))
+        val matched = findTmdbTitleMatch(search.optJSONArray("results") ?: JSONArray(), queryTitle, *kind.titleKeys)?.result
             ?: return emptyList()
-        val seriesId = series.optInt("id", -1).takeIf { it > 0 } ?: return emptyList()
-        val results = JSONObject(get("/tv/$seriesId/recommendations")).optJSONArray("results") ?: JSONArray()
-        return (0 until minOf(results.length(), 8)).mapNotNull { index ->
-            results.optJSONObject(index)?.let { show ->
-                val title = show.firstText("name", "original_name") ?: return@let null
-                val id = show.optInt("id", -1).takeIf { it > 0 } ?: return@let null
-                MediaItem(
+        val sourceId = matched.optInt("id", -1).takeIf { it > 0 } ?: return emptyList()
+        val results = JSONObject(get("/${kind.mediaType}/$sourceId/recommendations")).optJSONArray("results") ?: JSONArray()
+        return (0 until minOf(results.length(), MAX_RECOMMENDATION_RESULTS_PER_SEED)).mapNotNull { index ->
+            results.optJSONObject(index)?.let { candidate ->
+                val title = candidate.firstText(*kind.titleKeys) ?: return@let null
+                val id = candidate.optInt("id", -1).takeIf { it > 0 } ?: return@let null
+                val artwork = tmdbArtwork(candidate.optString("poster_path"), "w780")
+                    ?: tmdbArtwork(candidate.optString("backdrop_path"), "w1280")
+                    ?: return@let null
+                TmdbRecommendedTitle(MediaItem(
                     title = title,
                     provider = source.provider,
                     progress = 0f,
                     colors = listOf(source.provider.accent.copy(alpha = .45f), Color(0xFF080A10)),
-                    artworkUrl = tmdbArtwork(show.optString("poster_path"), "w780")
-                        ?: tmdbArtwork(show.optString("backdrop_path"), "w1280")
-                        ?: "",
+                    artworkUrl = artwork,
                     providerContentId = "tmdb:$id",
-                    contentType = "series",
-                    showTitle = title,
-                    description = show.firstText("overview"),
-                    releaseInfo = show.firstText("first_air_date"),
-                    rating = show.tmdbRating(),
-                    genres = show.genreNames("series")
-                )
+                    contentType = kind.outputContentType,
+                    showTitle = title.takeIf { kind == RecommendationKind.TV },
+                    description = candidate.firstText("overview"),
+                    releaseInfo = candidate.firstText(kind.dateKey),
+                    rating = candidate.tmdbRating(),
+                    genres = candidate.genreNames(kind.outputContentType)
+                ), candidate.optDouble("popularity", 0.0).takeIf { it.isFinite() } ?: 0.0)
             }
         }
     }
@@ -500,8 +633,17 @@ internal object TmdbApi {
     private fun findTmdbTitleMatch(results: JSONArray, query: String, vararg titleKeys: String): TmdbTitleMatch? =
         TmdbTitleMatcher.match(results, query, *titleKeys)
 
-    internal fun upcomingEnrichmentItems(items: List<MediaItem>): List<MediaItem> =
-        items.take(MAX_UPCOMING_ENRICHMENT_ITEMS)
+    internal fun upcomingEnrichmentItems(items: List<MediaItem>): List<MediaItem> = items.asSequence()
+        .filter { it.contentType.trim().lowercase(Locale.ROOT) in RecommendationKind.TV.supportedSourceTypes }
+        .filter { it.contentType.trim().equals("episode", ignoreCase = true).not() || !it.showTitle.isNullOrBlank() }
+        .distinctBy { TmdbTitleMatcher.normalize(it.showTitle ?: it.title) }
+        .take(MAX_UPCOMING_ENRICHMENT_ITEMS)
+        .map { item ->
+            if (item.contentType.trim().equals("episode", ignoreCase = true)) {
+                item.copy(title = item.showTitle.orEmpty(), contentType = "series")
+            } else item
+        }
+        .toList()
 
     private fun JSONObject.firstText(vararg keys: String): String? = keys
         .asSequence()
@@ -538,9 +680,11 @@ internal object TmdbApi {
         val params = (query + ("api_key" to apiKey)).entries.joinToString("&") {
             URLEncoder.encode(it.key, "UTF-8") + "=" + URLEncoder.encode(it.value, "UTF-8")
         }
-        val body = requestWithRetry(path, request = {
-            cancellableHttpRequest(baseUrl + path + "?" + params)
-        })
+        val body = requestSemaphore.withPermit {
+            requestWithRetry(path, request = {
+                cancellableHttpRequest(baseUrl + path + "?" + params)
+            })
+        }
         currentCoroutineContext().ensureActive()
         cacheResponse(key, body)
         return body
@@ -679,8 +823,10 @@ internal object TmdbApi {
 private const val REQUEST_TIMEOUT_MS = 8_000
 private const val MAX_REQUEST_ATTEMPTS = 3
 private const val RETRY_BASE_DELAY_MS = 300L
-// One Home/Calendar rail does not need the full sync page; this bounds serial TMDB fan-out.
-private const val MAX_UPCOMING_ENRICHMENT_ITEMS = 24
+// Home only needs enough candidates for a recommendation-sized calendar rail.
+private const val MAX_UPCOMING_ENRICHMENT_ITEMS = 8
+private const val MAX_RECOMMENDATION_SEEDS = 2
+private const val MAX_RECOMMENDATION_RESULTS_PER_SEED = 12
 private val TRANSIENT_HTTP_STATUSES = setOf(408, 425, 429, 500, 502, 503, 504)
 
 internal suspend inline fun <T> isolateTmdbItemFailure(crossinline block: suspend () -> T): T? = try {
