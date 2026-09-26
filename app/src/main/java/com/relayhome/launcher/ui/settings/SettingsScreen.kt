@@ -62,6 +62,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -88,6 +89,7 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
@@ -169,12 +171,12 @@ import java.time.YearMonth
 
 internal enum class SettingsCategory(val label: String, val description: String) {
     APPEARANCE("Appearance", "Theme and date presentation"),
-    HOME_LAYOUT("Home Layout", "Rows, visibility, and wallpaper mode"),
+    HOME_LAYOUT("Home Layout", "Home rows, banner, and wallpaper options"),
     APPS("Apps", "All Apps and favorite app preferences"),
-    PROVIDERS_ACCOUNTS("Providers & Accounts", "Manage accounts, Home visibility, and Nuvio–RelayTube profile pairing"),
+    PROVIDERS_ACCOUNTS("Providers & Accounts", "Manage connections, Home visibility, and profile pairing"),
     PROFILE("Profile Picture", "Choose the image shown beside the Settings button"),
-    SUBSCRIPTIONS("Subscription Feeds", "Choose which subscribed channels appear in the Home feed"),
-    WEATHER_WIDGETS("Weather & Widgets", "Local weather shown on Home"),
+    SUBSCRIPTIONS("RelayTube Channels", "Choose which subscribed channels appear in the Home feed"),
+    WEATHER_WIDGETS("Weather & Clock", "Set local weather and Home clock visibility"),
     DATA_SOURCES("Metadata & API Keys", "TMDB, OMDb, Fanart, and TVDB settings"),
     DEVICE_SETTINGS("Device Settings", "Home role, override mode, and diagnostics"),
     LAUNCHER_UPDATES("Launcher Updates", "Update channel and installed releases")
@@ -331,7 +333,7 @@ internal fun SettingsScreen(
     val context = LocalContext.current
     val installedApps = rememberInstalledApps(context)
     val settingsRevision by RelaySettingsRepository.revision(context).collectAsState()
-    var selectedCategory by remember { mutableStateOf<SettingsCategory?>(null) }
+    var selectedCategory by rememberSaveable { mutableStateOf<SettingsCategory?>(null) }
     var lastFocusedRootCategory by remember { mutableStateOf(SettingsCategory.APPEARANCE) }
     var showAdvancedHomeSetup by remember { mutableStateOf(false) }
     var shizukuMessage by remember { mutableStateOf<String?>(null) }
@@ -554,7 +556,7 @@ internal fun SettingsScreen(
                     smartTubeSubscriptions = smartTubeSubscriptions,
                     hiddenSmartTubeChannels = hiddenSmartTubeChannels,
                     onSmartTubeChannelVisible = onSmartTubeChannelVisible,
-                    onManageProvider = onManageProvider,
+                    onOpenRelayTube = onOpenRelayTube,
                     firstFocusRequester = detailFirstFocusRequester,
                     backFocusRequester = detailBackFocusRequester
                 )
@@ -852,10 +854,29 @@ private fun HomeLayoutSettings(
     var heroRotateIntervalSeconds by remember(settingsRevision) {
         mutableStateOf(RelaySettingsRepository.loadHeroAutoRotateIntervalSeconds(context))
     }
+    var showHeroSettings by rememberSaveable { mutableStateOf(false) }
     val rowSwitchRequesters = remember(homeRowOrder) {
         homeRowOrder.associateWith { FocusRequester() }
     }
-    SettingsSectionTitle("Home rows", "Choose the order of rows on Home. Rows with no content are skipped automatically.")
+    val rowMoveUpRequesters = remember(homeRowOrder) { homeRowOrder.associateWith { FocusRequester() } }
+    val rowMoveDownRequesters = remember(homeRowOrder) { homeRowOrder.associateWith { FocusRequester() } }
+    val wallpaperChooseRequester = remember { FocusRequester() }
+    val wallpaperClearRequester = remember { FocusRequester() }
+    val heroOptionsRequester = remember { FocusRequester() }
+    val heroCapDecreaseRequester = remember { FocusRequester() }
+    val heroCapIncreaseRequester = remember { FocusRequester() }
+    val heroSourceRequesters = remember { HeroSource.entries.associateWith { FocusRequester() } }
+    val heroAutoRotateRequester = remember { FocusRequester() }
+    val heroIntervalDecreaseRequester = remember { FocusRequester() }
+    val heroIntervalIncreaseRequester = remember { FocusRequester() }
+    val resetRowOrderRequester = remember { FocusRequester() }
+    val heroSources = listOf(
+        HeroSource.NUVIO to ("Nuvio" to heroIncludeNuvio),
+        HeroSource.CONTINUE_WATCHING to ("Continue Watching" to heroIncludeContinueWatching),
+        HeroSource.SUBSCRIPTIONS to ("Subscriptions" to heroIncludeSubscriptions),
+        HeroSource.NOW_PLAYING to ("Now Playing" to heroIncludeNowPlaying)
+    )
+    SettingsSectionTitle("Home layout", "Choose the Home style, arrange its rows, and adjust the hero banner.")
     Spacer(Modifier.height(20.dp))
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(Color(0xFF171A20))
@@ -877,7 +898,7 @@ private fun HomeLayoutSettings(
                 .focusRequester(firstFocusRequester)
                 .focusProperties {
                     up = backFocusRequester
-                    rowSwitchRequesters[homeRowOrder.firstOrNull()]?.let { down = it }
+                    down = wallpaperChooseRequester
                 },
             testTag = "minimal-home-switch"
         )
@@ -892,23 +913,55 @@ private fun HomeLayoutSettings(
     )
     Spacer(Modifier.height(9.dp))
     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-        ActionButton("Choose photo", palette, primary = false, onClick = onPickWallpaper)
+        ActionButton(
+            "Choose photo", palette, primary = false,
+            modifier = Modifier.testTag("wallpaper-choose-photo"),
+            focusRequester = wallpaperChooseRequester,
+            upFocusRequester = firstFocusRequester,
+            downFocusRequester = heroOptionsRequester,
+            rightFocusRequester = if (!wallpaperImageUri.isNullOrBlank()) wallpaperClearRequester else null,
+            onClick = onPickWallpaper
+        )
         if (!wallpaperImageUri.isNullOrBlank()) {
-            ActionButton("Use artwork again", palette, primary = false, onClick = onClearWallpaper)
+            ActionButton(
+                "Use artwork again", palette, primary = false,
+                modifier = Modifier.testTag("wallpaper-use-artwork"),
+                focusRequester = wallpaperClearRequester,
+                upFocusRequester = firstFocusRequester,
+                downFocusRequester = heroOptionsRequester,
+                leftFocusRequester = wallpaperChooseRequester,
+                onClick = onClearWallpaper
+            )
         }
     }
     Spacer(Modifier.height(18.dp))
-    Text("Hero Banner", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
-    Spacer(Modifier.height(6.dp))
-    Text("Limit hero rotation to the first few items from each feed and disable sources that should stay out of the banner.", color = muted, fontSize = 13.sp, lineHeight = 18.sp)
-    Spacer(Modifier.height(10.dp))
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+    ActionButton(
+        if (showHeroSettings) "Hide Hero Banner options" else "Configure Hero Banner",
+        palette,
+        primary = false,
+        modifier = Modifier.testTag("hero-settings-toggle"),
+        focusRequester = heroOptionsRequester,
+        upFocusRequester = wallpaperChooseRequester,
+        downFocusRequester = if (showHeroSettings) heroCapDecreaseRequester else rowSwitchRequesters[homeRowOrder.firstOrNull()] ?: resetRowOrderRequester,
+        onClick = { showHeroSettings = !showHeroSettings }
+    )
+    if (showHeroSettings) {
+        Spacer(Modifier.height(12.dp))
+        Text("Hero Banner", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+        Spacer(Modifier.height(6.dp))
+        Text("Limit hero rotation to the first few items from each feed and disable sources that should stay out of the banner.", color = muted, fontSize = 13.sp, lineHeight = 18.sp)
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Items per source: $heroItemCap", color = ivory, fontSize = 15.sp)
         ActionButton(
             "−",
             palette,
             primary = false,
             modifier = Modifier.testTag("hero-cap-decrement"),
+            focusRequester = heroCapDecreaseRequester,
+            upFocusRequester = heroOptionsRequester,
+            downFocusRequester = heroSourceRequesters.getValue(HeroSource.NUVIO),
+            rightFocusRequester = heroCapIncreaseRequester,
             accessibilityLabel = "Decrease items per source",
             onClick = { onHeroItemCapChanged(heroItemCap - 1) }
         )
@@ -917,44 +970,52 @@ private fun HomeLayoutSettings(
             palette,
             primary = false,
             modifier = Modifier.testTag("hero-cap-increment"),
+            focusRequester = heroCapIncreaseRequester,
+            upFocusRequester = heroOptionsRequester,
+            downFocusRequester = heroSourceRequesters.getValue(HeroSource.NUVIO),
+            leftFocusRequester = heroCapDecreaseRequester,
             accessibilityLabel = "Increase items per source",
             onClick = { onHeroItemCapChanged(heroItemCap + 1) }
         )
-    }
-    Spacer(Modifier.height(10.dp))
-    val heroSources = listOf(
-        HeroSource.NUVIO to ("Nuvio" to heroIncludeNuvio),
-        HeroSource.CONTINUE_WATCHING to ("Continue Watching" to heroIncludeContinueWatching),
-        HeroSource.SUBSCRIPTIONS to ("Subscriptions" to heroIncludeSubscriptions),
-        HeroSource.NOW_PLAYING to ("Now Playing" to heroIncludeNowPlaying)
-    )
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        heroSources.forEach { (source, state) ->
+        }
+        Spacer(Modifier.height(10.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        heroSources.forEachIndexed { sourceIndex, (source, state) ->
             ActionButton(
                 "${state.first}: ${if (state.second) "On" else "Off"}",
                 palette,
                 primary = state.second,
                 modifier = Modifier.testTag("hero-source-${source.name}"),
+                focusRequester = heroSourceRequesters.getValue(source),
+                upFocusRequester = if (sourceIndex == 0) heroCapIncreaseRequester else heroSourceRequesters.getValue(heroSources[sourceIndex - 1].first),
+                downFocusRequester = heroSourceRequesters[heroSources.getOrNull(sourceIndex + 1)?.first] ?: heroAutoRotateRequester,
                 onClick = { onHeroSourceEnabledChanged(source, !state.second) }
             )
         }
-    }
-    Spacer(Modifier.height(8.dp))
-    ActionButton(
+        }
+        Spacer(Modifier.height(8.dp))
+        ActionButton(
         if (heroAutoRotate) "Auto-rotate: On" else "Auto-rotate: Off",
         palette,
         primary = heroAutoRotate,
         modifier = Modifier.testTag("hero-auto-rotate"),
+        focusRequester = heroAutoRotateRequester,
+        upFocusRequester = heroSourceRequesters.getValue(HeroSource.NOW_PLAYING),
+        downFocusRequester = heroIntervalDecreaseRequester,
         onClick = { onHeroAutoRotateChanged(!heroAutoRotate) }
-    )
-    Spacer(Modifier.height(10.dp))
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Rotation interval: ${heroRotateIntervalSeconds}s", color = ivory, fontSize = 15.sp)
         ActionButton(
             "−",
             palette,
             primary = false,
             modifier = Modifier.testTag("hero-rotate-interval-decrement"),
+            focusRequester = heroIntervalDecreaseRequester,
+            upFocusRequester = heroAutoRotateRequester,
+            downFocusRequester = rowSwitchRequesters[homeRowOrder.firstOrNull()] ?: resetRowOrderRequester,
+            rightFocusRequester = heroIntervalIncreaseRequester,
             accessibilityLabel = "Decrease rotation interval",
             onClick = {
                 val next = (heroRotateIntervalSeconds - 1).coerceIn(3, 30)
@@ -967,6 +1028,10 @@ private fun HomeLayoutSettings(
             palette,
             primary = false,
             modifier = Modifier.testTag("hero-rotate-interval-increment"),
+            focusRequester = heroIntervalIncreaseRequester,
+            upFocusRequester = heroAutoRotateRequester,
+            downFocusRequester = rowSwitchRequesters[homeRowOrder.firstOrNull()] ?: resetRowOrderRequester,
+            leftFocusRequester = heroIntervalDecreaseRequester,
             accessibilityLabel = "Increase rotation interval",
             onClick = {
                 val next = (heroRotateIntervalSeconds + 1).coerceIn(3, 30)
@@ -974,8 +1039,13 @@ private fun HomeLayoutSettings(
                 RelaySettingsRepository.saveHeroAutoRotateIntervalSeconds(context, next)
             }
         )
+        }
     }
     Spacer(Modifier.height(18.dp))
+    Text("Home row order and visibility", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+    Spacer(Modifier.height(7.dp))
+    Text("Move rows with the arrow buttons. Empty feeds are skipped automatically.", color = muted, fontSize = 13.sp)
+    Spacer(Modifier.height(10.dp))
     homeRowOrder.forEachIndexed { index, row ->
         key(row.name) {
             Row(
@@ -993,8 +1063,8 @@ private fun HomeLayoutSettings(
                     modifier = Modifier
                         .focusRequester(rowSwitchRequesters.getValue(row))
                         .focusProperties {
-                            up = rowSwitchRequesters[homeRowOrder.getOrNull(index - 1)] ?: firstFocusRequester
-                            down = rowSwitchRequesters[homeRowOrder.getOrNull(index + 1)] ?: FocusRequester.Cancel
+                            up = rowSwitchRequesters[homeRowOrder.getOrNull(index - 1)] ?: if (showHeroSettings) heroIntervalIncreaseRequester else heroOptionsRequester
+                            down = rowSwitchRequesters[homeRowOrder.getOrNull(index + 1)] ?: resetRowOrderRequester
                         },
                     testTag = "home-row-switch-${row.name}"
                 )
@@ -1004,6 +1074,11 @@ private fun HomeLayoutSettings(
                     palette,
                     primary = false,
                     accessibilityLabel = "Move ${row.label} up",
+                    focusRequester = rowMoveUpRequesters.getValue(row),
+                    leftFocusRequester = rowSwitchRequesters.getValue(row),
+                    rightFocusRequester = rowMoveDownRequesters.getValue(row),
+                    upFocusRequester = rowMoveUpRequesters[homeRowOrder.getOrNull(index - 1)] ?: if (showHeroSettings) heroIntervalIncreaseRequester else heroOptionsRequester,
+                    downFocusRequester = rowMoveUpRequesters[homeRowOrder.getOrNull(index + 1)] ?: resetRowOrderRequester,
                     onClick = { moveHomeRow(index, index - 1) }
                 )
                 Spacer(Modifier.width(8.dp))
@@ -1012,6 +1087,10 @@ private fun HomeLayoutSettings(
                     palette,
                     primary = false,
                     accessibilityLabel = "Move ${row.label} down",
+                    focusRequester = rowMoveDownRequesters.getValue(row),
+                    leftFocusRequester = rowMoveUpRequesters.getValue(row),
+                    upFocusRequester = rowMoveDownRequesters[homeRowOrder.getOrNull(index - 1)] ?: if (showHeroSettings) heroIntervalIncreaseRequester else heroOptionsRequester,
+                    downFocusRequester = rowMoveDownRequesters[homeRowOrder.getOrNull(index + 1)] ?: resetRowOrderRequester,
                     onClick = { moveHomeRow(index, index + 1) }
                 )
             }
@@ -1022,8 +1101,10 @@ private fun HomeLayoutSettings(
         "Reset row order",
         palette,
         primary = false,
-        focusRequester = if (homeRowOrder.isEmpty()) firstFocusRequester else null,
-        upFocusRequester = if (homeRowOrder.isEmpty()) backFocusRequester else null,
+        modifier = Modifier.testTag("home-row-order-reset"),
+        focusRequester = resetRowOrderRequester,
+        upFocusRequester = rowSwitchRequesters[homeRowOrder.lastOrNull()] ?: if (showHeroSettings) heroIntervalIncreaseRequester else heroOptionsRequester,
+        downFocusRequester = null,
         onClick = { onHomeRowOrderChanged(HomeRow.entries) }
     )
 }
@@ -1042,6 +1123,12 @@ private fun AppsSettings(
     onAppIconShapeChanged: (AppIconShape) -> Unit,
     onClearHiddenApps: () -> Unit
 ) {
+    var showHiddenApps by rememberSaveable { mutableStateOf(false) }
+    var hiddenAppQuery by rememberSaveable { mutableStateOf("") }
+    val hiddenAppRows = remember(installedApps, hiddenApps) {
+        installedApps.filter { it.packageName in hiddenApps }
+            .sortedWith(compareBy<InstalledApp> { it.label.lowercase() }.thenBy { it.packageName })
+    }
     SettingsSectionTitle("All Apps", "Control which apps appear, how they are ordered, and how their icons are shaped.")
     Spacer(Modifier.height(20.dp))
     Text("Sort order", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
@@ -1088,15 +1175,34 @@ private fun AppsSettings(
             )
         }
         if (hiddenApps.isNotEmpty()) {
-            ActionButton("Show all", palette, primary = false, onClick = onClearHiddenApps)
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                ActionButton(
+                    if (showHiddenApps) "Hide list" else "Show hidden apps (${hiddenApps.size})",
+                    palette,
+                    primary = false,
+                    onClick = { showHiddenApps = !showHiddenApps }
+                )
+                ActionButton("Show all", palette, primary = false, onClick = onClearHiddenApps)
+            }
         }
     }
-    if (hiddenApps.isNotEmpty()) {
+    if (hiddenApps.isNotEmpty() && showHiddenApps) {
         Spacer(Modifier.height(12.dp))
-        installedApps
-            .filter { it.packageName in hiddenApps }
-            .sortedWith(compareBy<InstalledApp> { it.label.lowercase() }.thenBy { it.packageName })
-            .forEach { app ->
+        OutlinedTextField(
+            value = hiddenAppQuery,
+            onValueChange = { hiddenAppQuery = it.take(80) },
+            label = { Text("Find a hidden app") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth().testTag("hidden-app-search"),
+            textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
+        )
+        Spacer(Modifier.height(8.dp))
+        val matchingHiddenApps = hiddenAppRows.filter { it.label.contains(hiddenAppQuery, ignoreCase = true) }
+        if (matchingHiddenApps.isEmpty()) {
+            Text("No hidden apps match that name.", color = muted, fontSize = 14.sp)
+        } else {
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 420.dp).testTag("hidden-app-list")) {
+                items(matchingHiddenApps, key = { it.packageName }) { app ->
                 Row(
                     Modifier.fillMaxWidth()
                         .clip(RoundedCornerShape(12.dp))
@@ -1108,8 +1214,10 @@ private fun AppsSettings(
                     Spacer(Modifier.width(12.dp))
                     ActionButton("Show", palette, primary = false, onClick = { onHiddenAppChanged(app.packageName, false) })
                 }
-                Spacer(Modifier.height(7.dp))
+                    Spacer(Modifier.height(7.dp))
+                }
             }
+        }
     }
 }
 
@@ -1452,25 +1560,31 @@ private fun ProfileSettings(
 }
 
 @Composable
+@OptIn(ExperimentalComposeUiApi::class)
 private fun SubscriptionSettings(
     palette: RelayPalette,
     smartTubeSubscriptions: List<SmartTubeSubscriptionVideo>,
     hiddenSmartTubeChannels: Set<String>,
     onSmartTubeChannelVisible: (String, Boolean) -> Unit,
-    onManageProvider: (Provider) -> Unit,
+    onOpenRelayTube: () -> Unit,
     firstFocusRequester: FocusRequester?,
     backFocusRequester: FocusRequester?
 ) {
-    SettingsSectionTitle("Subscription feeds", "Choose which subscribed creators appear in New from subscriptions.")
+    SettingsSectionTitle("Channel visibility", "Choose which RelayTube creators appear in the Home subscriptions row.")
+    var channelQuery by rememberSaveable { mutableStateOf("") }
+    val channelSearchFocusRequester = remember { FocusRequester() }
     val smartTubeChannels = remember(smartTubeSubscriptions) {
         smartTubeSubscriptions
             .mapNotNull { video -> video.channelId?.let { id -> id to (video.channel ?: "Unknown channel") } }
             .distinctBy { it.first }
             .sortedBy { it.second.lowercase() }
     }
-    val channelFocusRequesters = remember(smartTubeChannels, firstFocusRequester) {
-        smartTubeChannels.mapIndexed { index, (channelId, _) ->
-            channelId to if (index == 0 && firstFocusRequester != null) firstFocusRequester else FocusRequester()
+    val visibleChannels = remember(smartTubeChannels, channelQuery) {
+        smartTubeChannels.filter { (_, name) -> name.contains(channelQuery, ignoreCase = true) }
+    }
+    val channelFocusRequesters = remember(visibleChannels) {
+        visibleChannels.mapIndexed { index, (channelId, _) ->
+            channelId to FocusRequester()
         }.toMap()
     }
     if (smartTubeChannels.isNotEmpty()) {
@@ -1479,45 +1593,68 @@ private fun SubscriptionSettings(
         Spacer(Modifier.height(8.dp))
         Text("Choose which subscribed creators appear in Relay. This never changes your YouTube subscriptions.", color = muted, fontSize = 15.sp, lineHeight = 21.sp)
         Spacer(Modifier.height(14.dp))
-        smartTubeChannels.forEachIndexed { channelIndex, (channelId, channelName) ->
-            val visible = channelId !in hiddenSmartTubeChannels
-            Row(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFF171A20)).padding(horizontal = 14.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(channelName, color = ivory, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                Spacer(Modifier.width(12.dp))
-                RelaySettingsSwitch(
-                    label = "$channelName visibility",
-                    checked = visible,
-                    onCheckedChange = { onSmartTubeChannelVisible(channelId, it) },
-                    palette = palette.copy(accent = Provider.SMARTTUBE.accent),
-                    modifier = Modifier
-                        .focusRequester(channelFocusRequesters.getValue(channelId))
-                        .focusProperties {
-                            if (channelIndex == 0) {
-                                if (backFocusRequester != null) up = backFocusRequester
-                            } else {
-                                up = channelFocusRequesters.getValue(smartTubeChannels[channelIndex - 1].first)
-                            }
-                            channelFocusRequesters[smartTubeChannels.getOrNull(channelIndex + 1)?.first]?.let { down = it }
-                        },
-                    testTag = "smarttube-channel-switch-$channelId"
-                )
+        OutlinedTextField(
+            value = channelQuery,
+            onValueChange = { channelQuery = it.take(80) },
+            label = { Text("Find a channel") },
+            singleLine = true,
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("relaytube-channel-search")
+                .focusRequester(firstFocusRequester ?: channelSearchFocusRequester)
+                .focusProperties {
+                    if (backFocusRequester != null) up = backFocusRequester
+                    visibleChannels.firstOrNull()?.let { first -> down = channelFocusRequesters.getValue(first.first) }
+                },
+            textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
+        )
+        Spacer(Modifier.height(10.dp))
+        if (visibleChannels.isEmpty()) {
+            Text("No channels match that name.", color = muted, fontSize = 14.sp)
+        } else {
+            LazyColumn(Modifier.fillMaxWidth().heightIn(max = 480.dp).testTag("relaytube-channel-list")) {
+                itemsIndexed(visibleChannels, key = { _, item -> item.first }) { channelIndex, (channelId, channelName) ->
+                    val visible = channelId !in hiddenSmartTubeChannels
+                    Row(
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFF171A20)).padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(channelName, color = ivory, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                        Spacer(Modifier.width(12.dp))
+                        RelaySettingsSwitch(
+                            label = "$channelName visibility",
+                            checked = visible,
+                            onCheckedChange = { onSmartTubeChannelVisible(channelId, it) },
+                            palette = palette.copy(accent = Provider.SMARTTUBE.accent),
+                            modifier = Modifier
+                                .focusRequester(channelFocusRequesters.getValue(channelId))
+                                .focusProperties {
+                                    if (channelIndex == 0) {
+                                        up = firstFocusRequester ?: channelSearchFocusRequester
+                                    } else {
+                                        up = channelFocusRequesters.getValue(visibleChannels[channelIndex - 1].first)
+                                    }
+                                    channelFocusRequesters[visibleChannels.getOrNull(channelIndex + 1)?.first]?.let { down = it }
+                                        ?: run { down = FocusRequester.Cancel }
+                                },
+                            testTag = "smarttube-channel-switch-$channelId"
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+                }
             }
-            Spacer(Modifier.height(8.dp))
         }
     } else {
         Spacer(Modifier.height(20.dp))
-        Text("No ${Provider.SMARTTUBE.label} subscriptions found yet. Subscriptions from ${Provider.SMARTTUBE.label} will appear here automatically.", color = muted, fontSize = 15.sp, lineHeight = 22.sp)
+        Text("No ${Provider.SMARTTUBE.label} subscriptions found yet. Open ${Provider.SMARTTUBE.label} on this TV, then return to Settings to manage channels.", color = muted, fontSize = 15.sp, lineHeight = 22.sp)
         Spacer(Modifier.height(16.dp))
         ActionButton(
-            "Open ${Provider.SMARTTUBE.label} settings",
+            "Open ${Provider.SMARTTUBE.label}",
             palette.copy(accent = Provider.SMARTTUBE.accent),
             primary = false,
             focusRequester = firstFocusRequester,
             upFocusRequester = backFocusRequester,
-            onClick = { onManageProvider(Provider.SMARTTUBE) }
+            onClick = onOpenRelayTube
         )
     }
 }
@@ -1782,6 +1919,12 @@ internal fun DataSourcesSettings(
     var tmdbValidationJob by remember { mutableStateOf<Job?>(null) }
     var omdbValidationJob by remember { mutableStateOf<Job?>(null) }
     val validationScope = rememberCoroutineScope()
+    var expandedMetadataService by rememberSaveable { mutableStateOf<String?>("TMDB") }
+    val metadataServices = listOf("TMDB", "OMDb", "Fanart.tv", "TheTVDB")
+    val metadataHeaderFocusRequesters = remember { metadataServices.associateWith { FocusRequester() } }
+    val metadataSignupFocusRequesters = remember { metadataServices.associateWith { FocusRequester() } }
+    val tmdbSignupFocusRequester = metadataSignupFocusRequesters.getValue("TMDB")
+    val tmdbFieldFocusRequester = remember { FocusRequester() }
     val hasTmdbUserKey = remember(settingsRevision) {
         RelaySettingsRepository.loadTmdbApiKey(context) != null
     }
@@ -1802,6 +1945,8 @@ internal fun DataSourcesSettings(
     Spacer(Modifier.height(20.dp))
     MetadataKeyCard(
         serviceName = "TMDB",
+        expanded = expandedMetadataService == "TMDB",
+        onToggleExpanded = { expandedMetadataService = if (expandedMetadataService == "TMDB") null else "TMDB" },
         description = "Used for title matching, artwork metadata, calendars, and recommendations.",
         signupLabel = "Get a TMDB key",
         draft = tmdbDraft,
@@ -1816,8 +1961,14 @@ internal fun DataSourcesSettings(
         isValidating = tmdbValidating,
         usesBuildKey = BuildConfig.TMDB_API_KEY.isNotBlank(),
         fieldLabel = "TMDB API key",
-        focusRequester = firstFocusRequester,
-        upFocusRequester = backFocusRequester,
+        focusRequester = tmdbFieldFocusRequester,
+        upFocusRequester = tmdbSignupFocusRequester,
+        headerFocusRequester = firstFocusRequester,
+        headerUpFocusRequester = backFocusRequester,
+        headerDownFocusRequester = tmdbSignupFocusRequester,
+        signupFocusRequester = tmdbSignupFocusRequester,
+        signupUpFocusRequester = firstFocusRequester,
+        signupDownFocusRequester = tmdbFieldFocusRequester,
         palette = palette,
         onOpenSignup = { openExternalUrl(context, "https://www.themoviedb.org/settings/api") },
         onSave = {
@@ -1864,6 +2015,8 @@ internal fun DataSourcesSettings(
     Spacer(Modifier.height(16.dp))
     MetadataKeyCard(
         serviceName = "OMDb",
+        expanded = expandedMetadataService == "OMDb",
+        onToggleExpanded = { expandedMetadataService = if (expandedMetadataService == "OMDb") null else "OMDb" },
         description = "Used by Relay's optional critic-score metadata integration when configured.",
         signupLabel = "Get an OMDb key",
         draft = omdbDraft,
@@ -1880,6 +2033,8 @@ internal fun DataSourcesSettings(
         fieldLabel = "OMDb API key",
         focusRequester = null,
         upFocusRequester = null,
+        headerFocusRequester = metadataHeaderFocusRequesters.getValue("OMDb"),
+        signupFocusRequester = metadataSignupFocusRequesters.getValue("OMDb"),
         palette = palette,
         onOpenSignup = { openExternalUrl(context, "https://www.omdbapi.com/apikey.aspx") },
         onSave = {
@@ -1926,6 +2081,8 @@ internal fun DataSourcesSettings(
     Spacer(Modifier.height(18.dp))
     AdditionalMetadataKeyCard(
         serviceName = "Fanart.tv",
+        expanded = expandedMetadataService == "Fanart.tv",
+        onToggleExpanded = { expandedMetadataService = if (expandedMetadataService == "Fanart.tv") null else "Fanart.tv" },
         description = "Optional higher-resolution artwork and logos for compatible media lookups.",
         signupLabel = "Get a Fanart.tv key",
         signupUrl = "https://fanart.tv/get-an-api-key/",
@@ -1934,6 +2091,7 @@ internal fun DataSourcesSettings(
         status = fanartStatus,
         isSaved = hasFanartUserKey,
         focusRequester = null,
+        headerFocusRequester = metadataHeaderFocusRequesters.getValue("Fanart.tv"),
         palette = palette,
         onOpenSignup = { openExternalUrl(context, "https://fanart.tv/get-an-api-key/") },
         onDraftChanged = { fanartDraft = it; fanartError = null; fanartStatus = null },
@@ -1954,6 +2112,8 @@ internal fun DataSourcesSettings(
     Spacer(Modifier.height(16.dp))
     AdditionalMetadataKeyCard(
         serviceName = "TheTVDB",
+        expanded = expandedMetadataService == "TheTVDB",
+        onToggleExpanded = { expandedMetadataService = if (expandedMetadataService == "TheTVDB") null else "TheTVDB" },
         description = "Optional TV episode and season metadata when provider feeds are incomplete.",
         signupLabel = "Get a TheTVDB key",
         signupUrl = "https://thetvdb.com/api-information",
@@ -1962,6 +2122,7 @@ internal fun DataSourcesSettings(
         status = tvdbStatus,
         isSaved = hasTvdbUserKey,
         focusRequester = null,
+        headerFocusRequester = metadataHeaderFocusRequesters.getValue("TheTVDB"),
         palette = palette,
         onOpenSignup = { openExternalUrl(context, "https://thetvdb.com/api-information") },
         onDraftChanged = { tvdbDraft = it; tvdbError = null; tvdbStatus = null },
@@ -1991,6 +2152,8 @@ internal fun DataSourcesSettings(
 @Composable
 private fun AdditionalMetadataKeyCard(
     serviceName: String,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
     description: String,
     signupLabel: String,
     signupUrl: String,
@@ -1999,6 +2162,7 @@ private fun AdditionalMetadataKeyCard(
     status: String?,
     isSaved: Boolean,
     focusRequester: FocusRequester?,
+    headerFocusRequester: FocusRequester,
     palette: RelayPalette,
     onOpenSignup: () -> Unit,
     onDraftChanged: (String) -> Unit,
@@ -2013,28 +2177,39 @@ private fun AdditionalMetadataKeyCard(
             Text(serviceName, color = ivory, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.weight(1f))
             Text(if (isSaved) "Key saved · hidden" else "Not configured", color = if (isSaved) palette.accent else muted, fontSize = 13.sp)
+            Spacer(Modifier.width(14.dp))
+            ActionButton(
+                if (expanded) "Hide options" else "Configure",
+                palette,
+                primary = false,
+                focusRequester = headerFocusRequester,
+                modifier = Modifier.testTag("data-source-expand-$serviceName"),
+                onClick = onToggleExpanded
+            )
         }
-        Spacer(Modifier.height(7.dp))
-        Text(description, color = muted, fontSize = 14.sp, lineHeight = 20.sp)
-        Spacer(Modifier.height(12.dp))
-        ActionButton(signupLabel, palette, primary = false, onClick = onOpenSignup)
-        Spacer(Modifier.height(12.dp))
-        OutlinedTextField(
-            value = draft,
-            onValueChange = onDraftChanged,
-            label = { Text(if (isSaved) "Replace saved $serviceName key" else "$serviceName API key") },
-            singleLine = true,
-            visualTransformation = PasswordVisualTransformation(),
-            isError = error != null,
-            modifier = Modifier.fillMaxWidth().then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier),
-            textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
-        )
-        error?.let { Text(it, color = Provider.SMARTTUBE.accent, fontSize = 13.sp, modifier = Modifier.padding(top = 5.dp)) }
-        status?.let { Text(it, color = palette.accent, fontSize = 13.sp, modifier = Modifier.padding(top = 5.dp)) }
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            ActionButton("Save", palette, primary = true, onClick = onSave)
-            if (isSaved) ActionButton("Clear saved key", palette, primary = false, onClick = onClear)
+        if (expanded) {
+            Spacer(Modifier.height(7.dp))
+            Text(description, color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+            Spacer(Modifier.height(12.dp))
+            ActionButton(signupLabel, palette, primary = false, onClick = onOpenSignup)
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                value = draft,
+                onValueChange = onDraftChanged,
+                label = { Text(if (isSaved) "Replace saved $serviceName key" else "$serviceName API key") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                isError = error != null,
+                modifier = Modifier.fillMaxWidth().then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier),
+                textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
+            )
+            error?.let { Text(it, color = Provider.SMARTTUBE.accent, fontSize = 13.sp, modifier = Modifier.padding(top = 5.dp)) }
+            status?.let { Text(it, color = palette.accent, fontSize = 13.sp, modifier = Modifier.padding(top = 5.dp)) }
+            Spacer(Modifier.height(10.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                ActionButton("Save", palette, primary = true, onClick = onSave)
+                if (isSaved) ActionButton("Clear saved key", palette, primary = false, onClick = onClear)
+            }
         }
     }
 }
@@ -2042,6 +2217,8 @@ private fun AdditionalMetadataKeyCard(
 @Composable
 private fun MetadataKeyCard(
     serviceName: String,
+    expanded: Boolean,
+    onToggleExpanded: () -> Unit,
     description: String,
     signupLabel: String,
     draft: String,
@@ -2054,6 +2231,12 @@ private fun MetadataKeyCard(
     fieldLabel: String,
     focusRequester: FocusRequester?,
     upFocusRequester: FocusRequester?,
+    headerFocusRequester: FocusRequester,
+    headerUpFocusRequester: FocusRequester? = null,
+    headerDownFocusRequester: FocusRequester? = null,
+    signupFocusRequester: FocusRequester? = null,
+    signupUpFocusRequester: FocusRequester? = null,
+    signupDownFocusRequester: FocusRequester? = null,
     palette: RelayPalette,
     onOpenSignup: () -> Unit,
     onSave: () -> Unit,
@@ -2081,59 +2264,81 @@ private fun MetadataKeyCard(
                 color = if (isSaved || usesBuildKey) palette.accent else muted,
                 fontSize = 13.sp
             )
-        }
-        Spacer(Modifier.height(7.dp))
-        Text(description, color = muted, fontSize = 14.sp, lineHeight = 20.sp)
-        Spacer(Modifier.height(12.dp))
-        ActionButton(signupLabel, palette, primary = false, onClick = onOpenSignup)
-        Spacer(Modifier.height(14.dp))
-        OutlinedTextField(
-            value = draft,
-            onValueChange = onDraftChanged,
-            label = { Text(if (isSaved) "Replace saved $serviceName key" else fieldLabel) },
-            placeholder = { Text(if (isSaved) "Enter a new key to replace it" else "Paste key") },
-            singleLine = true,
-            isError = error != null,
-            visualTransformation = PasswordVisualTransformation(),
-            modifier = Modifier
-                .fillMaxWidth()
-                .testTag("data-source-key-$serviceName")
-                .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-                .then(if (upFocusRequester != null) Modifier.focusProperties { up = upFocusRequester } else Modifier),
-            textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
-        )
-        if (error != null) {
-            Text(
-                error,
-                color = Provider.SMARTTUBE.accent,
-                fontSize = 13.sp,
-                modifier = Modifier.padding(top = 6.dp).testTag("data-source-error-$serviceName")
-            )
-        }
-        if (status != null) {
-            Text(
-                status,
-                color = palette.accent,
-                fontSize = 13.sp,
-                modifier = Modifier.padding(top = 6.dp).testTag("data-source-status-$serviceName")
-            )
-        }
-        Spacer(Modifier.height(12.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Spacer(Modifier.width(14.dp))
             ActionButton(
-                if (isValidating) "Checking with $serviceName…" else "Save key",
-                palette,
-                primary = !isValidating,
-                modifier = Modifier.testTag("data-source-save-$serviceName"),
-                onClick = { if (!isValidating) currentOnSave() }
-            )
-            if (isSaved) ActionButton(
-                "Clear saved key",
+                if (expanded) "Hide options" else "Configure",
                 palette,
                 primary = false,
-                modifier = Modifier.testTag("data-source-clear-$serviceName"),
-                onClick = { currentOnClear() }
+                modifier = Modifier.testTag("data-source-expand-$serviceName"),
+                focusRequester = headerFocusRequester,
+                upFocusRequester = headerUpFocusRequester,
+                downFocusRequester = if (expanded) headerDownFocusRequester else null,
+                onClick = onToggleExpanded
             )
+        }
+        if (expanded) {
+            Spacer(Modifier.height(7.dp))
+            Text(description, color = muted, fontSize = 14.sp, lineHeight = 20.sp)
+            Spacer(Modifier.height(12.dp))
+            ActionButton(
+                signupLabel,
+                palette,
+                primary = false,
+                modifier = Modifier.testTag("data-source-signup-$serviceName"),
+                focusRequester = signupFocusRequester,
+                upFocusRequester = signupUpFocusRequester,
+                downFocusRequester = signupDownFocusRequester,
+                onClick = onOpenSignup
+            )
+            Spacer(Modifier.height(14.dp))
+            OutlinedTextField(
+                value = draft,
+                onValueChange = onDraftChanged,
+                label = { Text(if (isSaved) "Replace saved $serviceName key" else fieldLabel) },
+                placeholder = { Text(if (isSaved) "Enter a new key to replace it" else "Paste key") },
+                singleLine = true,
+                isError = error != null,
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("data-source-key-$serviceName")
+                    .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+                    .then(if (upFocusRequester != null) Modifier.focusProperties { up = upFocusRequester } else Modifier),
+                textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
+            )
+            if (error != null) {
+                Text(
+                    error,
+                    color = Provider.SMARTTUBE.accent,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(top = 6.dp).testTag("data-source-error-$serviceName")
+                )
+            }
+            if (status != null) {
+                Text(
+                    status,
+                    color = palette.accent,
+                    fontSize = 13.sp,
+                    modifier = Modifier.padding(top = 6.dp).testTag("data-source-status-$serviceName")
+                )
+            }
+            Spacer(Modifier.height(12.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                ActionButton(
+                    if (isValidating) "Checking with $serviceName…" else "Save key",
+                    palette,
+                    primary = !isValidating,
+                    modifier = Modifier.testTag("data-source-save-$serviceName"),
+                    onClick = { if (!isValidating) currentOnSave() }
+                )
+                if (isSaved) ActionButton(
+                    "Clear saved key",
+                    palette,
+                    primary = false,
+                    modifier = Modifier.testTag("data-source-clear-$serviceName"),
+                    onClick = { currentOnClear() }
+                )
+            }
         }
     }
 }
@@ -2173,6 +2378,9 @@ private fun LauncherUpdatesSettings(
     showDeviceSettings: Boolean = true
 ) {
     val crashRecord = remember(context) { RelayCrashDiagnostics.load(context) }
+    var showSystemSettings by remember { mutableStateOf(false) }
+    val systemSettingsToggleRequester = remember { FocusRequester() }
+    val systemSettingsFocusRequesters = remember { systemSettingsEntries.associate { it.label to FocusRequester() } }
     SettingsSectionTitle(
         if (showDeviceSettings) "Home launcher" else "Relay updates",
         if (showDeviceSettings) "Choose the default Home app and manage Android TV launcher behavior."
@@ -2548,16 +2756,43 @@ private fun LauncherUpdatesSettings(
         }
     if (showDeviceSettings) {
         Spacer(Modifier.height(28.dp))
-        SettingsSectionTitle("Android TV settings", "Open the device settings Android TV exposes to Relay. OEM-specific pages fall back to the main Settings screen.")
-    Spacer(Modifier.height(20.dp))
-    systemSettingsEntries.chunked(3).forEach { row ->
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            row.forEach { entry ->
-                Box(Modifier.weight(1f)) { SystemSettingsTile(entry, palette) { openSystemSettings(context, entry.action) } }
+        SettingsSectionTitle("Android TV settings", "Optional system shortcuts. OEM-specific pages fall back to the main Settings screen.")
+        Spacer(Modifier.height(12.dp))
+        ActionButton(
+            if (showSystemSettings) "Hide system shortcuts" else "Show ${systemSettingsEntries.size} system shortcuts",
+            palette,
+            primary = false,
+            modifier = Modifier.testTag("system-settings-toggle"),
+            focusRequester = systemSettingsToggleRequester,
+            downFocusRequester = if (showSystemSettings) systemSettingsEntries.firstOrNull()?.let { systemSettingsFocusRequesters.getValue(it.label) } else null,
+            onClick = { showSystemSettings = !showSystemSettings }
+        )
+        if (showSystemSettings) {
+            Spacer(Modifier.height(12.dp))
+            systemSettingsEntries.chunked(3).forEachIndexed { rowIndex, row ->
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    row.forEachIndexed { columnIndex, entry ->
+                        val index = rowIndex * 3 + columnIndex
+                        val up = if (rowIndex == 0) systemSettingsToggleRequester else systemSettingsFocusRequesters.getValue(systemSettingsEntries[index - 3].label)
+                        val down = systemSettingsEntries.getOrNull(index + 3)?.let { systemSettingsFocusRequesters.getValue(it.label) }
+                        val left = systemSettingsEntries.getOrNull(index - 1)?.takeIf { columnIndex > 0 }?.let { systemSettingsFocusRequesters.getValue(it.label) }
+                        val right = systemSettingsEntries.getOrNull(index + 1)?.takeIf { columnIndex < 2 }?.let { systemSettingsFocusRequesters.getValue(it.label) }
+                        Box(Modifier.weight(1f)) {
+                            SystemSettingsTile(
+                                entry = entry,
+                                palette = palette,
+                                focusRequester = systemSettingsFocusRequesters.getValue(entry.label),
+                                upFocusRequester = up,
+                                downFocusRequester = down,
+                                leftFocusRequester = left,
+                                rightFocusRequester = right
+                            ) { openSystemSettings(context, entry.action) }
+                        }
+                    }
+                    repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
+                }
+                Spacer(Modifier.height(10.dp))
             }
-            repeat(3 - row.size) { Spacer(Modifier.weight(1f)) }
-        }
-        Spacer(Modifier.height(14.dp))
         }
     }
 }
@@ -2567,16 +2802,24 @@ internal fun SystemSettingsTile(
     entry: SystemSettingsEntry,
     palette: RelayPalette,
     focusRequester: FocusRequester? = null,
+    upFocusRequester: FocusRequester? = null,
+    downFocusRequester: FocusRequester? = null,
     leftFocusRequester: FocusRequester? = null,
+    rightFocusRequester: FocusRequester? = null,
     onClick: () -> Unit
 ) {
     val source = remember { MutableInteractionSource() }
     val focused by source.collectIsFocusedAsState()
     val scale by animateFloatAsState(if (focused) 1.035f else 1f, label = "system settings tile")
-    Column(
+    Row(
         (if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-            .then(if (leftFocusRequester != null) Modifier.focusProperties { left = leftFocusRequester } else Modifier)
-            .fillMaxWidth().aspectRatio(1.38f).scale(scale).clip(RoundedCornerShape(16.dp))
+            .then(if (upFocusRequester != null || downFocusRequester != null || leftFocusRequester != null || rightFocusRequester != null) Modifier.focusProperties {
+                if (upFocusRequester != null) up = upFocusRequester
+                if (downFocusRequester != null) down = downFocusRequester
+                if (leftFocusRequester != null) left = leftFocusRequester
+                if (rightFocusRequester != null) right = rightFocusRequester
+            } else Modifier)
+            .fillMaxWidth().heightIn(min = 74.dp).scale(scale).clip(RoundedCornerShape(16.dp))
             .background(if (focused) palette.accent.copy(alpha = .20f) else Color(0xFF171A20))
             .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .09f), RoundedCornerShape(16.dp))
             // The visible symbol is only decorative. Expose one stable, user-facing
@@ -2586,8 +2829,9 @@ internal fun SystemSettingsTile(
                 contentDescription = entry.label
             }
             .clickable(interactionSource = source, indication = null, onClick = onClick)
-            .padding(18.dp),
-        verticalArrangement = Arrangement.SpaceBetween
+            .padding(horizontal = 16.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         Box(
             Modifier

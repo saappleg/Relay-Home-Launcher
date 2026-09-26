@@ -12,11 +12,17 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performKeyInput
+import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.semantics.SemanticsActions
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.test.pressKey
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.relayhome.launcher.data.RelaySettingsRepository
@@ -34,6 +40,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
+@OptIn(ExperimentalTestApi::class)
 class DataSourcesSettingsAndroidTest {
     private val context: Context = ApplicationProvider.getApplicationContext()
 
@@ -84,8 +91,27 @@ class DataSourcesSettingsAndroidTest {
         }
     }
 
+    @Test
+    fun tmdbSignupAndApiField_areBothReachableFromTheInitialFocus() {
+        val firstFocusRequester = FocusRequester()
+        setContent(firstFocusRequester = firstFocusRequester)
+
+        val header = composeRule.onNodeWithTag("data-source-expand-TMDB")
+        val signup = composeRule.onNodeWithTag("data-source-signup-TMDB")
+        val field = composeRule.onNodeWithTag("data-source-key-TMDB")
+        header.performSemanticsAction(SemanticsActions.RequestFocus)
+        composeRule.awaitFocused(header)
+        header.performKeyInput { pressKey(Key.DirectionDown) }
+        composeRule.awaitFocused(signup)
+        signup.performKeyInput { pressKey(Key.DirectionDown) }
+        composeRule.awaitFocused(field)
+        field.performKeyInput { pressKey(Key.DirectionUp) }
+        composeRule.awaitFocused(signup)
+    }
+
     private fun setContent(
-        remoteValidationHook: MetadataKeyRemoteValidationHook? = null
+        remoteValidationHook: MetadataKeyRemoteValidationHook? = null,
+        firstFocusRequester: FocusRequester = FocusRequester()
     ) {
         composeRule.setContent {
             val revision by RelaySettingsRepository.revision(context).collectAsState()
@@ -95,7 +121,7 @@ class DataSourcesSettingsAndroidTest {
                         palette = orbitalPalette,
                         context = context,
                         settingsRevision = revision,
-                        firstFocusRequester = FocusRequester(),
+                        firstFocusRequester = firstFocusRequester,
                         backFocusRequester = FocusRequester(),
                         remoteValidationHook = remoteValidationHook
                             ?: com.relayhome.launcher.data.RelayMetadataApiKeyRemoteValidation

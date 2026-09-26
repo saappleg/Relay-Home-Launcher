@@ -18,6 +18,7 @@ import androidx.compose.ui.test.assertIsSelected
 import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.performClick
@@ -130,8 +131,9 @@ class SettingsScreenTest {
         composeRule.onNodeWithText("Back to Settings").performClick()
 
         composeRule.onNodeWithText(SettingsCategory.HOME_LAYOUT.label).performClick()
-        composeRule.awaitDisplayed(composeRule.onNodeWithText("Home rows"))
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("Home layout"))
         composeRule.awaitDisplayed(composeRule.onNodeWithText("Minimal / Wallpaper Home"))
+        composeRule.onNodeWithTag("hero-settings-toggle").performScrollTo().performClick()
         composeRule.onNodeWithTag("hero-cap-increment").performScrollTo().performClick()
         composeRule.onNodeWithTag("hero-source-SUBSCRIPTIONS").performScrollTo().performClick()
         composeRule.onNodeWithTag("hero-auto-rotate").performScrollTo().performClick()
@@ -144,6 +146,7 @@ class SettingsScreenTest {
         composeRule.onNodeWithText("Back to Settings").performClick()
 
         composeRule.onNodeWithText(SettingsCategory.PROVIDERS_ACCOUNTS.label).performClick()
+        composeRule.awaitDisplayed(composeRule.onNodeWithTag("settings-category-detail-PROVIDERS_ACCOUNTS"))
         composeRule.awaitDisplayed(composeRule.onNodeWithText("Media providers").performScrollTo())
         composeRule.onNodeWithText("Connect Nuvio").performScrollTo().performClick()
         assertEquals(Provider.NUVIO, connectedProvider)
@@ -158,7 +161,11 @@ class SettingsScreenTest {
         composeRule.onNodeWithText("Back to Settings").performClick()
 
         composeRule.onNodeWithText(SettingsCategory.SUBSCRIPTIONS.label).performScrollTo().performClick()
+        composeRule.awaitDisplayed(composeRule.onNodeWithTag("settings-category-detail-SUBSCRIPTIONS"))
         composeRule.awaitDisplayed(composeRule.onNodeWithText("No ${Provider.SMARTTUBE.label} subscriptions found yet.", substring = true))
+        openedRelayTube = false
+        composeRule.onNodeWithText("Open ${Provider.SMARTTUBE.label}").performScrollTo().performClick()
+        assertEquals(true, openedRelayTube)
         composeRule.onNodeWithText("Back to Settings").performClick()
 
         composeRule.onNodeWithText(SettingsCategory.WEATHER_WIDGETS.label).performClick()
@@ -192,18 +199,66 @@ class SettingsScreenTest {
         setSettings()
 
         composeRule.onNodeWithText(SettingsCategory.HOME_LAYOUT.label).performClick()
-        val switches = listOf(
+        val verticalFocusPath = listOf(
             "minimal-home-switch",
-            *HomeRow.entries.map { "home-row-switch-${it.name}" }.toTypedArray()
+            "wallpaper-choose-photo",
+            "hero-settings-toggle",
+            *HomeRow.entries.map { "home-row-switch-${it.name}" }.toTypedArray(),
+            "home-row-order-reset"
         )
-        composeRule.onNodeWithTag(switches.first()).performSemanticsAction(SemanticsActions.RequestFocus)
-        composeRule.awaitFocused(composeRule.onNodeWithTag(switches.first()))
-        switches.drop(1).forEach { tag ->
-            composeRule.onNodeWithTag(switches[switches.indexOf(tag) - 1]).performKeyInput {
-                pressKey(Key.DirectionDown)
-            }
+        val first = composeRule.onNodeWithTag(verticalFocusPath.first())
+        first.performSemanticsAction(SemanticsActions.RequestFocus)
+        composeRule.awaitFocused(first)
+        verticalFocusPath.drop(1).forEachIndexed { index, tag ->
+            composeRule.onNodeWithTag(verticalFocusPath[index]).performKeyInput { pressKey(Key.DirectionDown) }
             composeRule.awaitFocused(composeRule.onNodeWithTag(tag))
         }
+
+        val reset = composeRule.onNodeWithTag("home-row-order-reset")
+        reset.performKeyInput { pressKey(Key.DirectionUp) }
+        composeRule.awaitFocused(composeRule.onNodeWithTag("home-row-switch-${HomeRow.entries.last().name}"))
+
+        val heroToggle = composeRule.onNodeWithTag("hero-settings-toggle")
+        heroToggle.performSemanticsAction(SemanticsActions.RequestFocus)
+        heroToggle.performClick()
+        composeRule.waitForIdle()
+        heroToggle.performKeyInput { pressKey(Key.DirectionDown) }
+        val heroCapDecrease = composeRule.onNodeWithTag("hero-cap-decrement")
+        composeRule.awaitFocused(heroCapDecrease)
+        heroCapDecrease.performKeyInput { pressKey(Key.DirectionRight) }
+        composeRule.awaitFocused(composeRule.onNodeWithTag("hero-cap-increment"))
+
+        val heroSources = listOf(
+            "hero-source-NUVIO",
+            "hero-source-CONTINUE_WATCHING",
+            "hero-source-SUBSCRIPTIONS",
+            "hero-source-NOW_PLAYING",
+            "hero-auto-rotate",
+            "hero-rotate-interval-decrement"
+        )
+        composeRule.onNodeWithTag("hero-cap-increment").performKeyInput { pressKey(Key.DirectionDown) }
+        composeRule.awaitFocused(composeRule.onNodeWithTag(heroSources.first()))
+        heroSources.drop(1).forEachIndexed { index, tag ->
+            composeRule.onNodeWithTag(heroSources[index]).performKeyInput { pressKey(Key.DirectionDown) }
+            composeRule.awaitFocused(composeRule.onNodeWithTag(tag))
+        }
+        composeRule.onNodeWithTag("hero-rotate-interval-decrement").performKeyInput { pressKey(Key.DirectionRight) }
+        val heroIntervalIncrease = composeRule.onNodeWithTag("hero-rotate-interval-increment")
+        composeRule.awaitFocused(heroIntervalIncrease)
+        heroIntervalIncrease.performKeyInput { pressKey(Key.DirectionDown) }
+        val firstRow = composeRule.onNodeWithTag("home-row-switch-${HomeRow.entries.first().name}")
+        composeRule.awaitFocused(firstRow)
+        firstRow.performKeyInput { pressKey(Key.DirectionUp) }
+        composeRule.awaitFocused(heroIntervalIncrease)
+
+        val finalRow = composeRule.onNodeWithTag("home-row-switch-${HomeRow.entries.first().name}")
+        finalRow.performSemanticsAction(SemanticsActions.RequestFocus)
+        finalRow.performKeyInput { pressKey(Key.DirectionRight) }
+        composeRule.awaitFocused(composeRule.onNodeWithContentDescription("Move ${HomeRow.entries.first().label} up"))
+        composeRule.onNodeWithContentDescription("Move ${HomeRow.entries.first().label} up").performKeyInput {
+            pressKey(Key.DirectionRight)
+        }
+        composeRule.awaitFocused(composeRule.onNodeWithContentDescription("Move ${HomeRow.entries.first().label} down"))
     }
 
     @Test
@@ -234,10 +289,13 @@ class SettingsScreenTest {
         )
 
         composeRule.onNodeWithText(SettingsCategory.SUBSCRIPTIONS.label).performClick()
+        composeRule.awaitDisplayed(composeRule.onNodeWithTag("settings-category-detail-SUBSCRIPTIONS"))
         val channelTags = listOf("channel-a", "channel-b", "channel-c").map { "smarttube-channel-switch-$it" }
+        val search = composeRule.onNodeWithTag("relaytube-channel-search", useUnmergedTree = true)
+        composeRule.awaitFocused(search)
         val firstChannel = composeRule.onNodeWithTag(channelTags.first(), useUnmergedTree = true)
+        search.performKeyInput { pressKey(Key.DirectionDown) }
         composeRule.awaitFocused(firstChannel)
-        firstChannel.performSemanticsAction(SemanticsActions.RequestFocus)
         channelTags.forEachIndexed { index, tag ->
             val channel = composeRule.onNodeWithTag(tag, useUnmergedTree = true)
             composeRule.awaitFocused(channel)
@@ -352,6 +410,36 @@ class SettingsScreenTest {
     }
 
     @Test
+    fun deviceSettingsSystemShortcuts_areCompactCollapsedAndReachableByDpad() {
+        setSettings()
+
+        composeRule.onNodeWithText(SettingsCategory.DEVICE_SETTINGS.label).performScrollTo().performClick()
+        composeRule.awaitDisplayed(composeRule.onNodeWithTag("settings-category-detail-DEVICE_SETTINGS"))
+        val toggle = composeRule.onNodeWithTag("system-settings-toggle")
+        composeRule.awaitDisplayed(toggle)
+        composeRule.onNodeWithContentDescription("Network & internet").assertDoesNotExist()
+        toggle.performSemanticsAction(SemanticsActions.RequestFocus)
+        composeRule.awaitFocused(toggle)
+        toggle.performClick()
+
+        val network = composeRule.onNodeWithContentDescription("Network & internet")
+        val display = composeRule.onNodeWithContentDescription("Display")
+        val apps = composeRule.onNodeWithContentDescription("Apps")
+        composeRule.awaitDisplayed(network.performScrollTo())
+        network.performSemanticsAction(SemanticsActions.RequestFocus)
+        composeRule.awaitFocused(network)
+        network.performKeyInput { pressKey(Key.DirectionRight) }
+        composeRule.awaitFocused(display)
+        network.performSemanticsAction(SemanticsActions.RequestFocus)
+        network.performKeyInput { pressKey(Key.DirectionDown) }
+        composeRule.awaitFocused(apps)
+
+        toggle.performSemanticsAction(SemanticsActions.RequestFocus)
+        toggle.performClick()
+        composeRule.onNodeWithContentDescription("Network & internet").assertDoesNotExist()
+    }
+
+    @Test
     fun heroRotationInterval_isSavedAndSurvivesRepositoryReload() {
         val context = ApplicationProvider.getApplicationContext<android.content.Context>()
         runBlocking { RelaySettingsRepository.resetForTesting(context) }
@@ -388,6 +476,7 @@ class SettingsScreenTest {
         )
 
         composeRule.onNodeWithText(SettingsCategory.PROVIDERS_ACCOUNTS.label).performClick()
+        composeRule.awaitDisplayed(composeRule.onNodeWithTag("settings-category-detail-PROVIDERS_ACCOUNTS"))
         composeRule.awaitDisplayed(composeRule.onNodeWithText("Profile pairing").performScrollTo())
         val trigger = composeRule.onNodeWithTag("profile-mapping-91").performScrollTo()
         trigger.performSemanticsAction(SemanticsActions.RequestFocus)

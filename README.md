@@ -47,11 +47,13 @@ release checklist](docs/RELEASES.md) for verification details.
   hidden-app controls; favorites; and configurable icon treatment. Relay itself
   is excluded from All Apps. Nuvio and RelayTube remain launchable there and
   can be favorited directly.
-- Grouped Settings for appearance, date format, Home row order/visibility, minimal
-  wallpaper Home, wallpaper image selection, hero source/item limits and
-  rotation, weather and clock, app customization, provider limits, profile
-  picture, subscription feeds, metadata API keys, launcher setup, and update
-  channel.
+- Grouped Settings for appearance, date format, Home row order and visibility,
+  optional Hero Banner controls, wallpaper mode and image selection, weather and
+  clock, app customization, provider accounts, Nuvio–RelayTube profile pairing,
+  searchable RelayTube channel visibility, metadata API keys, launcher setup,
+  and update channel. Long app, channel, and metadata lists are searchable,
+  virtualized, or collapsed; Settings keeps its current category while linking
+  or managing a provider account.
 - Local crash evidence and recoverable-operation diagnostics under Settings >
   Device Settings > Show advanced diagnostics. Crash records contain bounded
   exception/device context and are not uploaded.

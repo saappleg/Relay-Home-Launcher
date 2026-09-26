@@ -114,6 +114,8 @@ internal data class RelayOperationError(
 internal data class RelayHomeUiState(
     val destination: Destination = Destination.HOME,
     val detailReturnDestination: Destination = Destination.HOME,
+    val providerHubReturnDestination: Destination = Destination.HOME,
+    val providerConnectReturnDestination: Destination = Destination.PROVIDER,
     /** Monotonic token for invalidating callbacks from an older root-route transition. */
     val navigationGeneration: Long = 0L,
     val activeProvider: Provider = Provider.STREMIO,
@@ -473,27 +475,67 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
     }
 
     fun openProvider(provider: Provider) {
+        openProvider(provider, Destination.HOME)
+    }
+
+    fun openProviderFromSettings(provider: Provider) {
+        openProvider(provider, Destination.SETTINGS)
+    }
+
+    private fun openProvider(provider: Provider, returnDestination: Destination) {
         _state.update {
-            it.afterDestinationTransition(Destination.PROVIDER).copy(activeProvider = provider)
+            it.afterDestinationTransition(Destination.PROVIDER).copy(
+                activeProvider = provider,
+                providerHubReturnDestination = returnDestination
+            )
         }
     }
 
     fun connectNuvio() {
+        connectNuvio(returnDestination = Destination.PROVIDER)
+    }
+
+    fun connectNuvioFromSettings() {
+        connectNuvio(returnDestination = Destination.SETTINGS)
+    }
+
+    private fun connectNuvio(returnDestination: Destination) {
         _state.update {
-            it.afterDestinationTransition(Destination.NUVIO_CONNECT).copy(activeProvider = Provider.NUVIO)
+            it.afterDestinationTransition(Destination.NUVIO_CONNECT).copy(
+                activeProvider = Provider.NUVIO,
+                providerConnectReturnDestination = returnDestination
+            )
         }
     }
 
     fun connectStremio() {
+        connectStremio(returnDestination = Destination.PROVIDER)
+    }
+
+    fun connectStremioFromSettings() {
+        connectStremio(returnDestination = Destination.SETTINGS)
+    }
+
+    private fun connectStremio(returnDestination: Destination) {
         _state.update {
             it.afterDestinationTransition(Destination.STREMIO_CONNECT).copy(
                 activeProvider = Provider.STREMIO,
+                providerConnectReturnDestination = returnDestination,
                 stremioPairingQr = null,
                 stremioPairingLink = null,
                 stremioPairingMessage = null
             )
         }
         startStremioPairing()
+    }
+
+    fun returnFromProvider() {
+        val returnDestination = _state.value.providerHubReturnDestination
+        if (returnDestination == Destination.HOME) returnHome() else navigate(returnDestination)
+    }
+
+    fun returnFromProviderConnect() {
+        navigate(_state.value.providerConnectReturnDestination)
     }
 
     fun restartStremioPairing() {
@@ -587,7 +629,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         stremioPairingJob?.cancel()
         val enabled = _state.value.enabledProviders + Provider.STREMIO
         _state.update {
-            it.afterDestinationTransition(Destination.PROVIDER).copy(
+            it.afterDestinationTransition(it.providerConnectReturnDestination).copy(
                 activeProvider = Provider.STREMIO,
                 stremioSession = session,
                 stremioLibrary = emptyList(),
@@ -793,7 +835,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         lastProfilePairingSignature = null
         val enabled = _state.value.enabledProviders + Provider.NUVIO
         _state.update {
-            it.afterDestinationTransition(Destination.PROVIDER).copy(
+            it.afterDestinationTransition(it.providerConnectReturnDestination).copy(
                 nuvioSession = session,
                 nuvioAuthRequired = false,
                 nuvioSyncError = null,
@@ -826,6 +868,7 @@ internal class RelayHomeStateHolder(application: Application) : AndroidViewModel
         lastProfilePairingSignature = null
         _state.update {
             it.afterDestinationTransition(Destination.NUVIO_CONNECT).copy(
+                providerConnectReturnDestination = Destination.PROVIDER,
                 nuvioSession = null,
                 nuvioProfiles = emptyList(),
                 nuvioMedia = emptyList(),

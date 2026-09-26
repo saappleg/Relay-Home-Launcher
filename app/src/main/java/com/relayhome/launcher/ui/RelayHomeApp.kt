@@ -9,6 +9,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.platform.LocalContext
@@ -43,6 +44,7 @@ internal fun RelayHomeApp(
 ) {
     val context = LocalContext.current
     val state by stateHolder.state.collectAsState()
+    val destinationStateHolder = rememberSaveableStateHolder()
     val dynamicColorScheme = remember(context) { dynamicRelayColorScheme(context) }
     val palette = relayPaletteForAppearance(
         appearance = state.appearance,
@@ -126,7 +128,8 @@ internal fun RelayHomeApp(
                     visible = state.destination == Destination.HOME
                 )
 
-            if (state.destination != Destination.HOME) when (state.destination) {
+            if (state.destination != Destination.HOME) destinationStateHolder.SaveableStateProvider(state.destination.name) {
+                when (state.destination) {
                 Destination.HOME -> Unit
                 Destination.DETAIL -> DetailsScreen(
                     item = state.selectedMedia,
@@ -176,9 +179,9 @@ internal fun RelayHomeApp(
                     stremioSyncing = state.stremioSyncing,
                     stremioItemCount = state.stremioLibrary.size,
                     stremioSyncError = state.stremioSyncError,
-                    onManageProvider = stateHolder::openProvider,
-                    onConnectNuvio = stateHolder::connectNuvio,
-                    onConnectStremio = stateHolder::connectStremio,
+                    onManageProvider = stateHolder::openProviderFromSettings,
+                    onConnectNuvio = stateHolder::connectNuvioFromSettings,
+                    onConnectStremio = stateHolder::connectStremioFromSettings,
                     onOpenRelayTube = stateHolder::openRelayTube,
                     dateFormat = state.dateFormat,
                     onDateFormatChanged = stateHolder::setDateFormat,
@@ -249,7 +252,7 @@ internal fun RelayHomeApp(
                 Destination.PROVIDER -> ProviderHubScreen(
                     state.activeProvider,
                     palette,
-                    onBack = stateHolder::returnHome,
+                    onBack = stateHolder::returnFromProvider,
                     onOpenRelayTube = stateHolder::openRelayTube,
                     onConnectNuvio = stateHolder::connectNuvio,
                     nuvioConnected = state.nuvioSession != null,
@@ -276,7 +279,7 @@ internal fun RelayHomeApp(
                     connected = state.nuvioSession != null,
                     reauthRequired = state.nuvioAuthRequired,
                     onConnected = stateHolder::onNuvioConnected,
-                    onBack = { stateHolder.navigate(Destination.PROVIDER) }
+                    onBack = stateHolder::returnFromProviderConnect
                 )
 
                 Destination.STREMIO_CONNECT -> StremioConnectScreen(
@@ -286,8 +289,9 @@ internal fun RelayHomeApp(
                     loading = state.stremioPairingLoading,
                     message = state.stremioPairingMessage,
                     onRestart = stateHolder::restartStremioPairing,
-                    onBack = { stateHolder.navigate(Destination.PROVIDER) }
+                    onBack = stateHolder::returnFromProviderConnect
                 )
+                }
             }
         }
     }
