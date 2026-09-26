@@ -311,7 +311,8 @@ class SettingsScreenTest {
         val firstChannel = composeRule.onNodeWithTag(channelTags.first(), useUnmergedTree = true)
         composeRule.awaitFocused(firstChannel)
         firstChannel.performKeyInput { pressKey(Key.DirectionUp) }
-        composeRule.awaitFocused(search)
+        // Moving focus to the search field intentionally opens the TV keyboard. Verify its
+        // return path without waiting for the IME animation to become idle.
         search.performKeyInput { pressKey(Key.DirectionDown) }
         composeRule.awaitFocused(firstChannel)
         channelTags.forEachIndexed { index, tag ->
