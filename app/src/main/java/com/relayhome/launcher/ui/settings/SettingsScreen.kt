@@ -1582,9 +1582,9 @@ private fun SubscriptionSettings(
     val visibleChannels = remember(smartTubeChannels, channelQuery) {
         smartTubeChannels.filter { (_, name) -> name.contains(channelQuery, ignoreCase = true) }
     }
-    val channelFocusRequesters = remember(visibleChannels) {
+    val channelFocusRequesters = remember(visibleChannels, firstFocusRequester) {
         visibleChannels.mapIndexed { index, (channelId, _) ->
-            channelId to FocusRequester()
+            channelId to if (index == 0 && firstFocusRequester != null) firstFocusRequester else FocusRequester()
         }.toMap()
     }
     if (smartTubeChannels.isNotEmpty()) {
@@ -1601,7 +1601,10 @@ private fun SubscriptionSettings(
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag("relaytube-channel-search")
-                .focusRequester(firstFocusRequester ?: channelSearchFocusRequester)
+                .focusRequester(
+                    if (visibleChannels.isEmpty()) firstFocusRequester ?: channelSearchFocusRequester
+                    else channelSearchFocusRequester
+                )
                 .focusProperties {
                     if (backFocusRequester != null) up = backFocusRequester
                     visibleChannels.firstOrNull()?.let { first -> down = channelFocusRequesters.getValue(first.first) }
@@ -1630,7 +1633,7 @@ private fun SubscriptionSettings(
                                 .focusRequester(channelFocusRequesters.getValue(channelId))
                                 .focusProperties {
                                     if (channelIndex == 0) {
-                                        up = firstFocusRequester ?: channelSearchFocusRequester
+                                        up = channelSearchFocusRequester
                                     } else {
                                         up = channelFocusRequesters.getValue(visibleChannels[channelIndex - 1].first)
                                     }

@@ -308,8 +308,10 @@ class SettingsScreenTest {
         composeRule.awaitDisplayed(composeRule.onNodeWithTag("settings-category-detail-SUBSCRIPTIONS"))
         val channelTags = listOf("channel-a", "channel-b", "channel-c").map { "smarttube-channel-switch-$it" }
         val search = composeRule.onNodeWithTag("relaytube-channel-search", useUnmergedTree = true)
-        composeRule.awaitFocused(search)
         val firstChannel = composeRule.onNodeWithTag(channelTags.first(), useUnmergedTree = true)
+        composeRule.awaitFocused(firstChannel)
+        firstChannel.performKeyInput { pressKey(Key.DirectionUp) }
+        composeRule.awaitFocused(search)
         search.performKeyInput { pressKey(Key.DirectionDown) }
         composeRule.awaitFocused(firstChannel)
         channelTags.forEachIndexed { index, tag ->
