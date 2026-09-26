@@ -9,13 +9,12 @@ and playback.
 
 ## Current beta
 
-The latest published build is [v0.1.0-beta.11](https://github.com/saappleg/Relay-Home-Launcher/releases/tag/v0.1.0-beta.11), a GitHub prerelease with version code 34 and the signed APK `relay-home-0.1.0-beta.11.apk`. Its published SHA-256 digest is
-`6b836420b23afa566f397f6bf8fb79781df4065c3f1914d8c7a1b39819c9468a`.
+The latest published build is [v0.1.0-beta.12](https://github.com/saappleg/Relay-Home-Launcher/releases/tag/v0.1.0-beta.12), a GitHub prerelease with version code 35 and the signed APK `relay-home-0.1.0-beta.12.apk`. Its published SHA-256 digest is
+`708f40c3265a299af596949dc4ac650250ee9f4b5f71e39314a920b2b87b9ec0`.
 
-Beta.11 brings the latest Home/App Peek experience back together with the
-beta.10 reliability work. It adds acknowledged Home focus restoration after
-App Peek, smoother settled-card previews, account-scoped Nuvio/RelayTube
-profiles and search history, and RelayTube-aware provider labels. See [the
+Beta.12 reduces Home/App Peek rendering work, restores the exact Home card and
+scroll position after an app peek, and makes RelayTube feeds and profile
+switching more reliable across differently signed companion builds. See [the
 release checklist](docs/RELEASES.md) for verification details.
 
 ## Features
@@ -151,8 +150,8 @@ packaging does: configure the five `relay.signing.*` values shown in
 variables. Then set an explicit release identity and run:
 
 ```bash
-export RELAY_VERSION_NAME=0.1.0-beta.11
-export RELAY_VERSION_CODE=34
+export RELAY_VERSION_NAME=0.1.0-beta.13
+export RELAY_VERSION_CODE=36
 ./gradlew :app:verifyRelayReleaseVersion :app:lintRelease \
   :app:testReleaseUnitTest :app:assembleRelease
 ```
