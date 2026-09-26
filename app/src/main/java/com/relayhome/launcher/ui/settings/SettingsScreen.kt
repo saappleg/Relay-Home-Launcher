@@ -1572,6 +1572,7 @@ private fun SubscriptionSettings(
 ) {
     SettingsSectionTitle("Channel visibility", "Choose which RelayTube creators appear in the Home subscriptions row.")
     var channelQuery by rememberSaveable { mutableStateOf("") }
+    var channelSearchEditing by rememberSaveable { mutableStateOf(false) }
     val channelSearchFocusRequester = remember { FocusRequester() }
     val smartTubeChannels = remember(smartTubeSubscriptions) {
         smartTubeSubscriptions
@@ -1595,12 +1596,24 @@ private fun SubscriptionSettings(
         Spacer(Modifier.height(14.dp))
         OutlinedTextField(
             value = channelQuery,
-            onValueChange = { channelQuery = it.take(80) },
-            label = { Text("Find a channel") },
+            onValueChange = { if (channelSearchEditing) channelQuery = it.take(80) },
+            readOnly = !channelSearchEditing,
+            label = { Text(if (channelSearchEditing) "Find a channel" else "Select to search") },
             singleLine = true,
             modifier = Modifier
                 .fillMaxWidth()
                 .testTag("relaytube-channel-search")
+                .onFocusChanged { if (!it.hasFocus) channelSearchEditing = false }
+                .onPreviewKeyEvent { event ->
+                    if (!channelSearchEditing && event.composeKeyType == KeyEventType.KeyDown &&
+                        (event.composeKey == ComposeKey.Enter || event.composeKey == ComposeKey.DirectionCenter)
+                    ) {
+                        channelSearchEditing = true
+                        true
+                    } else {
+                        false
+                    }
+                }
                 .focusRequester(
                     if (visibleChannels.isEmpty()) firstFocusRequester ?: channelSearchFocusRequester
                     else channelSearchFocusRequester
