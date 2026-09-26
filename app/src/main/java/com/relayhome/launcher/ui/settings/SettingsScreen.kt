@@ -2303,7 +2303,21 @@ private fun MetadataKeyCard(
                     .fillMaxWidth()
                     .testTag("data-source-key-$serviceName")
                     .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
-                    .then(if (upFocusRequester != null) Modifier.focusProperties { up = upFocusRequester } else Modifier),
+                    .then(if (upFocusRequester != null) Modifier.focusProperties { up = upFocusRequester } else Modifier)
+                    .then(
+                        if (upFocusRequester != null) {
+                            Modifier.onPreviewKeyEvent { event ->
+                                if (event.composeKeyType == KeyEventType.KeyDown && event.composeKey == ComposeKey.DirectionUp) {
+                                    upFocusRequester?.requestFocus()
+                                    true
+                                } else {
+                                    false
+                                }
+                            }
+                        } else {
+                            Modifier
+                        }
+                    ),
                 textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
             )
             if (error != null) {

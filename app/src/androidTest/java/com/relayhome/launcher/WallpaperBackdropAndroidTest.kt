@@ -5,6 +5,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.test.ExperimentalTestApi
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
@@ -21,6 +22,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
+@OptIn(ExperimentalTestApi::class)
 @RunWith(AndroidJUnit4::class)
 class WallpaperBackdropAndroidTest {
     private val context = ApplicationProvider.getApplicationContext<android.content.Context>()
@@ -54,7 +56,9 @@ class WallpaperBackdropAndroidTest {
                 }
             }
         }
-        composeRule.waitForIdle()
+        composeRule.waitUntil(timeoutMillis = 5_000) {
+            validResolutionComplete && invalidResolutionComplete
+        }
 
         assertTrue(validResolutionComplete)
         assertEquals(resourceUri, validResolutionUri)

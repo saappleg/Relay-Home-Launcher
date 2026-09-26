@@ -30,6 +30,7 @@ import androidx.compose.ui.semantics.SemanticsActions
 import androidx.test.core.app.ApplicationProvider
 import com.relayhome.launcher.data.RelaySettingsRepository
 import com.relayhome.launcher.ui.settings.SettingsCategory
+import com.relayhome.launcher.ui.settings.SettingsCategoryGroup
 import com.relayhome.launcher.ui.state.HeroSource
 import com.relayhome.launcher.ui.home.ActionButton
 import com.relayhome.launcher.ui.home.ProfileSwitcher
@@ -67,6 +68,21 @@ class SettingsScreenTest {
         composeRule.onNodeWithText("Theme").assertDoesNotExist()
         composeRule.onNodeWithText("Date format").assertDoesNotExist()
         composeRule.onNodeWithText("Check now").assertDoesNotExist()
+    }
+
+    @Test
+    fun everySettingsCategory_isReachableByDpadAcrossScrollableGroups() {
+        setSettings()
+
+        val categoriesInDisplayOrder = SettingsCategoryGroup.entries.flatMap { it.categories }
+        val categoryNodes = categoriesInDisplayOrder.map { composeRule.onNodeWithText(it.label) }
+        categoryNodes.first().performSemanticsAction(SemanticsActions.RequestFocus)
+        composeRule.awaitFocused(categoryNodes.first())
+
+        for (index in 1 until categoryNodes.size) {
+            categoryNodes[index - 1].performKeyInput { pressKey(Key.DirectionDown) }
+            composeRule.awaitFocused(categoryNodes[index])
+        }
     }
 
     @Test
@@ -120,7 +136,7 @@ class SettingsScreenTest {
             onWeatherTemperatureUnitChanged = { temperatureUnit = it }
         )
 
-        composeRule.onNodeWithText(SettingsCategory.APPEARANCE.label).performClick()
+        composeRule.onNodeWithText(SettingsCategory.APPEARANCE.label).performScrollTo().performClick()
         composeRule.awaitDisplayed(composeRule.onNodeWithText("Theme"))
         composeRule.onNodeWithText("Violet").performClick()
         composeRule.awaitDisplayed(composeRule.onNodeWithText("From backdrop"))
@@ -130,7 +146,7 @@ class SettingsScreenTest {
         assertEquals(RelayDateFormat.US, selectedDateFormat)
         composeRule.onNodeWithText("Back to Settings").performClick()
 
-        composeRule.onNodeWithText(SettingsCategory.HOME_LAYOUT.label).performClick()
+        composeRule.onNodeWithText(SettingsCategory.HOME_LAYOUT.label).performScrollTo().performClick()
         composeRule.awaitDisplayed(composeRule.onNodeWithText("Home layout"))
         composeRule.awaitDisplayed(composeRule.onNodeWithText("Minimal / Wallpaper Home"))
         composeRule.onNodeWithTag("hero-settings-toggle").performScrollTo().performClick()
@@ -145,7 +161,7 @@ class SettingsScreenTest {
         assertEquals(true, resetRows)
         composeRule.onNodeWithText("Back to Settings").performClick()
 
-        composeRule.onNodeWithText(SettingsCategory.PROVIDERS_ACCOUNTS.label).performClick()
+        composeRule.onNodeWithText(SettingsCategory.PROVIDERS_ACCOUNTS.label).performScrollTo().performClick()
         composeRule.awaitDisplayed(composeRule.onNodeWithTag("settings-category-detail-PROVIDERS_ACCOUNTS"))
         composeRule.awaitDisplayed(composeRule.onNodeWithText("Media providers").performScrollTo())
         composeRule.onNodeWithText("Connect Nuvio").performScrollTo().performClick()
@@ -168,7 +184,7 @@ class SettingsScreenTest {
         assertEquals(true, openedRelayTube)
         composeRule.onNodeWithText("Back to Settings").performClick()
 
-        composeRule.onNodeWithText(SettingsCategory.WEATHER_WIDGETS.label).performClick()
+        composeRule.onNodeWithText(SettingsCategory.WEATHER_WIDGETS.label).performScrollTo().performClick()
         composeRule.awaitDisplayed(composeRule.onNodeWithText("Local weather"))
         composeRule.awaitDisplayed(composeRule.onNodeWithText("Home clock"))
         composeRule.onNodeWithTag("weather-unit-FAHRENHEIT").performScrollTo().performClick()
@@ -179,7 +195,7 @@ class SettingsScreenTest {
         assertEquals("", savedWeatherCity)
         composeRule.onNodeWithText("Back to Settings").performClick()
 
-        composeRule.onNodeWithText(SettingsCategory.APPS.label).performClick()
+        composeRule.onNodeWithText(SettingsCategory.APPS.label).performScrollTo().performClick()
         composeRule.awaitDisplayed(composeRule.onNodeWithText("All Apps"))
         composeRule.awaitDisplayed(composeRule.onNodeWithText("Sort order"))
         composeRule.awaitDisplayed(composeRule.onNodeWithText("Icon shape"))
@@ -198,7 +214,7 @@ class SettingsScreenTest {
     fun homeLayoutSwitches_followTheExplicitVerticalFocusChain() {
         setSettings()
 
-        composeRule.onNodeWithText(SettingsCategory.HOME_LAYOUT.label).performClick()
+        composeRule.onNodeWithText(SettingsCategory.HOME_LAYOUT.label).performScrollTo().performClick()
         val verticalFocusPath = listOf(
             "minimal-home-switch",
             "wallpaper-choose-photo",
@@ -288,7 +304,7 @@ class SettingsScreenTest {
             )
         )
 
-        composeRule.onNodeWithText(SettingsCategory.SUBSCRIPTIONS.label).performClick()
+        composeRule.onNodeWithText(SettingsCategory.SUBSCRIPTIONS.label).performScrollTo().performClick()
         composeRule.awaitDisplayed(composeRule.onNodeWithTag("settings-category-detail-SUBSCRIPTIONS"))
         val channelTags = listOf("channel-a", "channel-b", "channel-c").map { "smarttube-channel-switch-$it" }
         val search = composeRule.onNodeWithTag("relaytube-channel-search", useUnmergedTree = true)
@@ -383,7 +399,7 @@ class SettingsScreenTest {
             onMinimalHomeEnabledChanged = { minimalHomeEnabled.value = it }
         )
 
-        composeRule.onNodeWithText(SettingsCategory.HOME_LAYOUT.label).performClick()
+        composeRule.onNodeWithText(SettingsCategory.HOME_LAYOUT.label).performScrollTo().performClick()
         val minimalHome = composeRule.onNodeWithTag("minimal-home-switch", useUnmergedTree = true)
         minimalHome.performScrollTo()
         minimalHome.assert(hasContentDescription("Minimal wallpaper home"))
@@ -415,7 +431,7 @@ class SettingsScreenTest {
 
         composeRule.onNodeWithText(SettingsCategory.DEVICE_SETTINGS.label).performScrollTo().performClick()
         composeRule.awaitDisplayed(composeRule.onNodeWithTag("settings-category-detail-DEVICE_SETTINGS"))
-        val toggle = composeRule.onNodeWithTag("system-settings-toggle")
+        val toggle = composeRule.onNodeWithTag("system-settings-toggle").performScrollTo()
         composeRule.awaitDisplayed(toggle)
         composeRule.onNodeWithContentDescription("Network & internet").assertDoesNotExist()
         toggle.performSemanticsAction(SemanticsActions.RequestFocus)
@@ -426,7 +442,7 @@ class SettingsScreenTest {
         val display = composeRule.onNodeWithContentDescription("Display")
         val apps = composeRule.onNodeWithContentDescription("Apps")
         composeRule.awaitDisplayed(network.performScrollTo())
-        network.performSemanticsAction(SemanticsActions.RequestFocus)
+        toggle.performKeyInput { pressKey(Key.DirectionDown) }
         composeRule.awaitFocused(network)
         network.performKeyInput { pressKey(Key.DirectionRight) }
         composeRule.awaitFocused(display)
@@ -445,7 +461,8 @@ class SettingsScreenTest {
         runBlocking { RelaySettingsRepository.resetForTesting(context) }
         setSettings()
 
-        composeRule.onNodeWithText(SettingsCategory.HOME_LAYOUT.label).performClick()
+        composeRule.onNodeWithText(SettingsCategory.HOME_LAYOUT.label).performScrollTo().performClick()
+        composeRule.onNodeWithTag("hero-settings-toggle").performScrollTo().performClick()
         composeRule.onNodeWithTag("hero-rotate-interval-increment").performScrollTo().performClick()
         composeRule.waitForIdle()
         runBlocking {
@@ -475,7 +492,7 @@ class SettingsScreenTest {
             onProfileMappingChanged = { profile, relayId -> selectedPairing = profile to relayId }
         )
 
-        composeRule.onNodeWithText(SettingsCategory.PROVIDERS_ACCOUNTS.label).performClick()
+        composeRule.onNodeWithText(SettingsCategory.PROVIDERS_ACCOUNTS.label).performScrollTo().performClick()
         composeRule.awaitDisplayed(composeRule.onNodeWithTag("settings-category-detail-PROVIDERS_ACCOUNTS"))
         composeRule.awaitDisplayed(composeRule.onNodeWithText("Profile pairing").performScrollTo())
         val trigger = composeRule.onNodeWithTag("profile-mapping-91").performScrollTo()
