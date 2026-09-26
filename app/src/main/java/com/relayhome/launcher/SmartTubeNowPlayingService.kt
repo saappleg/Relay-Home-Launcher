@@ -585,12 +585,18 @@ internal object RelayTubeProfileBridge {
         SynchronousQueue(),
         { runnable -> Thread(runnable, "RelayTube-provider-call").apply { isDaemon = true } }
     )
-    // Serialize protected profile-switch broadcasts and coalesce queued selections to the latest
-    // one. Local profile state updates immediately; provider reads then converge without letting
-    // rapid D-pad changes block focus or leave an older selection as the final request.
+    // Serialize profile switches and coalesce queued selections to the latest one. The provider
+    // is the primary handoff because it validates Relay Home by package name; its broadcast
+    // receiver requires a signature permission that third-party Relay Home builds may not hold.
     private val profileSelectionExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "RelayTube-profile-select").apply { isDaemon = true }
     }
+    // Keep provider-side selection calls ordered, but never wait for them on the launcher-facing
+    // selection coordinator. A wedged Binder can stall this worker without freezing focus/UI.
+    private val providerProfileSelectionExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "RelayTube-provider-select").apply { isDaemon = true }
+    }
+    private val providerProfileSelectionInFlight = AtomicBoolean(false)
     private data class PendingProfileSelection(
         val context: Context,
         val endpoint: RelayTubeEndpoint,
@@ -693,7 +699,29 @@ internal object RelayTubeProfileBridge {
                     while (true) {
                         val pending = pendingProfileSelection.getAndSet(null) ?: break
                         if (pending.generation != refreshGeneration.get()) continue
-                        sendProfileSelection(pending)
+                        if (!providerProfileSelectionInFlight.compareAndSet(false, true)) {
+                            pendingProfileSelection.updateAndGet { queued ->
+                                if (queued == null || queued.generation < pending.generation) pending else queued
+                            }
+                            scheduleProfileSelectionFallback(pending)
+                            break
+                        }
+                        runCatching {
+                            providerProfileSelectionExecutor.execute {
+                                try {
+                                    if (pending.generation == refreshGeneration.get() && !selectRemoteProfile(pending)) {
+                                        sendProfileSelectionBroadcast(pending)
+                                    }
+                                } finally {
+                                    providerProfileSelectionInFlight.set(false)
+                                    if (pendingProfileSelection.get() != null) scheduleProfileSelectionDrain()
+                                }
+                            }
+                        }.onFailure {
+                            providerProfileSelectionInFlight.set(false)
+                            sendProfileSelectionBroadcast(pending)
+                        }
+                        scheduleProfileSelectionFallback(pending)
                         if (pending.generation == refreshGeneration.get()) {
                             readFeeds(pending.context, pending.endpoint, pending.profileId, pending.generation)
                             scheduleProfileSelectionRetries(
@@ -706,7 +734,9 @@ internal object RelayTubeProfileBridge {
                     }
                 } finally {
                     profileSelectionDrainScheduled.set(false)
-                    if (pendingProfileSelection.get() != null) scheduleProfileSelectionDrain()
+                    if (pendingProfileSelection.get() != null && !providerProfileSelectionInFlight.get()) {
+                        scheduleProfileSelectionDrain()
+                    }
                 }
             }
         }.onFailure {
@@ -723,7 +753,43 @@ internal object RelayTubeProfileBridge {
         }, 4_000L, TimeUnit.MILLISECONDS)
     }
 
-    private fun sendProfileSelection(selection: PendingProfileSelection) {
+    /**
+     * RelayTube's exported provider performs a package-checked select call, so it works even when
+     * Relay Home and RelayTube are signed with different keys. Keep this call on the serialized
+     * background selection lane: a later profile must never overtake a still-running earlier call.
+     */
+    private fun selectRemoteProfile(selection: PendingProfileSelection): Boolean {
+        if (selection.generation != refreshGeneration.get()) return false
+        val result = runCatching {
+            selection.context.contentResolver.call(
+                Uri.parse(selection.endpoint.providerUri),
+                "select",
+                selection.profileId,
+                null
+            )
+        }.getOrNull() ?: return false
+        val profilePayload = runCatching { result.getString(RELAY_TUBE_EXTRA_PROFILES) }.getOrNull()
+        val parsed = parseRelayTubeProfilePayload(profilePayload)
+        if (!parsed.valid) return false
+        val selectedId = normalizeRelayTubeProfileId(
+            runCatching { result.getString(RELAY_TUBE_EXTRA_PROFILE_ID) }.getOrNull()
+        )
+        return synchronized(generationLock) {
+            if (selection.generation != refreshGeneration.get()) return@synchronized false
+            if (selectedId == selection.profileId && pendingLocalProfileSelection == selection.profileId) {
+                pendingLocalProfileSelection = null
+            }
+            SmartTubePlaybackStore.updateProfiles(
+                selection.context,
+                selectedId,
+                parsed.profiles,
+                activeProfileOverride = pendingLocalProfileSelection
+            )
+            selectedId == selection.profileId
+        }
+    }
+
+    private fun sendProfileSelectionBroadcast(selection: PendingProfileSelection) {
         synchronized(generationLock) {
             if (selection.generation != refreshGeneration.get()) return
             runCatching {
@@ -734,6 +800,16 @@ internal object RelayTubeProfileBridge {
                 )
             }
         }
+    }
+
+    private fun scheduleProfileSelectionFallback(selection: PendingProfileSelection) {
+        refreshScheduler.schedule({
+            val selectionStillPending = synchronized(generationLock) {
+                selection.generation == refreshGeneration.get() &&
+                    pendingLocalProfileSelection == selection.profileId
+            }
+            if (selectionStillPending) sendProfileSelectionBroadcast(selection)
+        }, PROVIDER_CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS)
     }
 
     private fun scheduleProfileSelectionRetries(
@@ -749,7 +825,10 @@ internal object RelayTubeProfileBridge {
                     generation == refreshGeneration.get() && pendingLocalProfileSelection == profileId
                 }
                 if (selectionStillPending) {
-                    sendProfileSelection(PendingProfileSelection(context.applicationContext, endpoint, profileId, generation))
+                    pendingProfileSelection.set(
+                        PendingProfileSelection(context.applicationContext, endpoint, profileId, generation)
+                    )
+                    scheduleProfileSelectionDrain()
                 }
                 if (generation == refreshGeneration.get()) {
                     readProvider(context.applicationContext, endpoint, "profiles", null, generation)

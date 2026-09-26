@@ -69,11 +69,14 @@ Relay also probes the maintained RelayTube content provider at
 - `feeds`: return `subscriptions`, `continue_watching`, and the echoed
   `profile_id` for the requested profile.
 
-If the content-provider call is unavailable, Relay falls back to the
-package-targeted profile request/selection broadcasts. Feed responses without
-an echoed matching profile ID are rejected. Refreshes are retried on the
-current generation after profile selection, while the last-known-good cache is
-kept if the companion is unavailable.
+Profile selection uses the provider's package-verified `select` call first;
+Relay serializes those calls off the rendering path and coalesces rapid changes
+to the latest profile. If the provider call is unavailable or does not confirm
+the selected profile, Relay also sends the package-targeted selection broadcast
+for builds signed with the matching RelayTube key. Feed responses without an
+echoed matching profile ID are rejected. Refreshes are retried on the current
+generation after profile selection, while the last-known-good cache is kept if
+the companion is unavailable.
 
 RelayTube profile IDs are the authority for feed isolation. A profile name is
 display-only; do not use it as a cache key or as proof that a delayed response
