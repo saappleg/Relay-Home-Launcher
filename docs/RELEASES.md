@@ -62,10 +62,29 @@ code 33 and has SHA-256
 `c887c334b93756422010aa3514e8d749cafc9b18f59479984c67cda00bde3094`; its tag
 points to `11be5a7bccd2dc913d437e933c19e3053c69b5d9`.
 
-## Published beta.12 verification
+## Published beta.13 verification
+
+[v0.1.0-beta.13](https://github.com/saappleg/Relay-Home-Launcher/releases/tag/v0.1.0-beta.13)
+is the latest published prerelease. Its signed APK is `relay-home-0.1.0-beta.13.apk`:
+
+- workflow: [GitHub Actions run 36276996849](https://github.com/saappleg/Relay-Home-Launcher/actions/runs/36276996849);
+- tag target: `69ef1eb7280e9d3b8cf9531d7750a09a77a02fd1`;
+- package/version: `com.relayhome.launcher`, `0.1.0-beta.13`, versionCode `36`;
+- asset SHA-256: `10d94b78bcee737aed9df073c8017d3a3cb24024a2e0d45a0fd33b154c0c6d40`;
+- production signing certificate SHA-256:
+  `4da8c2767f2e47a8a95c74bda80e9349c4e5b1b0e8fdb2b52d3bd0775d68bc21`.
+
+The release is non-draft and marked as a prerelease. The isolated Android TV
+emulator suite passed before the workflow verified the signed APK and published
+it. GitHub's published asset digest matches the APK attached to the release.
+Beta.13 adds Stremio account linking and saved-library sync for TV and movie
+recommendations, plus grouped Settings, searchable bounded lists, collapsed
+advanced controls, and explicit D-pad routes.
+
+## Published beta.12 verification (historical)
 
 [v0.1.0-beta.12](https://github.com/saappleg/Relay-Home-Launcher/releases/tag/v0.1.0-beta.12)
-is the latest published prerelease. Its signed APK is `relay-home-0.1.0-beta.12.apk`:
+was the latest published prerelease before beta.13. Its signed APK is `relay-home-0.1.0-beta.12.apk`:
 
 - workflow: [GitHub Actions run 36258512877](https://github.com/saappleg/Relay-Home-Launcher/actions/runs/36258512877);
 - tag target: `3badc8856fd25059dc3c86b9617030bd273e7f58`;
@@ -147,8 +166,8 @@ isolated Android TV emulator suite passed before signing and publication.
 
 ## Version and signing rules
 
-Use a version code larger than every published APK. Beta.12 is code 35, so the
-next beta must use at least code 36. Never replace the production signing key
+Use a version code larger than every published APK. Beta.13 is code 36, so the
+next beta must use at least code 37. Never replace the production signing key
 after the first signed beta; Android updates require certificate continuity.
 
 The publish workflow requires these repository secrets:
@@ -163,8 +182,8 @@ The checked-in signing example uses the corresponding five
 `relay.signing.*` values: store file, store type, store password, key alias,
 and key password. A JKS keystore is not accepted by the publish workflow.
 
-Non-release local builds use the development identity `0.1.0-beta.13` / code 36.
-This fallback is useful for debug and test APKs but is not the published beta.12
+Non-release local builds use the development identity `0.1.0-beta.14` / code 37.
+This fallback is useful for debug and test APKs but is not the published beta.13
 build and must never be used as release evidence. Release packaging fails closed
 unless `RELAY_VERSION_NAME`, `RELAY_VERSION_CODE`, and the signing values are
 explicitly provided. The local release keystore may be configured in ignored
@@ -175,8 +194,8 @@ explicitly provided. The local release keystore may be configured in ignored
 Use JDK 17. With a permanent PKCS12 keystore configured, run:
 
 ```bash
-export RELAY_VERSION_NAME=0.1.0-beta.13
-export RELAY_VERSION_CODE=36
+export RELAY_VERSION_NAME=0.1.0-beta.14
+export RELAY_VERSION_CODE=37
 ./gradlew :app:verifyRelayReleaseVersion :app:lintRelease \
   :app:testReleaseUnitTest :app:assembleRelease
 ```
@@ -198,8 +217,8 @@ gh workflow run publish-release.yml \
   --repo saappleg/Relay-Home-Launcher \
   --ref main \
   -f channel=beta \
-  -f version_name=0.1.0-beta.13 \
-  -f version_code=36 \
+  -f version_name=0.1.0-beta.14 \
+  -f version_code=37 \
   -f release_notes='Describe the changes included in the next release.'
 ```
 
@@ -224,12 +243,12 @@ workflow's display alone:
 
 ```bash
 gh run list --repo saappleg/Relay-Home-Launcher --workflow publish-release.yml --limit 5
-gh release view v0.1.0-beta.13 --repo saappleg/Relay-Home-Launcher \
+gh release view v0.1.0-beta.14 --repo saappleg/Relay-Home-Launcher \
   --json tagName,isDraft,isPrerelease,targetCommitish,assets
 ```
 
 Confirm the release is not a draft, has the expected prerelease flag, contains
-exactly `relay-home-0.1.0-beta.13.apk`, and that its tag points to the tested
+exactly `relay-home-0.1.0-beta.14.apk`, and that its tag points to the tested
 revision. Install the published asset on a clean TV, then update from the
 signed beta baseline and verify that app data remains intact.
 
@@ -281,6 +300,10 @@ updates preserve app data normally.
   exact Home card and scroll position, preserves settled artwork during D-pad
   movement, retries RelayTube feed sync safely, and switches profiles through
   the package-verified provider API across differently signed companion builds.
+- `v0.1.0-beta.13` (code 36) adds Stremio account linking and saved-library sync
+  for library-based TV and movie recommendations, plus grouped Settings,
+  searchable bounded lists, collapsed advanced controls, and explicit D-pad
+  routes.
 
 The baseline-profile module is wired but generation is explicit and is not a
 release-workflow step. It currently covers startup and a short Home D-pad

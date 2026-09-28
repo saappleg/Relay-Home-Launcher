@@ -9,13 +9,13 @@ and playback.
 
 ## Current beta
 
-The latest published build is [v0.1.0-beta.12](https://github.com/saappleg/Relay-Home-Launcher/releases/tag/v0.1.0-beta.12), a GitHub prerelease with version code 35 and the signed APK `relay-home-0.1.0-beta.12.apk`. Its published SHA-256 digest is
-`708f40c3265a299af596949dc4ac650250ee9f4b5f71e39314a920b2b87b9ec0`.
+The latest published build is [v0.1.0-beta.13](https://github.com/saappleg/Relay-Home-Launcher/releases/tag/v0.1.0-beta.13), a GitHub prerelease with version code 36 and the signed APK `relay-home-0.1.0-beta.13.apk`. Its published SHA-256 digest is
+`10d94b78bcee737aed9df073c8017d3a3cb24024a2e0d45a0fd33b154c0c6d40`.
 
-Beta.12 reduces Home/App Peek rendering work, restores the exact Home card and
-scroll position after an app peek, and makes RelayTube feeds and profile
-switching more reliable across differently signed companion builds. See [the
-release checklist](docs/RELEASES.md) for verification details.
+Beta.13 adds Stremio account linking and saved-library sync for TV and movie
+recommendations. Settings are grouped into shorter destinations with searchable
+lists, collapsed advanced controls, and explicit D-pad paths. See [the release
+checklist](docs/RELEASES.md) for verification details.
 
 ## Features
 
@@ -155,8 +155,8 @@ packaging does: configure the five `relay.signing.*` values shown in
 variables. Then set an explicit release identity and run:
 
 ```bash
-export RELAY_VERSION_NAME=0.1.0-beta.13
-export RELAY_VERSION_CODE=36
+export RELAY_VERSION_NAME=0.1.0-beta.14
+export RELAY_VERSION_CODE=37
 ./gradlew :app:verifyRelayReleaseVersion :app:lintRelease \
   :app:testReleaseUnitTest :app:assembleRelease
 ```

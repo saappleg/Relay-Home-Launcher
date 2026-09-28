@@ -294,19 +294,27 @@ class SettingsScreenTest {
     }
 
     @Test
-    fun subscriptionVisibilitySwitches_followTheExplicitChannelChain() {
+    fun subscriptionVisibilitySwitches_followTheExplicitChannelChainAcrossLazyPages() {
+        val subscriptions = (0 until 24).map { index ->
+            val suffix = index.toString().padStart(2, '0')
+            SmartTubeSubscriptionVideo(
+                "video-$suffix",
+                "Video $suffix",
+                "Creator $suffix",
+                "channel-$suffix",
+                null
+            )
+        }
         setSettings(
             smartTubeInstalled = true,
-            smartTubeSubscriptions = listOf(
-                SmartTubeSubscriptionVideo("video-a", "Video A", "Alpha", "channel-a", null),
-                SmartTubeSubscriptionVideo("video-b", "Video B", "Beta", "channel-b", null),
-                SmartTubeSubscriptionVideo("video-c", "Video C", "Gamma", "channel-c", null)
-            )
+            smartTubeSubscriptions = subscriptions
         )
 
         composeRule.onNodeWithText(SettingsCategory.SUBSCRIPTIONS.label).performScrollTo().performClick()
         composeRule.awaitDisplayed(composeRule.onNodeWithTag("settings-category-detail-SUBSCRIPTIONS"))
-        val channelTags = listOf("channel-a", "channel-b", "channel-c").map { "smarttube-channel-switch-$it" }
+        val channelTags = (0 until 24).map { index ->
+            "smarttube-channel-switch-channel-${index.toString().padStart(2, '0')}"
+        }
         val search = composeRule.onNodeWithTag("relaytube-channel-search", useUnmergedTree = true)
         val firstChannel = composeRule.onNodeWithTag(channelTags.first(), useUnmergedTree = true)
         composeRule.awaitFocused(firstChannel)
