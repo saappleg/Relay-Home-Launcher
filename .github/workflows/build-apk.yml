@@ -98,15 +98,27 @@ jobs:
       - uses: android-actions/setup-android@v3
         with:
           packages: platform-tools
+      - name: Enable KVM for hosted emulator
+        run: |
+          set -euo pipefail
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          test -e /dev/kvm
+          stat -c 'KVM device: %n (%a)' /dev/kvm
       - name: Run connected Android tests on an emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 35
-          target: google_apis
-          arch: x86_64
-          profile: pixel_2
-          cores: 2
-          ram-size: 2048M
-          heap-size: 512M
+          api-level: 34
+          target: android-tv
+          arch: x86
+          profile: tv_1080p
+          cores: 4
+          ram-size: 4096M
+          heap-size: 1024M
           disable-animations: true
-          script: ./gradlew :app:connectedCheck
+          disable-linux-hw-accel: false
+          pre-emulator-launch-script: sh .github/workflows/prepare-emulator.sh
+          emulator-options: "-no-window -noaudio -no-boot-anim -gpu off -no-snapshot -skin 1920x1080"
+          emulator-boot-timeout: 900
+          script: sh .github/workflows/validate-emulator.sh
