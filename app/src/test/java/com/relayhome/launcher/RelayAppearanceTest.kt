@@ -5,11 +5,16 @@ import com.relayhome.launcher.ui.shared.RelayPalette
 import com.relayhome.launcher.ui.shared.relayPaletteForAppearance
 import com.relayhome.launcher.ui.shared.relayPaletteFromSwatches
 import com.relayhome.launcher.ui.shared.orbitalPalette
+import com.relayhome.launcher.ui.shared.relayReadableForeground
+import com.relayhome.launcher.ui.shared.RelaySurfaceTokens
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.luminance
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class RelayAppearanceTest {
@@ -70,5 +75,27 @@ class RelayAppearanceTest {
         assertEquals(Color(0xFF102030.toInt()), palette.accent)
         assertEquals(Color(0xFF708090.toInt()).copy(alpha = .72f), palette.glow)
         assertEquals(Color(0xFF1B2228.toInt()), palette.backdrop)
+    }
+
+    @Test
+    fun readableForeground_keepsDynamicSwatchesAboveWcagContrastMinimum() {
+        for (gray in 0..255 step 5) {
+            for (alpha in 0..255 step 32) {
+                val component = gray / 255f
+                val swatch = Color(component, component, component, alpha / 255f)
+                val visibleBackground = swatch.compositeOver(RelaySurfaceTokens.surface0)
+                val foreground = relayReadableForeground(swatch)
+                val foregroundLuminance = foreground.luminance()
+                val backgroundLuminance = visibleBackground.luminance()
+                val lighter = maxOf(foregroundLuminance, backgroundLuminance)
+                val darker = minOf(foregroundLuminance, backgroundLuminance)
+                val contrast = (lighter + 0.05f) / (darker + 0.05f)
+
+                assertTrue(
+                    "Expected at least 4.5:1 contrast for gray=$gray alpha=$alpha, got $contrast",
+                    contrast >= 4.5f
+                )
+            }
+        }
     }
 }

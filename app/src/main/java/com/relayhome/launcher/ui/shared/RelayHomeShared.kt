@@ -113,11 +113,10 @@ internal object RelaySurfaceTokens {
 
 internal fun relayReadableForeground(background: Color): Color {
     val visibleBackground = background.compositeOver(RelaySurfaceTokens.surface0)
-    return if (visibleBackground.luminance() > 0.179f) {
-        RelaySurfaceTokens.primaryForeground
-    } else {
-        ivory
-    }
+    val luminance = visibleBackground.luminance()
+    val darkContrast = (luminance + 0.05f) / 0.05f
+    val lightContrast = 1.05f / (luminance + 0.05f)
+    return if (darkContrast >= lightContrast) Color.Black else Color.White
 }
 
 /** Shared corner shapes keep cards, controls, and dialogs on one visual scale. */
