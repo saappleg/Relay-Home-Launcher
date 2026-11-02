@@ -195,8 +195,11 @@ class SettingsScreenTest {
         assertEquals("", savedWeatherCity)
         composeRule.onNodeWithText("Back to Settings").performClick()
 
+        composeRule.awaitDisplayed(composeRule.onNodeWithTag("settings-category-root"))
+        composeRule.awaitFocused(composeRule.onNodeWithText(SettingsCategory.WEATHER_WIDGETS.label))
         composeRule.onNodeWithText(SettingsCategory.APPS.label).performScrollTo().performClick()
-        composeRule.awaitDisplayed(composeRule.onNodeWithText("All Apps"))
+        composeRule.awaitDisplayed(composeRule.onNodeWithTag("settings-category-detail-APPS"))
+        composeRule.awaitDisplayed(composeRule.onNodeWithText("All Apps").performScrollTo())
         composeRule.awaitDisplayed(composeRule.onNodeWithText("Sort order"))
         composeRule.awaitDisplayed(composeRule.onNodeWithText("Icon shape"))
         composeRule.awaitDisplayed(composeRule.onNodeWithText("Hidden apps"))
