@@ -68,7 +68,6 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -198,7 +197,7 @@ internal fun DetailsScreen(
         }
     }
     Box(
-        modifier = Modifier.fillMaxSize().background(midnight)
+        modifier = Modifier.fillMaxSize().background(RelaySurfaceTokens.surface0)
     ) {
         AsyncImage(
             model = ImageRequest.Builder(context).data(item.artworkUrl).size(1920, 1080).crossfade(true).build(),
@@ -208,7 +207,7 @@ internal fun DetailsScreen(
         )
         Box(
             modifier = Modifier.fillMaxSize().background(
-                Brush.horizontalGradient(listOf(midnight, midnight.copy(alpha = .8f), Color.Transparent))
+                Brush.horizontalGradient(listOf(RelaySurfaceTokens.surface0, RelaySurfaceTokens.surface0.copy(alpha = .8f), Color.Transparent))
             )
         )
         Row(
@@ -234,9 +233,9 @@ internal fun DetailsScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Box(
-                    Modifier.width(190.dp).height(270.dp).clip(RoundedCornerShape(18.dp))
+                    Modifier.width(190.dp).height(270.dp).clip(RelayShapeTokens.card)
                         .background(item.provider.accent.copy(alpha = .18f))
-                        .border(1.dp, item.provider.accent.copy(alpha = .55f), RoundedCornerShape(18.dp)),
+                        .border(1.dp, item.provider.accent.copy(alpha = .55f), RelayShapeTokens.card),
                     contentAlignment = Alignment.Center
                 ) {
                     if (item.artworkUrl.visibleRelayText().isNotBlank()) {
@@ -249,7 +248,7 @@ internal fun DetailsScreen(
                     } else {
                         Text(item.provider.label, color = item.provider.accent, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
                     }
-                    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, midnight.copy(alpha = .52f)))))
+                    Box(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(Color.Transparent, RelaySurfaceTokens.surface0.copy(alpha = .52f)))))
                 }
                 Column(
                     Modifier
@@ -275,6 +274,7 @@ internal fun DetailsScreen(
                         fontSize = 32.sp,
                         lineHeight = 37.sp,
                         fontWeight = FontWeight.Light,
+                        fontFamily = relayDisplayFontFamily,
                         maxLines = 2,
                         overflow = TextOverflow.Ellipsis
                     )
@@ -323,7 +323,7 @@ internal fun DetailsScreen(
                         }
                     }
                     Spacer(Modifier.height(12.dp))
-                    Text("About this title", color = ivory.copy(alpha = .9f), fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text("About this title", color = ivory.copy(alpha = .9f), fontSize = 14.sp, fontWeight = FontWeight.Medium, fontFamily = relayDisplayFontFamily)
                     Spacer(Modifier.height(5.dp))
                     Text(
                         item.description.visibleRelayText().ifBlank { "Details are available in ${item.provider.label}." },
@@ -335,7 +335,7 @@ internal fun DetailsScreen(
                     )
                     seasonEpisode?.let {
                         Spacer(Modifier.height(11.dp))
-                        Text("Season & episode", color = ivory.copy(alpha = .9f), fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Text("Season & episode", color = ivory.copy(alpha = .9f), fontSize = 14.sp, fontWeight = FontWeight.Medium, fontFamily = relayDisplayFontFamily)
                         Spacer(Modifier.height(5.dp))
                         ActionButton(
                             "S${selectedSeason.toString().padStart(2, '0')}  •  E${selectedEpisode.toString().padStart(2, '0')}    Choose episode",
@@ -384,7 +384,7 @@ internal fun DetailsScreen(
                         }
                     }
                     Spacer(Modifier.height(12.dp))
-                    Text("Your rating", color = ivory.copy(alpha = .9f), fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                    Text("Your rating", color = ivory.copy(alpha = .9f), fontSize = 14.sp, fontWeight = FontWeight.Medium, fontFamily = relayDisplayFontFamily)
                     Spacer(Modifier.height(6.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         PersonalRating.entries.forEachIndexed { index, rating ->
@@ -408,9 +408,9 @@ internal fun DetailsScreen(
                     }
                     if (item.infoProgress() > 0f) {
                         Spacer(Modifier.height(12.dp))
-                        Text("Continue watching", color = ivory.copy(alpha = .9f), fontSize = 15.sp)
+                        Text("Continue watching", color = ivory.copy(alpha = .9f), fontSize = 15.sp, fontFamily = relayDisplayFontFamily)
                         Spacer(Modifier.height(5.dp))
-                        Box(Modifier.fillMaxWidth().height(5.dp).clip(CircleShape).background(Color.White.copy(alpha = .22f))) {
+                        Box(Modifier.fillMaxWidth().height(5.dp).clip(CircleShape).background(RelaySurfaceTokens.outline.copy(alpha = .65f))) {
                             Box(Modifier.fillMaxWidth(item.infoProgress()).height(5.dp).background(item.provider.accent))
                         }
                     }
@@ -459,16 +459,16 @@ internal fun SeasonEpisodePicker(
         runCatching { seasonFocusRequester.requestFocus() }
     }
     Box(
-        Modifier.fillMaxSize().background(midnight.copy(alpha = .94f)).padding(horizontal = 72.dp, vertical = 54.dp),
+        Modifier.fillMaxSize().background(RelaySurfaceTokens.surface0.copy(alpha = .94f)).padding(horizontal = 72.dp, vertical = 54.dp),
         contentAlignment = Alignment.Center
     ) {
         Column(
-            Modifier.fillMaxWidth().fillMaxHeight().clip(RoundedCornerShape(24.dp)).background(Color(0xFF111319))
-                .border(1.dp, Color.White.copy(alpha = .12f), RoundedCornerShape(24.dp)).padding(28.dp)
+            Modifier.fillMaxWidth().fillMaxHeight().clip(RelayShapeTokens.dialog).background(RelaySurfaceTokens.surface2)
+                .border(1.dp, RelaySurfaceTokens.outline.copy(alpha = .55f), RelayShapeTokens.dialog).padding(28.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column {
-                    Text("Choose season & episode", color = ivory, fontSize = 28.sp, fontWeight = FontWeight.Light)
+                    Text("Choose season & episode", color = ivory, fontSize = 28.sp, fontWeight = FontWeight.Light, fontFamily = relayDisplayFontFamily)
                     Spacer(Modifier.height(5.dp))
                     Text("Use left and right to switch columns, then press Select.", color = muted, fontSize = 14.sp)
                 }
@@ -481,7 +481,7 @@ internal fun SeasonEpisodePicker(
                     Text("SEASONS", color = palette.accent, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
                     Spacer(Modifier.height(10.dp))
                     LazyColumn(
-                        Modifier.fillMaxSize().clip(RoundedCornerShape(14.dp)).background(Color(0xFF0B0D12)),
+                        Modifier.fillMaxSize().clip(RelayShapeTokens.control).background(RelaySurfaceTokens.surface1),
                         contentPadding = PaddingValues(8.dp),
                         verticalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
@@ -500,7 +500,7 @@ internal fun SeasonEpisodePicker(
                     Text("EPISODES", color = palette.accent, fontSize = 13.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.5.sp)
                     Spacer(Modifier.height(10.dp))
                     LazyColumn(
-                        Modifier.fillMaxSize().clip(RoundedCornerShape(14.dp)).background(Color(0xFF0B0D12)),
+                        Modifier.fillMaxSize().clip(RelayShapeTokens.control).background(RelaySurfaceTokens.surface1),
                         contentPadding = PaddingValues(8.dp),
                         verticalArrangement = Arrangement.spacedBy(5.dp)
                     ) {
@@ -554,9 +554,9 @@ internal fun SeasonEpisodeChoice(
                 if (leftFocusRequester != null) left = leftFocusRequester
                 if (rightFocusRequester != null) right = rightFocusRequester
             } else Modifier)
-            .fillMaxWidth().clip(RoundedCornerShape(10.dp))
+            .fillMaxWidth().clip(RelayShapeTokens.compact)
             .background(if (selected || focused) palette.accent.copy(alpha = .22f) else Color.Transparent)
-            .border(if (focused) 2.dp else 0.dp, if (focused) palette.accent else Color.Transparent, RoundedCornerShape(10.dp))
+            .border(if (focused) 2.dp else 0.dp, if (focused) palette.accent else Color.Transparent, RelayShapeTokens.compact)
             .clickable(interactionSource = source, indication = null, onClick = onClick)
             .padding(horizontal = 14.dp, vertical = 11.dp)
     )
@@ -569,6 +569,6 @@ internal fun DetailPill(label: String, color: Color) {
         color = ivory,
         fontSize = 12.sp,
         fontWeight = FontWeight.Bold,
-        modifier = Modifier.clip(RoundedCornerShape(10.dp)).background(color).padding(horizontal = 9.dp, vertical = 5.dp)
+        modifier = Modifier.clip(RelayShapeTokens.compact).background(color).padding(horizontal = 9.dp, vertical = 5.dp)
     )
 }

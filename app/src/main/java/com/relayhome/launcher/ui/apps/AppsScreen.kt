@@ -66,7 +66,6 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -274,7 +273,7 @@ internal fun AppsScreen(
         )
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Apps", color = ivory, fontSize = 34.sp, fontWeight = FontWeight.Light)
+            Text("Apps", color = ivory, fontSize = 34.sp, fontWeight = FontWeight.Light, fontFamily = relayDisplayFontFamily)
             Spacer(Modifier.weight(1f))
             ActionButton(
                 "Back to Home",
@@ -287,7 +286,7 @@ internal fun AppsScreen(
         }
         Spacer(Modifier.height(if (compactHeight) 12.dp else 20.dp))
         Row(verticalAlignment = Alignment.Bottom) {
-            Text("All apps", color = ivory, fontSize = 23.sp, fontWeight = FontWeight.SemiBold)
+            Text("All apps", color = ivory, fontSize = 23.sp, fontWeight = FontWeight.SemiBold, fontFamily = relayDisplayFontFamily)
             Spacer(Modifier.width(12.dp))
             Text(
                 buildString {
@@ -527,7 +526,7 @@ internal fun InstalledAppTile(
     var longPressHandled by remember { mutableStateOf(false) }
     val showFocus = focused && !menuOpen
     val isCompactHeight = compactHeight ?: (LocalConfiguration.current.screenHeightDp < 500)
-    val shape = RoundedCornerShape(16.dp)
+    val shape = RelayShapeTokens.card
     val artwork = if (app.hasLeanbackBanner || app.hasLeanbackLogo) {
         rememberDrawableBitmap(
             app.artwork,
@@ -623,8 +622,12 @@ internal fun InstalledAppTile(
             .testTag("installed-app-tile-${app.packageName}")
                 .then(if (artworkHeight != null) Modifier.height(artworkHeight) else Modifier.aspectRatio(16f / 9f))
                 .clip(shape)
-                .background(if (showFocus) palette.accent.copy(alpha = .24f) else Color(0xFF20232A))
-                .border(if (showFocus) 2.dp else 1.dp, if (showFocus) palette.accent else Color.White.copy(alpha = .10f), shape),
+                .background(if (showFocus) palette.accent.copy(alpha = .24f) else RelaySurfaceTokens.surface4)
+                .border(
+                    if (showFocus) 2.dp else 1.dp,
+                    if (showFocus) palette.accent else RelaySurfaceTokens.outline.copy(alpha = .6f),
+                    shape
+                ),
             contentAlignment = Alignment.Center
         ) {
             if (app.hasLeanbackBanner && artwork != null) {
@@ -713,12 +716,12 @@ internal fun AppActionsDialog(
                         false
                     }
                 }
-                .background(midnight.copy(alpha = .82f)),
+                .background(RelaySurfaceTokens.surface0.copy(alpha = .82f)),
             contentAlignment = Alignment.Center
         ) {
             Column(
-                Modifier.width(420.dp).clip(RoundedCornerShape(22.dp)).background(Color(0xFF15121C))
-                    .border(1.dp, palette.accent.copy(alpha = .6f), RoundedCornerShape(22.dp)).padding(28.dp)
+                Modifier.width(420.dp).clip(RelayShapeTokens.panel).background(RelaySurfaceTokens.surface3)
+                    .border(1.dp, RelaySurfaceTokens.outline.copy(alpha = .65f), RelayShapeTokens.panel).padding(28.dp)
             ) {
                 Text(app.label, color = ivory, fontSize = 22.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Spacer(Modifier.height(18.dp))

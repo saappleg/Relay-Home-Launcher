@@ -25,9 +25,16 @@ import com.relayhome.launcher.ui.search.SearchScreen
 import com.relayhome.launcher.ui.settings.SettingsScreen
 import com.relayhome.launcher.ui.stremioconnect.StremioConnectScreen
 import com.relayhome.launcher.ui.shared.Destination
+import com.relayhome.launcher.ui.shared.Provider
+import com.relayhome.launcher.ui.shared.RelayStatusColors
+import com.relayhome.launcher.ui.shared.RelaySurfaceTokens
 import com.relayhome.launcher.ui.shared.dynamicRelayColorScheme
 import com.relayhome.launcher.ui.shared.ivory
 import com.relayhome.launcher.ui.shared.midnight
+import com.relayhome.launcher.ui.shared.muted
+import com.relayhome.launcher.ui.shared.relayAtomizeShapes
+import com.relayhome.launcher.ui.shared.relayAtomizeTypography
+import com.relayhome.launcher.ui.shared.relayReadableForeground
 import com.relayhome.launcher.ui.shared.relayPaletteForAppearance
 import com.relayhome.launcher.ui.shared.contentKey
 import com.relayhome.launcher.ui.state.RelayHomeStateHolder
@@ -51,21 +58,43 @@ internal fun RelayHomeApp(
         dynamicColorScheme = dynamicColorScheme,
         focusedArtworkPalette = state.focusedArtworkPalette
     )
-    val materialColorScheme = when {
-        state.appearance == com.relayhome.launcher.ui.shared.RelayAppearance.AUTOMATIC && dynamicColorScheme != null -> dynamicColorScheme
-        state.appearance == com.relayhome.launcher.ui.shared.RelayAppearance.FROM_BACKDROP && state.focusedArtworkPalette != null ->
-            darkColorScheme(
-                primary = palette.accent,
-                primaryContainer = palette.glow,
-                background = palette.backdrop,
-                surface = midnight,
-                onBackground = ivory,
-                onSurface = ivory
-            )
-        else -> darkColorScheme(background = midnight, onBackground = ivory)
+    val materialColorScheme = if (
+        state.appearance == com.relayhome.launcher.ui.shared.RelayAppearance.AUTOMATIC &&
+        dynamicColorScheme != null
+    ) {
+        dynamicColorScheme
+    } else {
+        val background = if (
+            state.appearance == com.relayhome.launcher.ui.shared.RelayAppearance.FROM_BACKDROP &&
+            state.focusedArtworkPalette != null
+        ) palette.backdrop else RelaySurfaceTokens.surface0
+        darkColorScheme(
+            primary = palette.accent,
+            onPrimary = relayReadableForeground(palette.accent),
+            primaryContainer = palette.glow,
+            onPrimaryContainer = relayReadableForeground(palette.glow),
+            secondary = Provider.NUVIO.accent,
+            onSecondary = relayReadableForeground(Provider.NUVIO.accent),
+            tertiary = Provider.STREMIO.accent,
+            onTertiary = relayReadableForeground(Provider.STREMIO.accent),
+            background = background,
+            onBackground = ivory,
+            surface = RelaySurfaceTokens.surface1,
+            onSurface = ivory,
+            surfaceVariant = RelaySurfaceTokens.surface2,
+            onSurfaceVariant = muted,
+            outline = RelaySurfaceTokens.outline,
+            outlineVariant = RelaySurfaceTokens.outline.copy(alpha = .55f),
+            error = RelayStatusColors.danger,
+            onError = relayReadableForeground(RelayStatusColors.danger)
+        )
     }
 
-    MaterialTheme(colorScheme = materialColorScheme) {
+    MaterialTheme(
+        colorScheme = materialColorScheme,
+        typography = relayAtomizeTypography,
+        shapes = relayAtomizeShapes
+    ) {
         Box(
             modifier = Modifier
                 .fillMaxSize()

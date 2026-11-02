@@ -1,17 +1,26 @@
 package com.relayhome.launcher.ui.shared
 
 import com.relayhome.launcher.SmartTubeNowPlaying
+import com.relayhome.launcher.R
 import com.relayhome.launcher.readSharedPreferencesSafely
 import com.relayhome.launcher.writeSharedPreferencesSafely
 import com.relayhome.launcher.data.RelaySettingsRepository
 import com.relayhome.launcher.data.AdditionalMetadata
 import android.content.Context
 import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.Shapes
+import androidx.compose.material3.Typography
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.PathBuilder
 import androidx.compose.ui.graphics.vector.path
+import androidx.compose.ui.text.font.Font
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.graphics.drawable.toBitmap
 import androidx.palette.graphics.Palette
@@ -89,6 +98,86 @@ internal fun SmartTubeNowPlaying.toRelayMediaItem() = MediaItem(
 internal object RelayTvMargins {
     val screenHorizontal = 76.dp
 }
+
+/** Surface 0–5 follow Atomize's levels while retaining Relay's established dark palette. */
+internal object RelaySurfaceTokens {
+    val surface0 = Color(0xFF050608)
+    val surface1 = Color(0xFF090B10)
+    val surface2 = Color(0xFF101218)
+    val surface3 = Color(0xFF171A20)
+    val surface4 = Color(0xFF20232A)
+    val surface5 = Color(0xFF292D36)
+    val outline = Color(0xFF3C4049)
+    val primaryForeground = Color(0xFF111318)
+}
+
+internal fun relayReadableForeground(background: Color): Color {
+    val visibleBackground = background.compositeOver(RelaySurfaceTokens.surface0)
+    return if (visibleBackground.luminance() > 0.179f) {
+        RelaySurfaceTokens.primaryForeground
+    } else {
+        ivory
+    }
+}
+
+/** Shared corner shapes keep cards, controls, and dialogs on one visual scale. */
+internal object RelayShapeTokens {
+    val compact = RoundedCornerShape(8.dp)
+    val control = RoundedCornerShape(12.dp)
+    val card = RoundedCornerShape(16.dp)
+    val panel = RoundedCornerShape(22.dp)
+    val dialog = RoundedCornerShape(24.dp)
+}
+
+/** Functional colors are reserved for status and rating meanings. */
+internal object RelayStatusColors {
+    val success = Color(0xFF65D68A)
+    val warning = Color(0xFFE3B95F)
+    val danger = Color(0xFFEF6D75)
+    val info = Color(0xFF62C5E8)
+}
+
+/** The two licensed typefaces named by the Atomize setup guide. */
+internal val relayBodyFontFamily = FontFamily(
+    Font(R.font.atomize_open_sauce_two_light, weight = FontWeight.Light),
+    Font(R.font.atomize_open_sauce_two_regular, weight = FontWeight.Normal),
+    Font(R.font.atomize_open_sauce_two_medium, weight = FontWeight.Medium),
+    Font(R.font.atomize_open_sauce_two_semibold, weight = FontWeight.SemiBold),
+    Font(R.font.atomize_open_sauce_two_bold, weight = FontWeight.Bold)
+)
+
+internal val relayDisplayFontFamily = FontFamily(
+    Font(R.font.atomize_radio_canada_big, weight = FontWeight.Normal),
+    Font(R.font.atomize_radio_canada_big, weight = FontWeight.Medium),
+    Font(R.font.atomize_radio_canada_big, weight = FontWeight.SemiBold),
+    Font(R.font.atomize_radio_canada_big, weight = FontWeight.Bold)
+)
+
+internal val relayAtomizeTypography = Typography().let { defaults ->
+    defaults.copy(
+        displayLarge = defaults.displayLarge.copy(fontFamily = relayDisplayFontFamily),
+        displayMedium = defaults.displayMedium.copy(fontFamily = relayDisplayFontFamily),
+        displaySmall = defaults.displaySmall.copy(fontFamily = relayDisplayFontFamily),
+        headlineLarge = defaults.headlineLarge.copy(fontFamily = relayDisplayFontFamily),
+        headlineMedium = defaults.headlineMedium.copy(fontFamily = relayDisplayFontFamily),
+        headlineSmall = defaults.headlineSmall.copy(fontFamily = relayDisplayFontFamily),
+        titleLarge = defaults.titleLarge.copy(fontFamily = relayBodyFontFamily),
+        titleMedium = defaults.titleMedium.copy(fontFamily = relayBodyFontFamily),
+        titleSmall = defaults.titleSmall.copy(fontFamily = relayBodyFontFamily),
+        bodyLarge = defaults.bodyLarge.copy(fontFamily = relayBodyFontFamily),
+        bodyMedium = defaults.bodyMedium.copy(fontFamily = relayBodyFontFamily),
+        bodySmall = defaults.bodySmall.copy(fontFamily = relayBodyFontFamily),
+        labelLarge = defaults.labelLarge.copy(fontFamily = relayBodyFontFamily),
+        labelMedium = defaults.labelMedium.copy(fontFamily = relayBodyFontFamily),
+        labelSmall = defaults.labelSmall.copy(fontFamily = relayBodyFontFamily)
+    )
+}
+
+internal val relayAtomizeShapes = Shapes(
+    small = RelayShapeTokens.control,
+    medium = RelayShapeTokens.card,
+    large = RelayShapeTokens.dialog
+)
 
 private val visibleRelayTextRegex = Regex("[\\p{C}\\s]+")
 

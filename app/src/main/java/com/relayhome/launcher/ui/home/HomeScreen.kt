@@ -1725,14 +1725,14 @@ internal fun ProfileSwitcher(
         expanded = true,
         onDismissRequest = onDismiss,
         properties = androidx.compose.ui.window.PopupProperties(focusable = true),
-        modifier = Modifier.width(430.dp).background(Color(0xFF15121C))
+        modifier = Modifier.width(430.dp).background(RelaySurfaceTokens.surface2)
     ) {
         BackHandler(onBack = onDismiss)
         LaunchedEffect(activeProfile, profileKeys) {
             requestHomeFocusWithRetry(initialFocusRequester, attempts = 6)
         }
             Column(Modifier.padding(22.dp).focusGroup()) {
-                Text("Who’s watching?", color = ivory, fontSize = 26.sp, fontWeight = FontWeight.Light)
+                Text("Who’s watching?", color = ivory, fontFamily = relayDisplayFontFamily, fontSize = 26.sp, fontWeight = FontWeight.Light)
                 Spacer(Modifier.height(8.dp))
                 Text("Each Relay profile keeps its own Nuvio and ${Provider.SMARTTUBE.label} viewing feeds.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
                 Spacer(Modifier.height(24.dp))
@@ -1749,10 +1749,10 @@ internal fun ProfileSwitcher(
                                 if (index > 0) up = profileFocusRequesters.getValue(profiles[index - 1].index)
                                 if (index < profiles.lastIndex) down = profileFocusRequesters.getValue(profiles[index + 1].index)
                             } else Modifier)
-                            .fillMaxWidth().clip(RoundedCornerShape(20.dp))
+                            .fillMaxWidth().clip(RelayShapeTokens.panel)
                             .testTag("home-profile-${profile.index}")
-                            .background(if (focused || profile.index == activeProfile) Provider.NUVIO.accent.copy(alpha = .22f) else Color(0xFF1A1C23))
-                            .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .10f), RoundedCornerShape(20.dp))
+                            .background(if (focused || profile.index == activeProfile) Provider.NUVIO.accent.copy(alpha = .22f) else RelaySurfaceTokens.surface3)
+                            .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .10f), RelayShapeTokens.panel)
                             // clickable already contributes the TV focus target. Adding a second
                             // focusable node made each visible profile consume two D-pad moves.
                             .semantics(mergeDescendants = true) {
@@ -2007,6 +2007,7 @@ internal fun HeroPanel(
                     Text(
                         hero.title,
                         color = ivory,
+                        fontFamily = relayDisplayFontFamily,
                         fontSize = 33.sp,
                         lineHeight = 40.sp,
                         letterSpacing = 2.sp,
@@ -2133,9 +2134,9 @@ internal fun ActionButton(
                 } else Modifier
             )
             .scale(scale)
-            .clip(RoundedCornerShape(22.dp))
-            .background(if (primary) ivory else Color(0xFF171A20))
-            .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color(0xFF363A42), RoundedCornerShape(22.dp))
+            .clip(RelayShapeTokens.panel)
+            .background(if (primary) ivory else RelaySurfaceTokens.surface3)
+            .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else RelaySurfaceTokens.outline, RelayShapeTokens.panel)
             .clickable(interactionSource = source, indication = null, onClick = onClick)
             .semantics(mergeDescendants = true) {
                 accessibilityLabel?.let { contentDescription = it }
@@ -2148,7 +2149,7 @@ internal fun ActionButton(
         // child on every candidate change can create an avoidable focus/relocation pulse.
         Text(
             text = label,
-            color = if (primary) Color(0xFF111318) else ivory,
+            color = if (primary) RelaySurfaceTokens.primaryForeground else ivory,
             fontSize = 17.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
@@ -2392,21 +2393,21 @@ internal fun MediaScoreBadges(
             val fresh = score >= 60
             ScoreBadge(
                 label = "RT $score%",
-                color = if (fresh) Color(0xFF55D18A) else Color(0xFFEF6D75)
+                color = if (fresh) RelayStatusColors.success else RelayStatusColors.danger
             )
         }
         metacritic?.let { score ->
-            ScoreBadge("MC $score", Color(0xFFE3B95F))
+            ScoreBadge("MC $score", RelayStatusColors.warning)
         }
     }
 }
 
 @Composable
 private fun ScoreBadge(label: String, color: Color) {
-    val shape = RoundedCornerShape(7.dp)
+    val shape = RelayShapeTokens.compact
     Text(
         text = label,
-        color = ivory,
+        color = relayReadableForeground(color),
         fontSize = 10.sp,
         fontWeight = FontWeight.Bold,
         maxLines = 1,
@@ -2455,7 +2456,7 @@ internal fun MediaCard(
     // Immediate focus geometry keeps D-pad traversal responsive on lower-power TV SoCs. The
     // border and subtle scale still provide an unmistakable Google TV-style focus treatment.
     val scale = if (focused) 1.04f else 1f
-    val shape = RoundedCornerShape(16.dp)
+    val shape = RelayShapeTokens.card
     val width = cardWidth ?: if (poster) 140.dp else 310.dp
     val artworkRequest = remember(item.artworkUrl, poster) {
         ImageRequest.Builder(context)
@@ -2469,7 +2470,7 @@ internal fun MediaCard(
             .requiredWidth(width).aspectRatio(if (poster) .69f else 1.78f)
             .scale(scale).clip(shape)
             .testTag("media-card-${item.contentKey()}")
-            .background(Color(0xFF141519))
+            .background(RelaySurfaceTokens.surface2)
             .border(if (focused) 2.dp else 1.dp, if (focused) ivory.copy(alpha = .78f) else Color.White.copy(alpha = .12f), shape)
             .then(if (upFocusRequester != null || downFocusRequester != null) Modifier.focusProperties {
                 if (upFocusRequester != null) up = upFocusRequester
@@ -2757,7 +2758,7 @@ internal fun LauncherAppIcon(
         modifier
             .size(iconSize)
             .clip(slotShape)
-            .background(if (focused) palette.accent.copy(alpha = .30f) else Color(0xFF242730))
+            .background(if (focused) palette.accent.copy(alpha = .30f) else RelaySurfaceTokens.surface4)
             .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .10f), slotShape),
         contentAlignment = Alignment.Center
     ) {

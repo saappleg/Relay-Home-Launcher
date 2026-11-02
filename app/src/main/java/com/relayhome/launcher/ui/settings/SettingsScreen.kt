@@ -70,7 +70,6 @@ import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -642,7 +641,7 @@ internal fun SettingsCategoryRoot(
 ) {
     Column(Modifier.fillMaxSize().padding(horizontal = 58.dp, vertical = 42.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Settings", color = ivory, fontSize = 34.sp, fontWeight = FontWeight.Light)
+            Text("Settings", color = ivory, fontSize = 34.sp, fontWeight = FontWeight.Light, fontFamily = relayDisplayFontFamily)
             Spacer(Modifier.weight(1f))
             ActionButton(
                 "Back to Home",
@@ -659,9 +658,9 @@ internal fun SettingsCategoryRoot(
             Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .clip(RoundedCornerShape(18.dp))
-                .background(Color(0xFF101218))
-                .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(18.dp))
+                .clip(RelayShapeTokens.panel)
+                .background(RelaySurfaceTokens.surface2)
+                .border(1.dp, RelaySurfaceTokens.outline.copy(alpha = .56f), RelayShapeTokens.panel)
                 .verticalScroll(scrollState)
                 .padding(30.dp)
                 .testTag("settings-category-root"),
@@ -710,9 +709,9 @@ private fun SettingsCategoryEntry(
             .focusRequester(focusRequester)
             .then(if (upFocusRequester != null) Modifier.focusProperties { up = upFocusRequester } else Modifier)
             .onFocusChanged { onFocused(it.hasFocus) }
-            .clip(RoundedCornerShape(14.dp))
-            .background(if (focused) palette.accent.copy(alpha = .20f) else Color(0xFF171A20))
-            .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .08f), RoundedCornerShape(14.dp))
+            .clip(RelayShapeTokens.control)
+            .background(if (focused) palette.accent.copy(alpha = .20f) else RelaySurfaceTokens.surface3)
+            .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else RelaySurfaceTokens.outline.copy(alpha = .56f), RelayShapeTokens.control)
             .semantics(mergeDescendants = true) {
                 contentDescription = "${category.label}. ${category.description}"
             }
@@ -752,7 +751,7 @@ internal fun SettingsCategoryDetail(
             )
             Spacer(Modifier.width(24.dp))
             Column {
-                Text(category.label, color = ivory, fontSize = 34.sp, fontWeight = FontWeight.Light)
+                Text(category.label, color = ivory, fontSize = 34.sp, fontWeight = FontWeight.Light, fontFamily = relayDisplayFontFamily)
                 Text(category.description, color = muted, fontSize = 14.sp)
             }
         }
@@ -761,9 +760,9 @@ internal fun SettingsCategoryDetail(
         Modifier
                 .fillMaxWidth()
                 .weight(1f)
-                .clip(RoundedCornerShape(18.dp))
-                .background(Color(0xFF101218))
-                .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(18.dp))
+                .clip(RelayShapeTokens.panel)
+                .background(RelaySurfaceTokens.surface2)
+                .border(1.dp, RelaySurfaceTokens.outline.copy(alpha = .56f), RelayShapeTokens.panel)
                 .verticalScroll(scrollState)
                 .padding(30.dp)
                 .testTag("settings-category-detail-${category.name}")
@@ -879,8 +878,8 @@ private fun HomeLayoutSettings(
     SettingsSectionTitle("Home layout", "Choose the Home style, arrange its rows, and adjust the hero banner.")
     Spacer(Modifier.height(20.dp))
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(Color(0xFF171A20))
-            .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(13.dp))
+        Modifier.fillMaxWidth().clip(RelayShapeTokens.control).background(RelaySurfaceTokens.surface3)
+            .border(1.dp, RelaySurfaceTokens.outline.copy(alpha = .56f), RelayShapeTokens.control)
             .padding(start = 16.dp, end = 10.dp, top = 12.dp, bottom = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -1049,8 +1048,8 @@ private fun HomeLayoutSettings(
     homeRowOrder.forEachIndexed { index, row ->
         key(row.name) {
             Row(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(Color(0xFF171A20))
-                    .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(13.dp))
+                Modifier.fillMaxWidth().clip(RelayShapeTokens.control).background(RelaySurfaceTokens.surface3)
+                    .border(1.dp, RelaySurfaceTokens.outline.copy(alpha = .56f), RelayShapeTokens.control)
                     .padding(start = 16.dp, end = 10.dp, top = 9.dp, bottom = 9.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
@@ -1205,8 +1204,8 @@ private fun AppsSettings(
                 items(matchingHiddenApps, key = { it.packageName }) { app ->
                 Row(
                     Modifier.fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(Color(0xFF171A20))
+                        .clip(RelayShapeTokens.control)
+                        .background(RelaySurfaceTokens.surface3)
                         .padding(horizontal = 14.dp, vertical = 9.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
@@ -1299,8 +1298,8 @@ private fun ProvidersAccountsSettings(
             }
         }
         Column(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(15.dp)).background(Color(0xFF171A20))
-                .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(15.dp)).padding(18.dp)
+            Modifier.fillMaxWidth().clip(RelayShapeTokens.card).background(RelaySurfaceTokens.surface3)
+                .border(1.dp, RelaySurfaceTokens.outline.copy(alpha = .56f), RelayShapeTokens.card).padding(18.dp)
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.size(9.dp).clip(CircleShape).background(provider.accent))
@@ -1309,7 +1308,7 @@ private fun ProvidersAccountsSettings(
                 Spacer(Modifier.weight(1f))
             }
             Spacer(Modifier.height(5.dp))
-            Text(status, color = if ((provider == Provider.NUVIO && nuvioSyncError != null) || (provider == Provider.STREMIO && stremioSyncError != null)) Provider.SMARTTUBE.accent else muted, fontSize = 14.sp)
+            Text(status, color = if ((provider == Provider.NUVIO && nuvioSyncError != null) || (provider == Provider.STREMIO && stremioSyncError != null)) RelayStatusColors.danger else muted, fontSize = 14.sp)
             Spacer(Modifier.height(15.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 ActionButton(
@@ -1544,7 +1543,7 @@ private fun ProfileSettings(
         modifier = Modifier.fillMaxWidth(),
         textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
     )
-    profileUrlError?.let { Text(it, color = Provider.SMARTTUBE.accent, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp)) }
+    profileUrlError?.let { Text(it, color = RelayStatusColors.danger, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp)) }
     Spacer(Modifier.height(10.dp))
     ActionButton("Use web image", palette, primary = false) {
         val uri = runCatching { Uri.parse(webProfileUrl.trim()) }.getOrNull()
@@ -1637,7 +1636,7 @@ private fun SubscriptionSettings(
                 itemsIndexed(visibleChannels, key = { _, item -> item.first }) { channelIndex, (channelId, channelName) ->
                     val visible = channelId !in hiddenSmartTubeChannels
                     Row(
-                        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFF171A20)).padding(horizontal = 14.dp, vertical = 10.dp),
+                        Modifier.fillMaxWidth().clip(RelayShapeTokens.control).background(RelaySurfaceTokens.surface3).padding(horizontal = 14.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(channelName, color = ivory, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
@@ -1705,8 +1704,8 @@ private fun WeatherWidgetsSettings(
     SettingsSectionTitle("Local weather", "Set a city to show the current temperature in the Home navigation. Leave it blank to hide weather.")
     Spacer(Modifier.height(20.dp))
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(13.dp)).background(Color(0xFF171A20))
-            .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(13.dp))
+        Modifier.fillMaxWidth().clip(RelayShapeTokens.control).background(RelaySurfaceTokens.surface3)
+            .border(1.dp, RelaySurfaceTokens.outline.copy(alpha = .56f), RelayShapeTokens.control)
             .padding(start = 16.dp, end = 10.dp, top = 12.dp, bottom = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -1783,7 +1782,7 @@ private fun RelaySettingsSwitch(
     testTag: String
 ) {
     var focused by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(12.dp)
+    val shape = RelayShapeTokens.control
     val focusedScale by animateFloatAsState(if (focused) 1.06f else 1f, label = "settings switch focus")
     Box(
         Modifier
@@ -1796,7 +1795,7 @@ private fun RelaySettingsSwitch(
                 when {
                     focused -> palette.accent.copy(alpha = .24f)
                     checked -> palette.accent.copy(alpha = .12f)
-                    else -> Color(0xFF202A36)
+                    else -> RelaySurfaceTokens.surface5
                 }
             )
             .border(
@@ -1804,7 +1803,7 @@ private fun RelaySettingsSwitch(
                 when {
                     focused -> palette.accent
                     checked -> palette.accent.copy(alpha = .78f)
-                    else -> Color.White.copy(alpha = .34f)
+                    else -> RelaySurfaceTokens.outline
                 },
                 shape
             )
@@ -1821,12 +1820,12 @@ private fun RelaySettingsSwitch(
             onCheckedChange = null,
             enabled = true,
             colors = SwitchDefaults.colors(
-                checkedThumbColor = Color(0xFF08131F),
+                checkedThumbColor = RelaySurfaceTokens.primaryForeground,
                 checkedTrackColor = palette.accent,
                 checkedBorderColor = palette.accent,
-                uncheckedThumbColor = Color(0xFFF1F5FA),
-                uncheckedTrackColor = Color(0xFF465466),
-                uncheckedBorderColor = Color(0xFFB8C6D8)
+                uncheckedThumbColor = ivory,
+                uncheckedTrackColor = RelaySurfaceTokens.surface5,
+                uncheckedBorderColor = RelaySurfaceTokens.outline
             )
         )
     }
@@ -1845,7 +1844,7 @@ private fun LauncherUpdateChannelOption(
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val focused by interactionSource.collectIsFocusedAsState()
-    val shape = RoundedCornerShape(22.dp)
+    val shape = RelayShapeTokens.panel
     Box(
         Modifier
             .widthIn(min = 190.dp)
@@ -1861,7 +1860,7 @@ private fun LauncherUpdateChannelOption(
                     selected && focused -> palette.accent
                     selected -> palette.accent.copy(alpha = .82f)
                     focused -> palette.accent.copy(alpha = .24f)
-                    else -> Color(0xFF293544)
+                    else -> RelaySurfaceTokens.surface5
                 }
             )
             .border(
@@ -1869,7 +1868,7 @@ private fun LauncherUpdateChannelOption(
                 when {
                     focused -> Color.White
                     selected -> palette.accent
-                    else -> Color.White.copy(alpha = .38f)
+                    else -> RelaySurfaceTokens.outline
                 },
                 shape
             )
@@ -1892,8 +1891,8 @@ private fun LauncherUpdateChannelOption(
                 Modifier
                     .size(20.dp)
                     .clip(CircleShape)
-                    .background(if (selected) Color(0xFF08131F) else Color.Transparent)
-                    .border(2.dp, if (selected) Color(0xFF08131F) else Color(0xFFE4ECF5), CircleShape),
+                    .background(if (selected) RelaySurfaceTokens.primaryForeground else Color.Transparent)
+                    .border(2.dp, if (selected) RelaySurfaceTokens.primaryForeground else ivory, CircleShape),
                 contentAlignment = Alignment.Center
             ) {
                 if (selected) {
@@ -1902,7 +1901,7 @@ private fun LauncherUpdateChannelOption(
             }
             Text(
                 label,
-                color = if (selected) Color(0xFF08131F) else ivory,
+                color = if (selected) RelaySurfaceTokens.primaryForeground else ivory,
                 fontSize = 16.sp,
                 fontWeight = FontWeight.SemiBold,
                 maxLines = 1,
@@ -2191,8 +2190,8 @@ private fun AdditionalMetadataKeyCard(
     onClear: () -> Unit
 ) {
     Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(15.dp)).background(Color(0xFF171A20))
-            .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(15.dp)).padding(20.dp)
+        Modifier.fillMaxWidth().clip(RelayShapeTokens.card).background(RelaySurfaceTokens.surface3)
+            .border(1.dp, RelaySurfaceTokens.outline.copy(alpha = .56f), RelayShapeTokens.card).padding(20.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(serviceName, color = ivory, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
@@ -2224,7 +2223,7 @@ private fun AdditionalMetadataKeyCard(
                 modifier = Modifier.fillMaxWidth().then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier),
                 textStyle = androidx.compose.ui.text.TextStyle(color = ivory)
             )
-            error?.let { Text(it, color = Provider.SMARTTUBE.accent, fontSize = 13.sp, modifier = Modifier.padding(top = 5.dp)) }
+            error?.let { Text(it, color = RelayStatusColors.danger, fontSize = 13.sp, modifier = Modifier.padding(top = 5.dp)) }
             status?.let { Text(it, color = palette.accent, fontSize = 13.sp, modifier = Modifier.padding(top = 5.dp)) }
             Spacer(Modifier.height(10.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -2268,9 +2267,9 @@ private fun MetadataKeyCard(
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(15.dp))
-            .background(Color(0xFF171A20))
-            .border(1.dp, Color.White.copy(alpha = .08f), RoundedCornerShape(15.dp))
+            .clip(RelayShapeTokens.card)
+            .background(RelaySurfaceTokens.surface3)
+            .border(1.dp, RelaySurfaceTokens.outline.copy(alpha = .56f), RelayShapeTokens.card)
             .padding(20.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -2344,7 +2343,7 @@ private fun MetadataKeyCard(
             if (error != null) {
                 Text(
                     error,
-                    color = Provider.SMARTTUBE.accent,
+                    color = RelayStatusColors.danger,
                     fontSize = 13.sp,
                     modifier = Modifier.padding(top = 6.dp).testTag("data-source-error-$serviceName")
                 )
@@ -2432,16 +2431,16 @@ private fun LauncherUpdatesSettings(
         else -> launcherDiagnostics.reason
     }
     Spacer(Modifier.height(20.dp))
-    Text("Choose a launcher mode", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
+    Text("Choose a launcher mode", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium, fontFamily = relayDisplayFontFamily)
     Spacer(Modifier.height(7.dp))
     Text("Select how Relay stays in front when Android TV tries to return to its stock launcher. You can change this choice at any time.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
     Spacer(Modifier.height(12.dp))
     Column(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(12.dp))
-            .background(Color(0xFF090B10))
-            .border(1.dp, Color.White.copy(alpha = .10f), RoundedCornerShape(12.dp))
+            .clip(RelayShapeTokens.control)
+            .background(RelaySurfaceTokens.surface1)
+            .border(1.dp, RelaySurfaceTokens.outline.copy(alpha = .56f), RelayShapeTokens.control)
             .padding(16.dp)
             .testTag("launcher-active-status")
     ) {
@@ -2449,7 +2448,7 @@ private fun LauncherUpdatesSettings(
         Spacer(Modifier.height(4.dp))
         Text(
             activeLauncherMode?.label ?: "No launcher mode verified",
-            color = if (activeLauncherMode != null) Color(0xFF65D68A) else Provider.SMARTTUBE.accent,
+            color = if (activeLauncherMode != null) RelayStatusColors.success else RelayStatusColors.danger,
             fontSize = 16.sp,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier.testTag("launcher-active-mode")
@@ -2476,7 +2475,7 @@ private fun LauncherUpdatesSettings(
             Spacer(Modifier.height(5.dp))
             Text(
                 if (activeLauncherMode == LauncherSetupMode.ADVANCED) "Active on this device" else if (selectedLauncherMode == LauncherSetupMode.ADVANCED) "Selected for setup" else "Available",
-                color = if (activeLauncherMode == LauncherSetupMode.ADVANCED) Color(0xFF65D68A) else palette.accent,
+                color = if (activeLauncherMode == LauncherSetupMode.ADVANCED) RelayStatusColors.success else palette.accent,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold
             )
@@ -2494,7 +2493,7 @@ private fun LauncherUpdatesSettings(
             Spacer(Modifier.height(5.dp))
             Text(
                 if (activeLauncherMode == LauncherSetupMode.COMPATIBILITY) "Active or recently observed" else if (selectedLauncherMode == LauncherSetupMode.COMPATIBILITY) "Selected for setup" else "Available",
-                color = if (activeLauncherMode == LauncherSetupMode.COMPATIBILITY) Color(0xFF65D68A) else palette.accent,
+                color = if (activeLauncherMode == LauncherSetupMode.COMPATIBILITY) RelayStatusColors.success else palette.accent,
                 fontSize = 12.sp,
                 fontWeight = FontWeight.SemiBold
             )
@@ -2516,7 +2515,7 @@ private fun LauncherUpdatesSettings(
             }
             shizukuMessage?.let { message ->
                 Spacer(Modifier.height(8.dp))
-                Text(message, color = if (message.startsWith("Could") || message.startsWith("Start")) Provider.SMARTTUBE.accent else palette.accent, fontSize = 13.sp, lineHeight = 18.sp)
+                Text(message, color = if (message.startsWith("Could") || message.startsWith("Start")) RelayStatusColors.danger else palette.accent, fontSize = 13.sp, lineHeight = 18.sp)
             }
             Spacer(Modifier.height(12.dp))
             ActionButton(
@@ -2567,10 +2566,10 @@ private fun LauncherUpdatesSettings(
         Spacer(Modifier.height(14.dp))
         Text("Override diagnostics", color = ivory, fontSize = 18.sp, fontWeight = FontWeight.Medium)
         Spacer(Modifier.height(7.dp))
-        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFF090B10)).border(1.dp, Color.White.copy(alpha = .10f), RoundedCornerShape(12.dp)).padding(16.dp)) {
+        Column(Modifier.fillMaxWidth().clip(RelayShapeTokens.control).background(RelaySurfaceTokens.surface1).border(1.dp, RelaySurfaceTokens.outline.copy(alpha = .56f), RelayShapeTokens.control).padding(16.dp)) {
             Text("Active strategy", color = muted, fontSize = 13.sp)
             Spacer(Modifier.height(4.dp))
-            Text(launcherDiagnostics.activeStrategy, color = if (relayIsDefault) Color(0xFF65D68A) else Provider.SMARTTUBE.accent, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+            Text(launcherDiagnostics.activeStrategy, color = if (relayIsDefault) RelayStatusColors.success else RelayStatusColors.danger, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             Spacer(Modifier.height(10.dp))
             Text("Why", color = muted, fontSize = 13.sp)
             Spacer(Modifier.height(4.dp))
@@ -2585,7 +2584,7 @@ private fun LauncherUpdatesSettings(
             }
             launcherDiagnostics.events.takeLast(8).asReversed().forEach { event ->
                 Spacer(Modifier.height(10.dp))
-                Text("${LauncherOverrideStrategy.label(event.strategy)} · ${event.phase} · ${event.outcome}", color = if (event.outcome == "failure") Provider.SMARTTUBE.accent else palette.accent, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Text("${LauncherOverrideStrategy.label(event.strategy)} · ${event.phase} · ${event.outcome}", color = if (event.outcome == "failure") RelayStatusColors.danger else palette.accent, fontSize = 13.sp, fontWeight = FontWeight.Medium)
                 val eventDetail = listOfNotNull(event.cause?.let { "Cause: $it" }, event.observedHome?.let { "Observed: $it" }, event.command?.let { "Command: $it" }).joinToString(" · ")
                 if (eventDetail.isNotBlank()) {
                     Spacer(Modifier.height(2.dp))
@@ -2601,9 +2600,9 @@ private fun LauncherUpdatesSettings(
             Spacer(Modifier.height(10.dp))
             Column(
                 Modifier.fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0xFF090B10))
-                    .border(1.dp, Color.White.copy(alpha = .10f), RoundedCornerShape(12.dp))
+                    .clip(RelayShapeTokens.control)
+                    .background(RelaySurfaceTokens.surface1)
+                    .border(1.dp, RelaySurfaceTokens.outline.copy(alpha = .56f), RelayShapeTokens.control)
                     .padding(16.dp)
                     .testTag("recoverable-operation-errors")
             ) {
@@ -2623,9 +2622,9 @@ private fun LauncherUpdatesSettings(
             Spacer(Modifier.height(10.dp))
             Column(
                 Modifier.fillMaxWidth()
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(Color(0xFF090B10))
-                    .border(1.dp, Color.White.copy(alpha = .10f), RoundedCornerShape(12.dp))
+                    .clip(RelayShapeTokens.control)
+                    .background(RelaySurfaceTokens.surface1)
+                    .border(1.dp, RelaySurfaceTokens.outline.copy(alpha = .56f), RelayShapeTokens.control)
                     .padding(16.dp)
                     .testTag("last-process-crash")
             ) {
@@ -2645,7 +2644,7 @@ private fun LauncherUpdatesSettings(
         Spacer(Modifier.height(7.dp))
         Text("Use this only when the TV ignores the verified Shizuku override. The command is precise and reversible.", color = muted, fontSize = 14.sp, lineHeight = 20.sp)
         Spacer(Modifier.height(12.dp))
-        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFF090B10)).border(1.dp, Color.White.copy(alpha = .10f), RoundedCornerShape(12.dp)).padding(16.dp)) {
+        Column(Modifier.fillMaxWidth().clip(RelayShapeTokens.control).background(RelaySurfaceTokens.surface1).border(1.dp, RelaySurfaceTokens.outline.copy(alpha = .56f), RelayShapeTokens.control).padding(16.dp)) {
             val override = stockLauncherOverride
             Text("1. Enable Developer options and USB debugging on the TV.", color = ivory, fontSize = 14.sp)
             Spacer(Modifier.height(7.dp))
@@ -2753,7 +2752,7 @@ private fun LauncherUpdatesSettings(
     }
     availableRelease?.let { release ->
         Spacer(Modifier.height(16.dp))
-        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color(0xFF090B10)).border(1.dp, Color.White.copy(alpha = .10f), RoundedCornerShape(12.dp)).padding(16.dp)) {
+        Column(Modifier.fillMaxWidth().clip(RelayShapeTokens.control).background(RelaySurfaceTokens.surface1).border(1.dp, RelaySurfaceTokens.outline.copy(alpha = .56f), RelayShapeTokens.control).padding(16.dp)) {
             Text("Ready to install: ${release.title}", color = ivory, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
             if (release.notes.isNotBlank()) {
                 Spacer(Modifier.height(6.dp))
@@ -2854,9 +2853,9 @@ internal fun SystemSettingsTile(
                 if (leftFocusRequester != null) left = leftFocusRequester
                 if (rightFocusRequester != null) right = rightFocusRequester
             } else Modifier)
-            .fillMaxWidth().heightIn(min = 74.dp).scale(scale).clip(RoundedCornerShape(16.dp))
-            .background(if (focused) palette.accent.copy(alpha = .20f) else Color(0xFF171A20))
-            .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else Color.White.copy(alpha = .09f), RoundedCornerShape(16.dp))
+            .fillMaxWidth().heightIn(min = 74.dp).scale(scale).clip(RelayShapeTokens.card)
+            .background(if (focused) palette.accent.copy(alpha = .20f) else RelaySurfaceTokens.surface3)
+            .border(if (focused) 2.dp else 1.dp, if (focused) palette.accent else RelaySurfaceTokens.outline.copy(alpha = .56f), RelayShapeTokens.card)
             // The visible symbol is only decorative. Expose one stable, user-facing
             // announcement for the whole tile instead of making TalkBack read both the
             // abbreviation and the setting label as separate controls.
@@ -2871,7 +2870,7 @@ internal fun SystemSettingsTile(
         Box(
             Modifier
                 .size(44.dp)
-                .clip(RoundedCornerShape(13.dp))
+                .clip(RelayShapeTokens.control)
                 .background(palette.accent.copy(alpha = .24f))
                 .clearAndSetSemantics {},
             contentAlignment = Alignment.Center
@@ -2884,7 +2883,7 @@ internal fun SystemSettingsTile(
 
 @Composable
 internal fun SettingsSectionTitle(title: String, description: String) {
-    Text(title, color = ivory, fontSize = 25.sp, fontWeight = FontWeight.Light)
+    Text(title, color = ivory, fontSize = 25.sp, fontWeight = FontWeight.Light, fontFamily = relayDisplayFontFamily)
     Spacer(Modifier.height(8.dp))
     Text(description, color = muted, fontSize = 15.sp, lineHeight = 22.sp)
 }

@@ -68,7 +68,6 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -216,7 +215,7 @@ internal fun SearchScreen(
     BackHandler(onBack = onBackHome)
     Column(Modifier.fillMaxSize().verticalScroll(searchScreenState).padding(horizontal = RelayTvMargins.screenHorizontal, vertical = 42.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Search", color = ivory, fontSize = 38.sp, fontWeight = FontWeight.Light)
+            Text("Search", color = ivory, fontSize = 38.sp, fontWeight = FontWeight.Light, fontFamily = relayDisplayFontFamily)
             Spacer(Modifier.width(18.dp))
             Text("Across your connected media", color = muted, fontSize = 16.sp)
             Spacer(Modifier.weight(1f))
@@ -291,7 +290,7 @@ internal fun SearchScreen(
                     },
                 colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
                     focusedBorderColor = searchProvider.accent,
-                    unfocusedBorderColor = Color(0xFF3C4049),
+                    unfocusedBorderColor = RelaySurfaceTokens.outline,
                     focusedLabelColor = searchProvider.accent,
                     unfocusedLabelColor = muted,
                     cursorColor = searchProvider.accent
@@ -299,7 +298,7 @@ internal fun SearchScreen(
             )
         }
         Spacer(Modifier.height(24.dp))
-        Text(if (query.isBlank()) "Start typing to search ${searchProvider.label}" else "Results for “$query”", color = ivory, fontSize = 21.sp, fontWeight = FontWeight.Medium)
+        Text(if (query.isBlank()) "Start typing to search ${searchProvider.label}" else "Results for “$query”", color = ivory, fontSize = 21.sp, fontWeight = FontWeight.Medium, fontFamily = relayDisplayFontFamily)
         Spacer(Modifier.height(13.dp))
         if (hasRecentSearches) {
             Row(
@@ -369,7 +368,7 @@ internal fun SearchScreen(
             ) { recordSearch().takeIf { it.isNotBlank() }?.let { ProviderHandoff.search(context, searchProvider, it) } }
         }
         Spacer(Modifier.height(30.dp))
-        Text("Apps", color = ivory, fontSize = 21.sp, fontWeight = FontWeight.Medium)
+        Text("Apps", color = ivory, fontSize = 21.sp, fontWeight = FontWeight.Medium, fontFamily = relayDisplayFontFamily)
         Spacer(Modifier.height(13.dp))
         LazyRow(
             horizontalArrangement = Arrangement.spacedBy(13.dp),

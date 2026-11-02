@@ -13,7 +13,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -39,9 +38,12 @@ import com.google.zxing.EncodeHintType
 import com.google.zxing.MultiFormatWriter
 import com.relayhome.launcher.ui.home.ActionButton
 import com.relayhome.launcher.ui.shared.RelayPalette
+import com.relayhome.launcher.ui.shared.RelayShapeTokens
 import com.relayhome.launcher.ui.shared.RelayTvMargins
 import com.relayhome.launcher.ui.shared.ivory
 import com.relayhome.launcher.ui.shared.midnight
+import com.relayhome.launcher.ui.shared.muted
+import com.relayhome.launcher.ui.shared.relayDisplayFontFamily
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -70,11 +72,11 @@ internal fun StremioConnectScreen(
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Text("Connect Stremio", color = ivory, fontSize = 36.sp, fontWeight = FontWeight.Light)
+        Text("Connect Stremio", color = ivory, fontSize = 36.sp, fontWeight = FontWeight.Light, fontFamily = relayDisplayFontFamily)
         Spacer(Modifier.height(12.dp))
         Text(
             "Scan this code with your phone to link your Stremio account. Relay reads your saved library for recommendations and keeps the account key encrypted on this device.",
-            color = Color(0xFFACB1BC), fontSize = 17.sp, textAlign = TextAlign.Center
+            color = muted, fontSize = 17.sp, textAlign = TextAlign.Center
         )
         Spacer(Modifier.height(24.dp))
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
@@ -85,11 +87,11 @@ internal fun StremioConnectScreen(
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     message ?: if (loading) "Preparing secure pairing…" else "Pairing is ready.",
-                    color = Color(0xFFACB1BC), fontSize = 17.sp, textAlign = TextAlign.Center
+                    color = muted, fontSize = 17.sp, textAlign = TextAlign.Center
                 )
                 if (!link.isNullOrBlank()) {
                     Spacer(Modifier.height(8.dp))
-                    Text(link, color = Color(0xFF777F8E), fontSize = 12.sp, textAlign = TextAlign.Center)
+                    Text(link, color = muted.copy(alpha = .78f), fontSize = 12.sp, textAlign = TextAlign.Center)
                 }
                 Spacer(Modifier.height(18.dp))
                 ActionButton(
@@ -125,11 +127,11 @@ private fun StremioQrCode(payload: String) {
     val bitmap = bitmapState.value
     if (bitmap == null) {
         androidx.compose.foundation.layout.Box(
-            Modifier.size(300.dp).clip(RoundedCornerShape(12.dp)).background(Color.White),
+            Modifier.size(300.dp).clip(RelayShapeTokens.control).background(Color.White),
             contentAlignment = Alignment.Center
         ) { Text("QR unavailable", color = midnight, fontSize = 18.sp) }
     } else {
-        Image(BitmapPainter(bitmap), "Stremio account pairing QR code", Modifier.size(300.dp).clip(RoundedCornerShape(12.dp)))
+        Image(BitmapPainter(bitmap), "Stremio account pairing QR code", Modifier.size(300.dp).clip(RelayShapeTokens.control))
     }
 }
 

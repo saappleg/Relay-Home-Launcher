@@ -67,7 +67,6 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -196,7 +195,7 @@ internal fun CalendarScreen(
     }
     Column(Modifier.fillMaxSize().padding(horizontal = RelayTvMargins.screenHorizontal, vertical = 42.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Calendar", color = ivory, fontSize = 38.sp, fontWeight = FontWeight.Light)
+            Text("Calendar", color = ivory, fontSize = 38.sp, fontWeight = FontWeight.Light, fontFamily = relayDisplayFontFamily)
             Spacer(Modifier.width(16.dp))
             Text("Premieres & episodes from your connected libraries", color = muted, fontSize = 16.sp)
             Spacer(Modifier.weight(1f))
@@ -226,7 +225,7 @@ internal fun CalendarScreen(
             Text(
                 if (weekView) "${weekStart.month.name.lowercase().replaceFirstChar { it.uppercase() }} ${weekStart.dayOfMonth} – ${weekStart.plusDays(6).month.name.lowercase().replaceFirstChar { it.uppercase() }} ${weekStart.plusDays(6).dayOfMonth}, ${weekStart.year}"
                 else "${month.month.name.lowercase().replaceFirstChar { it.uppercase() }} ${month.year}",
-                color = ivory, fontSize = 25.sp, fontWeight = FontWeight.Light
+                color = ivory, fontSize = 25.sp, fontWeight = FontWeight.Light, fontFamily = relayDisplayFontFamily
             )
             Spacer(Modifier.width(14.dp))
             ActionButton("›", palette, primary = false, accessibilityLabel = "Next period") {
@@ -270,7 +269,7 @@ internal fun CalendarScreen(
             }
         }
         Spacer(Modifier.height(24.dp))
-        Text(if (weekView) "This week" else "This month", color = ivory, fontSize = 19.sp, fontWeight = FontWeight.Medium)
+        Text(if (weekView) "This week" else "This month", color = ivory, fontSize = 19.sp, fontWeight = FontWeight.Medium, fontFamily = relayDisplayFontFamily)
         Spacer(Modifier.height(10.dp))
         if (visibleEntries.isEmpty()) {
             Text(if (scheduleLoading) "Looking up exact premiere and episode dates…" else "No scheduled events for this month. Nuvio library titles are supplemented with exact TMDB dates; Stremio and ${Provider.SMARTTUBE.label} will join as their schedule data becomes available.", color = muted, fontSize = 15.sp, lineHeight = 22.sp)
@@ -309,7 +308,7 @@ internal fun CalendarDayCell(
 ) {
     var focused by remember { mutableStateOf(false) }
     val event = dayEvents.firstOrNull()
-    val shape = RoundedCornerShape(10.dp)
+    val shape = RelayShapeTokens.compact
     val focusedScale by animateFloatAsState(if (focused) 1.06f else 1f, label = "calendar day focus")
     Box(
         modifier = Modifier
@@ -323,7 +322,7 @@ internal fun CalendarDayCell(
                 when {
                     focused -> palette.accent.copy(alpha = .34f)
                     event != null -> palette.accent.copy(alpha = .24f)
-                    else -> Color.White.copy(alpha = .045f)
+                    else -> RelaySurfaceTokens.surface2
                 }
             )
             .border(
@@ -375,9 +374,9 @@ internal fun CalendarDayOverlay(
         withFrameNanos { }
         firstFocusRequester.requestFocus()
     }
-    Box(Modifier.fillMaxSize().background(midnight.copy(alpha = .84f)), contentAlignment = Alignment.Center) {
-        Column(Modifier.width(720.dp).clip(RoundedCornerShape(22.dp)).background(Color(0xFF15121C)).border(1.dp, palette.accent.copy(alpha = .65f), RoundedCornerShape(22.dp)).padding(30.dp)) {
-            Text(formatRelayDate(date, dateFormat), color = ivory, fontSize = 27.sp, fontWeight = FontWeight.Light)
+    Box(Modifier.fillMaxSize().background(RelaySurfaceTokens.surface0.copy(alpha = .84f)), contentAlignment = Alignment.Center) {
+        Column(Modifier.width(720.dp).clip(RelayShapeTokens.panel).background(RelaySurfaceTokens.surface3).border(1.dp, RelaySurfaceTokens.outline.copy(alpha = .65f), RelayShapeTokens.panel).padding(30.dp)) {
+            Text(formatRelayDate(date, dateFormat), color = ivory, fontSize = 27.sp, fontWeight = FontWeight.Light, fontFamily = relayDisplayFontFamily)
             Spacer(Modifier.height(8.dp))
             Text(if (entries.size == 1) "New episode or premiere" else "${entries.size} shows to watch", color = muted, fontSize = 15.sp)
             Spacer(Modifier.height(24.dp))

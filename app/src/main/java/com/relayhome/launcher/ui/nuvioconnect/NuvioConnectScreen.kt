@@ -66,7 +66,6 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -255,7 +254,7 @@ internal fun NuvioConnectScreen(
         if (qrSession == null) emailFocusRequester.requestFocus()
     }
     Column(Modifier.fillMaxSize().padding(horizontal = RelayTvMargins.screenHorizontal, vertical = 48.dp), verticalArrangement = Arrangement.Center) {
-        Text("Connect Nuvio", color = ivory, fontSize = 42.sp, fontWeight = FontWeight.Light)
+        Text("Connect Nuvio", color = ivory, fontSize = 42.sp, fontWeight = FontWeight.Light, fontFamily = relayDisplayFontFamily)
         Spacer(Modifier.height(12.dp))
         Text(
             when {
@@ -319,13 +318,13 @@ internal fun NuvioConnectScreen(
                     qrStartRequested = true
                 }
             }
-            status?.let { Text(it, color = muted, modifier = Modifier.padding(top = 12.dp), maxLines = 2, overflow = TextOverflow.Ellipsis) }
+            status?.let { Text(it, color = RelayStatusColors.danger, modifier = Modifier.padding(top = 12.dp), maxLines = 2, overflow = TextOverflow.Ellipsis) }
         } else {
             val session = checkNotNull(qrSession)
             Row(horizontalArrangement = Arrangement.spacedBy(28.dp), verticalAlignment = Alignment.CenterVertically) {
                 NuvioQrCode(session.verificationUrl)
                 Column(Modifier.widthIn(max = 520.dp)) {
-                    Text("Scan to connect", color = ivory, fontSize = 25.sp, fontWeight = FontWeight.Medium)
+                    Text("Scan to connect", color = ivory, fontSize = 25.sp, fontWeight = FontWeight.Medium, fontFamily = relayDisplayFontFamily)
                     Spacer(Modifier.height(8.dp))
                     Text("Open your phone camera, scan this code, and approve Relay Home in Nuvio.", color = muted, fontSize = 16.sp, lineHeight = 22.sp)
                     Spacer(Modifier.height(16.dp))
@@ -385,7 +384,7 @@ internal fun NuvioQrCode(payload: String) {
     val readyBitmap = bitmap
     if (readyBitmap == null) {
         Box(
-            Modifier.size(320.dp).clip(RoundedCornerShape(12.dp)).background(Color.White),
+            Modifier.size(320.dp).clip(RelayShapeTokens.control).background(Color.White),
             contentAlignment = Alignment.Center
         ) {
             Text("QR unavailable", color = Color.Black, fontSize = 18.sp)
@@ -394,7 +393,7 @@ internal fun NuvioQrCode(payload: String) {
         Image(
             painter = BitmapPainter(readyBitmap),
             contentDescription = "Nuvio QR login code",
-            modifier = Modifier.size(320.dp).clip(RoundedCornerShape(12.dp))
+            modifier = Modifier.size(320.dp).clip(RelayShapeTokens.control)
         )
     }
 }

@@ -66,7 +66,6 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
@@ -177,7 +176,7 @@ internal fun ProviderHubScreen(
     }
     BackHandler(onBack = onBack)
     Column(Modifier.fillMaxSize().padding(RelayTvMargins.screenHorizontal), verticalArrangement = Arrangement.Center) {
-        Text(provider.label, color = ivory, fontSize = 42.sp, fontWeight = FontWeight.Light)
+        Text(provider.label, color = ivory, fontSize = 42.sp, fontWeight = FontWeight.Light, fontFamily = relayDisplayFontFamily)
         Spacer(Modifier.height(12.dp))
         Text(
             when (provider) {
