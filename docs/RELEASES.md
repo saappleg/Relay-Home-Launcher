@@ -62,10 +62,32 @@ code 33 and has SHA-256
 `c887c334b93756422010aa3514e8d749cafc9b18f59479984c67cda00bde3094`; its tag
 points to `11be5a7bccd2dc913d437e933c19e3053c69b5d9`.
 
+## Published beta.14 verification
+
+[v0.1.0-beta.14](https://github.com/saappleg/Relay-Home-Launcher/releases/tag/v0.1.0-beta.14)
+is the latest published prerelease. Its signed APK is
+`relay-home-0.1.0-beta.14.apk`:
+
+- workflow: [GitHub Actions run 41388936473](https://github.com/saappleg/Relay-Home-Launcher/actions/runs/41388936473);
+- tag target: `cf28df143b3ca462ec40a0d069457c8f25a76c10`;
+- package/version: `com.relayhome.launcher`, `0.1.0-beta.14`, versionCode `37`;
+- asset SHA-256: `25fcbc353362220a9620c3bad355c5a354cecb0fd4ecf9a9bc4f642f224cf3a6`;
+- production signing certificate SHA-256:
+  `4da8c2767f2e47a8a95c74bda80e9349c4e5b1b0e8fdb2b52d3bd0775d68bc21`.
+
+The release is non-draft and marked as a prerelease. GitHub reports one signed
+APK asset with the digest above. The isolated Android TV emulator suite passed
+all 117 instrumentation tests, including Settings root-focus restoration and
+entry into the Apps category. Beta.14 applies Atomize typography and surface
+tokens across the launcher, includes licensed Open Sauce Two and Radio Canada
+Big fonts, and keeps dynamic accent text contrast above the accessibility
+minimum.
+
 ## Published beta.13 verification
 
 [v0.1.0-beta.13](https://github.com/saappleg/Relay-Home-Launcher/releases/tag/v0.1.0-beta.13)
-is the latest published prerelease. Its signed APK is `relay-home-0.1.0-beta.13.apk`:
+was the latest published prerelease before beta.14. Its signed APK is
+`relay-home-0.1.0-beta.13.apk`:
 
 - workflow: [GitHub Actions run 36276996849](https://github.com/saappleg/Relay-Home-Launcher/actions/runs/36276996849);
 - tag target: `69ef1eb7280e9d3b8cf9531d7750a09a77a02fd1`;
